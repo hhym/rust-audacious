@@ -1,4 +1,6 @@
-# audacious-rs
+# rust-audacious
+
+Audacious 内核的 Rust 重写。二进制名沿用原版命名：`audacious-rs`（播放器）与 `audtool`（命令行控制）。
 
 [Audacious](https://github.com/hhym/audacious) 内核的 Rust 重写：把原来 C/C++ 的
 `libaudcore` + GTK 界面 + `audtool` 三件套，用 Rust 重新实现成一个单二进制的
