@@ -15,7 +15,14 @@ use std::time::{Duration, Instant};
 
 use audcore::spectrum::SpectrumBuffer;
 use audcore::{Config, Playlist};
-use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
+use rodio::source::SeekError;
+use rodio::{OutputStream, OutputStreamHandle, Sink, Source};
+use symphonia::core::audio::{SampleBuffer, SignalSpec};
+use symphonia::core::codecs::{Decoder as SymDecoder, DecoderOptions};
+use symphonia::core::formats::{FormatOptions, FormatReader, SeekTo};
+use symphonia::core::io::MediaSourceStream;
+use symphonia::core::meta::MetadataOptions;
+use symphonia::core::probe::Hint;
 use serde::{Deserialize, Serialize};
 
 use crate::effects::{EqSettings, EqSource, TapSource};
@@ -172,6 +179,159 @@ impl Shared {
     }
 }
 
+/// 基于 symphonia 的自有解码源。
+///
+/// 不用 rodio 自带的 `Decoder`：它把输入包成 `byte_len()` 未知的适配器，
+/// MP4/M4A（iTunes 试听、常见在线音源）因此在探测阶段就触发 SeekError 崩溃。
+/// 这里直接把 `File` 交给 symphonia（它知道文件长度），并实现 `Source`。
+struct SymSource {
+    format: Box<dyn FormatReader>,
+    decoder: Box<dyn SymDecoder>,
+    track_id: u32,
+    spec: SignalSpec,
+    buffer: Vec<i16>,
+    index: usize,
+    finished: bool,
+    duration: Option<Duration>,
+}
+
+impl SymSource {
+    fn open(path: &Path) -> anyhow::Result<SymSource> {
+        let file = std::fs::File::open(path)?;
+        let mss = MediaSourceStream::new(Box::new(file), Default::default());
+        let mut hint = Hint::new();
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            hint.with_extension(ext);
+        }
+        let probed = symphonia::default::get_probe().format(
+            &hint,
+            mss,
+            &FormatOptions {
+                enable_gapless: true,
+                ..Default::default()
+            },
+            &MetadataOptions::default(),
+        )?;
+        let track = probed
+            .format
+            .default_track()
+            .ok_or_else(|| anyhow::anyhow!("没有音频轨道"))?;
+        let track_id = track.id;
+        let params = track.codec_params.clone();
+        let decoder = symphonia::default::get_codecs().make(&params, &DecoderOptions::default())?;
+        let duration = params
+            .time_base
+            .zip(params.n_frames)
+            .map(|(base, frames)| base.calc_time(frames))
+            .map(|t| Duration::from_secs_f64(t.seconds as f64 + t.frac));
+
+        let fallback_rate = params.sample_rate.unwrap_or(44100);
+        let fallback_channels = params
+            .channels
+            .unwrap_or(symphonia::core::audio::Channels::FRONT_LEFT
+                | symphonia::core::audio::Channels::FRONT_RIGHT);
+
+        let mut source = SymSource {
+            format: probed.format,
+            decoder,
+            track_id,
+            spec: SignalSpec::new(fallback_rate, fallback_channels),
+            buffer: Vec::new(),
+            index: 0,
+            finished: false,
+            duration,
+        };
+        source.fill();
+        Ok(source)
+    }
+
+    /// 解一个包填进缓冲区；返回 false 表示已到结尾。
+    fn fill(&mut self) -> bool {
+        if self.finished {
+            return false;
+        }
+        loop {
+            let packet = match self.format.next_packet() {
+                Ok(packet) => packet,
+                Err(_) => {
+                    self.finished = true;
+                    return false;
+                }
+            };
+            if packet.track_id() != self.track_id {
+                continue;
+            }
+            match self.decoder.decode(&packet) {
+                Ok(decoded) => {
+                    self.spec = *decoded.spec();
+                    let capacity = decoded.capacity() as u64;
+                    let mut samples = SampleBuffer::<i16>::new(capacity, self.spec);
+                    samples.copy_interleaved_ref(decoded);
+                    self.buffer.clear();
+                    self.buffer.extend_from_slice(samples.samples());
+                    self.index = 0;
+                    return true;
+                }
+                Err(_) => continue,
+            }
+        }
+    }
+}
+
+impl Iterator for SymSource {
+    type Item = i16;
+
+    fn next(&mut self) -> Option<i16> {
+        loop {
+            if self.index < self.buffer.len() {
+                let sample = self.buffer[self.index];
+                self.index += 1;
+                return Some(sample);
+            }
+            if !self.fill() {
+                return None;
+            }
+        }
+    }
+}
+
+impl Source for SymSource {
+    fn current_frame_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> u16 {
+        self.spec.channels.count() as u16
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.spec.rate
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        self.duration
+    }
+
+    fn try_seek(&mut self, pos: Duration) -> Result<(), SeekError> {
+        let seeked = self
+            .format
+            .seek(
+                symphonia::core::formats::SeekMode::Accurate,
+                SeekTo::Time {
+                    time: pos.as_secs_f64().into(),
+                    track_id: Some(self.track_id),
+                },
+            )
+            .map_err(|e| SeekError::Other(Box::new(e)))?;
+        let _ = seeked;
+        self.finished = false;
+        self.buffer.clear();
+        self.index = 0;
+        self.fill();
+        Ok(())
+    }
+}
+
 /// 无设备时的静音解码器，按实时速度喂频谱。
 struct NullPlayer {
     stop: Arc<AtomicBool>,
@@ -186,8 +346,7 @@ struct NullPlayer {
 
 impl NullPlayer {
     fn start(path: PathBuf, spectrum: Arc<Mutex<SpectrumBuffer>>) -> anyhow::Result<NullPlayer> {
-        let file = std::fs::File::open(&path)?;
-        let mut decoder = Decoder::new(file)?;
+        let mut decoder = SymSource::open(&path)?;
         let rate = decoder.sample_rate().max(1);
         let channels = decoder.channels().max(1) as usize;
         let length = decoder
@@ -537,6 +696,15 @@ impl Engine {
         };
         let Some(entry) = entry else { return };
 
+        // 在线音源：先落到本地缓存，再走正常的解码路径
+        let media_path = match local_media_path(&entry.path) {
+            Ok(path) => path,
+            Err(err) => {
+                self.fail(&entry.title, &format!("无法获取在线音源：{err}"));
+                return;
+            }
+        };
+
         if let Some(old) = self.sink.take() {
             old.stop();
         }
@@ -556,7 +724,7 @@ impl Engine {
         let format;
         let message;
 
-        match self.try_device_start(&entry.path) {
+        match self.try_device_start(&media_path) {
             Ok((sink, info)) => {
                 self.sink = Some(sink);
                 sample_rate = info.sample_rate;
@@ -568,11 +736,11 @@ impl Engine {
             Err(err) => {
                 // 设备失败 → 静音解码兜底
                 log::warn!("音频输出不可用（{err}），改用静音解码");
-                match NullPlayer::start(entry.path.clone(), self.spectrum.clone()) {
+                match NullPlayer::start(media_path.clone(), self.spectrum.clone()) {
                     Ok(player) => {
                         sample_rate = player.rate;
                         length = tagged_length(&entry, player.length);
-                        format = path_format(&entry.path);
+                        format = path_format(&media_path);
                         message = format!("静音解码（无音频设备）：{}", entry.display_title());
                         self.null = Some(player);
                     }
@@ -612,8 +780,7 @@ impl Engine {
             anyhow::bail!("没有音频输出设备");
         };
 
-        let file = std::fs::File::open(path)?;
-        let decoder = Decoder::new(file)?;
+        let decoder = SymSource::open(path)?;
         let sample_rate = decoder.sample_rate();
         let length = decoder
             .total_duration()
@@ -699,6 +866,15 @@ struct StreamInfo {
 }
 
 /// 标签里的时长更可信（rodio 对部分 wav 头会算错）。
+/// 本地文件直接用；`http(s)://` 开头的先下载到缓存。
+fn local_media_path(path: &Path) -> anyhow::Result<PathBuf> {
+    let text = path.to_string_lossy();
+    if text.starts_with("http://") || text.starts_with("https://") {
+        return audplugins::fetch_to_cache(&text);
+    }
+    Ok(path.to_path_buf())
+}
+
 fn tagged_length(entry: &audcore::Entry, decoder_len: f64) -> f64 {
     match entry.length {
         Some(v) if v > 0.5 => v,

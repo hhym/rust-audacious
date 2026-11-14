@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/audcore", "crates/audacious", "crates/audtool"]
+members = ["crates/audcore", "crates/audplugins", "crates/audacious", "crates/audtool"]
 
 [workspace.package]
-version = "5.1.0"
+version = "5.2.0"
 edition = "2021"
 license = "BSD-2-Clause"
 

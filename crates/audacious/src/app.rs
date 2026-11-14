@@ -4,6 +4,7 @@
 //! Now Playing 信息带（封面 + 频谱）/ 状态栏；迷你模式下只保留信息带。
 
 use std::path::PathBuf;
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use audcore::{plugin, Config, Playlist, RepeatMode};
@@ -94,6 +95,23 @@ pub struct App {
     /// 主题按钮的位置（菜单贴着它弹出）
     theme_button_rect: Option<egui::Rect>,
     plugins: Vec<audcore::plugin::PluginInfo>,
+    /// 在线插件（MusicFree 标准）
+    media_plugins: Vec<audplugins::Plugin>,
+    show_search: bool,
+    search_plugin: usize,
+    search_query: String,
+    search_results: Vec<serde_json::Value>,
+    search_status: SearchStatus,
+    search_rx: Option<Receiver<Result<Vec<serde_json::Value>, String>>>,
+    /// 在线歌曲解析结果：item + 播放地址
+    resolve_rx: Option<Receiver<Result<(serde_json::Value, String, bool), String>>>,    
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum SearchStatus {
+    Idle,
+    Busy,
+    Error(String),
 }
 
 impl App {
@@ -126,8 +144,17 @@ impl App {
             theme_menu_open: false,
             theme_button_rect: None,
             plugins: Vec::new(),
+            media_plugins: Vec::new(),
+            show_search: false,
+            search_plugin: 0,
+            search_query: String::new(),
+            search_results: Vec::new(),
+            search_status: SearchStatus::Idle,
+            search_rx: None,
+            resolve_rx: None,
         };
         app.plugins = app.collect_plugins();
+        app.reload_media_plugins();
 
         // 调试用：AUDACIOUS_DEBUG_WINDOWS=eq,settings,plugins,browser,about
         // 启动时打开指定窗口，方便截图与自动化验收。
@@ -137,6 +164,7 @@ impl App {
                     "eq" => app.show_eq = true,
                     "settings" => app.show_settings = true,
                     "plugins" => app.show_plugins = true,
+                    "search" => app.show_search = true,
                     "about" => app.show_about = true,
                     "browser" => {
                         let dir = app
@@ -269,6 +297,7 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.sync();
+        self.poll_media_channels();
 
         if self.config.mini != self.mini_applied {
             self.mini_applied = self.config.mini;
@@ -325,6 +354,7 @@ impl eframe::App for App {
         self.settings_ui(ctx, &p);
         self.eq_ui(ctx, &p);
         self.plugins_ui(ctx, &p);
+        self.search_ui(ctx, &p);
         self.about_ui(ctx, &p);
 
         let pending = self.browser_ui(ctx, &p);
@@ -1266,6 +1296,270 @@ impl App {
         }
     }
 
+    // ---------------------------------------------------------- 在线插件
+
+    fn reload_media_plugins(&mut self) {
+        let dir = audplugins::plugins_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        self.media_plugins = audplugins::discover(&dir);
+        if self.search_plugin >= self.media_plugins.len() {
+            self.search_plugin = 0;
+        }
+    }
+
+    fn poll_media_channels(&mut self) {
+        if let Some(rx) = &self.search_rx {
+            match rx.try_recv() {
+                Ok(Ok(items)) => {
+                    self.search_results = items;
+                    self.search_status = SearchStatus::Idle;
+                    self.search_rx = None;
+                }
+                Ok(Err(err)) => {
+                    self.search_results.clear();
+                    self.search_status = SearchStatus::Error(err);
+                    self.search_rx = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.search_status = SearchStatus::Error("搜索线程异常结束".into());
+                    self.search_rx = None;
+                }
+            }
+        }
+
+        if let Some(rx) = &self.resolve_rx {
+            match rx.try_recv() {
+                Ok(Ok((item, url, play_now))) => {
+                    self.resolve_rx = None;
+                    let entry = remote_entry(&item, &url);
+                    let title = entry.display_title();
+                    let index = {
+                        let Ok(mut pl) = self.shared.playlist.lock() else {
+                            return;
+                        };
+                        pl.add(entry)
+                    };
+                    self.shared.send(Cmd::Refresh);
+                    if play_now {
+                        self.shared.send(Cmd::PlayIndex(index));
+                        self.toast(format!("正在播放 {title}"));
+                    } else {
+                        self.toast(format!("已加入列表：{title}"));
+                    }
+                }
+                Ok(Err(err)) => {
+                    self.resolve_rx = None;
+                    self.toast(format!("解析失败：{err}"));
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.resolve_rx = None;
+                    self.toast("解析线程异常结束");
+                }
+            }
+        }
+    }
+
+    fn start_search(&mut self) {
+        let Some(plugin) = self.media_plugins.get(self.search_plugin).cloned() else {
+            self.search_status = SearchStatus::Error("没有可用的在线插件".into());
+            return;
+        };
+        if !plugin.info.supports("search") {
+            self.search_status = SearchStatus::Error("该插件不支持搜索".into());
+            return;
+        }
+        if self.search_rx.is_some() {
+            return;
+        }
+
+        let query = self.search_query.trim().to_string();
+        if query.is_empty() {
+            self.search_status = SearchStatus::Error("请输入搜索关键词".into());
+            return;
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.search_rx = Some(rx);
+        self.search_status = SearchStatus::Busy;
+        std::thread::spawn(move || {
+            let result = plugin
+                .search(&query, 1, "music")
+                .map(|v| {
+                    v["data"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .map_err(|e| e.to_string());
+            let _ = tx.send(result);
+        });
+    }
+
+    /// 解析播放地址：`play_now = true` 直接播放，否则只加入列表。
+    fn resolve_media(&mut self, item: &serde_json::Value, play_now: bool) {
+        log::info!("resolve_media play_now={play_now} idx={}", self.search_plugin);
+        let Some(plugin) = self.media_plugins.get(self.search_plugin).cloned() else {
+            log::warn!("没有插件可解析");
+            return;
+        };
+        if !plugin.info.supports("getMediaSource") {
+            self.toast("该插件不支持取播放地址");
+            return;
+        }
+        if self.resolve_rx.is_some() {
+            return;
+        }
+
+        let item = item.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.resolve_rx = Some(rx);
+        std::thread::spawn(move || {
+            log::info!("resolving media for {:?}", item["title"]);
+            let result = plugin
+                .media_source(&item, "standard")
+                .ok()
+                .and_then(|v| {
+                    let url = v["url"].as_str().map(|s| s.to_string()).or_else(|| {
+                        v["data"].as_str().map(|s| s.to_string())
+                    });
+                    url
+                })
+                .ok_or_else(|| "插件没有返回可播放的地址".to_string());
+            log::info!("resolve result: {:?}", result);
+            let _ = tx.send(result.map(|url| (item, url, play_now)));
+        });
+    }
+
+    fn search_ui(&mut self, ctx: &egui::Context, p: &Palette) {
+        let mut open = self.show_search;
+        egui::Window::new(self.t("在线搜索", "Online Search"))
+            .open(&mut open)
+            .default_width(700.0)
+            .max_width(700.0)
+            .default_height(420.0)
+            .show(ctx, |ui| {
+                if self.media_plugins.is_empty() {
+                    ui.label(
+                        RichText::new(self.t(
+                            "还没有在线插件。把 MusicFree 插件 .js 放进插件目录，然后点“重新扫描”。",
+                            "No online plugins yet. Drop MusicFree .js plugins into the plugin folder and rescan.",
+                        ))
+                        .color(p.dim),
+                    );
+                    ui.label(
+                        RichText::new(audplugins::plugins_dir().display().to_string())
+                            .monospace()
+                            .small()
+                            .color(p.dim),
+                    );
+                    if ui.button(self.t("重新扫描", "Rescan")).clicked() {
+                        self.reload_media_plugins();
+                    }
+                    return;
+                }
+
+                ui.horizontal(|ui| {
+                    ui.label(self.t("插件", "Plugin"));
+                    let current = self
+                        .media_plugins
+                        .get(self.search_plugin)
+                        .map(|pl| pl.info.platform.clone())
+                        .unwrap_or_default();
+                    egui::ComboBox::from_id_salt("search-plugin")
+                        .selected_text(current)
+                        .show_ui(ui, |ui| {
+                            let names: Vec<String> = self
+                                .media_plugins
+                                .iter()
+                                .map(|pl| pl.info.platform.clone())
+                                .collect();
+                            for (i, name) in names.into_iter().enumerate() {
+                                ui.selectable_value(&mut self.search_plugin, i, name);
+                            }
+                        });
+                });
+
+                let hint = self.t("歌名 / 歌手", "Song / artist");
+                ui.horizontal(|ui| {
+                    let edit = ui.add(
+                        egui::TextEdit::singleline(&mut self.search_query)
+                            .desired_width(320.0)
+                            .hint_text(hint),
+                    );
+                    let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let busy = matches!(self.search_status, SearchStatus::Busy);
+                    if ui
+                        .add_enabled(!busy, egui::Button::new(self.t("搜索", "Search")))
+                        .clicked()
+                        || enter
+                    {
+                        self.start_search();
+                    }
+                    if busy {
+                        ui.spinner();
+                    }
+                });
+
+                if let SearchStatus::Error(err) = &self.search_status {
+                    ui.label(RichText::new(err).color(egui::Color32::from_rgb(200, 80, 80)));
+                }
+
+                ui.separator();
+                if self.search_results.is_empty() {
+                    ui.label(
+                        RichText::new(self.t("输入关键词后回车搜索", "Type a keyword and press Enter"))
+                            .color(p.dim),
+                    );
+                    return;
+                }
+
+                let items = self.search_results.clone();
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .max_height(300.0)
+                    .show(ui, |ui| {
+                        egui::Grid::new("search-results")
+                            .num_columns(5)
+                            .striped(true)
+                            .min_col_width(40.0)
+                            .show(ui, |ui| {
+                                ui.label(RichText::new(self.t("标题", "Title")).strong().color(p.accent));
+                                ui.label(RichText::new(self.t("艺人", "Artist")).strong().color(p.accent));
+                                ui.label(RichText::new(self.t("专辑", "Album")).strong().color(p.accent));
+                                ui.label(RichText::new(self.t("时长", "Length")).strong().color(p.accent));
+                                ui.label("");
+                                ui.end_row();
+
+                                for (i, item) in items.iter().enumerate() {
+                                    let title = item["title"].as_str().unwrap_or("未命名").to_string();
+                                    let artist = item["artist"].as_str().unwrap_or("—").to_string();
+                                    let album = item["album"].as_str().unwrap_or("—").to_string();
+                                    let length = item["duration"]
+                                        .as_f64()
+                                        .map(audcore::config::format_time)
+                                        .unwrap_or_else(|| "--:--".into());
+                                    ui.label(format!("{}. {}", i + 1, elide(&title, 26)));
+                                    ui.label(elide(&artist, 18));
+                                    ui.label(elide(&album, 18));
+                                    ui.label(length);
+                                    ui.horizontal(|ui| {
+                                        if ui.small_button("▶").on_hover_text(self.t("播放", "Play")).clicked() {
+                                            self.resolve_media(item, true);
+                                        }
+                                        if ui.small_button("＋").on_hover_text(self.t("加入列表", "Add")).clicked() {
+                                            self.resolve_media(item, false);
+                                        }
+                                    });
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            });
+        self.show_search = open;
+    }
+
     fn plugins_ui(&mut self, ctx: &egui::Context, p: &Palette) {
         let mut open = self.show_plugins;
         egui::Window::new(self.t("插件", "Plugins"))
@@ -1294,6 +1588,76 @@ impl App {
                     .small()
                     .color(p.dim),
                 );
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(self.t("在线插件（MusicFree 标准）", "Online plugins (MusicFree)"))
+                            .strong()
+                            .color(p.accent),
+                    );
+                    if ui.small_button(self.t("重新扫描", "Rescan")).clicked() {
+                        self.reload_media_plugins();
+                    }
+                    if ui.small_button(self.t("打开目录", "Open folder")).clicked() {
+                        open_in_file_manager(&audplugins::plugins_dir());
+                    }
+                    if ui
+                        .add_enabled(!self.media_plugins.is_empty(), egui::Button::new(self.t("在线搜索…", "Search…")))
+                        .clicked()
+                    {
+                        self.show_search = true;
+                    }
+                });
+
+                if self.media_plugins.is_empty() {
+                    ui.label(
+                        RichText::new(self.t(
+                            "把 MusicFree 插件 .js 放进下面目录，点“重新扫描”即可加载：",
+                            "Put MusicFree .js plugins in this folder, then rescan:",
+                        ))
+                        .small()
+                        .color(p.dim),
+                    );
+                    ui.label(
+                        RichText::new(audplugins::plugins_dir().display().to_string())
+                            .monospace()
+                            .small()
+                            .color(p.dim),
+                    );
+                } else {
+                    for pl in &self.media_plugins {
+                        let info = &pl.info;
+                        ui.horizontal(|ui| {
+                            ui.label("●");
+                            ui.label(
+                                RichText::new(format!(
+                                    "{}  v{}",
+                                    info.platform,
+                                    if info.version.is_empty() { "?" } else { &info.version }
+                                ))
+                                .color(p.text),
+                            );
+                            if info.supports("search") {
+                                ui.label(RichText::new("search").small().color(p.dim));
+                            }
+                            if info.supports("getMediaSource") {
+                                ui.label(RichText::new("media").small().color(p.dim));
+                            }
+                            if info.supports("getLyric") {
+                                ui.label(RichText::new("lyric").small().color(p.dim));
+                            }
+                        });
+                        if let Some(err) = &info.error {
+                            ui.label(
+                                RichText::new(format!("  加载失败：{err}"))
+                                    .small()
+                                    .color(egui::Color32::from_rgb(200, 80, 80)),
+                            );
+                        }
+                    }
+                }
             });
         self.show_plugins = open;
     }
@@ -1518,4 +1882,37 @@ fn paint_shirt(
     // 领口：两条斜线勾出 V 形
     painter.line_segment([p(0.42, 0.28), p(0.50, 0.42)], Stroke::new(1.5_f32, collar));
     painter.line_segment([p(0.58, 0.28), p(0.50, 0.42)], Stroke::new(1.5_f32, collar));
+}
+
+/// 由搜索到的歌曲 JSON 和播放地址构造播放列表条目。
+fn remote_entry(item: &serde_json::Value, url: &str) -> audcore::Entry {
+    audcore::Entry {
+        path: PathBuf::from(url),
+        title: item["title"].as_str().unwrap_or("在线歌曲").to_string(),
+        artist: item["artist"].as_str().unwrap_or_default().to_string(),
+        album: item["album"].as_str().unwrap_or("在线".into()).to_string(),
+        length: item["duration"].as_f64(),
+        format: "在线".into(),
+    }
+}
+
+fn open_in_file_manager(dir: &std::path::Path) {
+    let _ = std::fs::create_dir_all(dir);
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("explorer").arg(dir).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(dir).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+}
+
+/// 表格里把过长的文字截断，避免把窗口撑宽。
+fn elide(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_string()
+    } else {
+        let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    }
 }

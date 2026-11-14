@@ -20,6 +20,7 @@ Audacious 内核的 Rust 重写。二进制名沿用原版命名：`audacious-rs
 - **十段均衡器**：31.5Hz–16kHz，每段 ±24dB，播放中实时生效（`biquad` peaking 滤波）
 - **频谱**：采样旁路 + Goertzel 频段能量，16 段 log 频谱，信息带里跳动
 - **三套主题**：橘黄（默认）、浅色、深色，工具栏右下角「衣服图标」一点即换，配置随存
+- **在线插件（MusicFree 标准）**：把 `.js` 插件丢进插件目录，就能在「插件 → 在线插件」里看到、在「在线搜索」里搜歌、点 ▶ 直接播放网络音源（详见 [PLUGINS.md](PLUGINS.md)）
 - **audtool 控制**：本地 TCP 控制协议，25 条命令，脚本可驱动播放器
 - **无设备兜底**：机器没有声卡时自动进入静音解码模式，进度、频谱、切歌照常
 
@@ -54,11 +55,12 @@ Audacious 内核的 Rust 重写。二进制名沿用原版命名：`audacious-rs
 | visualization 插件 | `crates/audcore/src/spectrum.rs` | 环形采样缓冲 + Goertzel |
 | `src/audacious/`（GTK UI） | `crates/audacious/src/app.rs` | egui 复刻五段式布局 |
 | `src/audtool/` | `crates/audtool/src/main.rs` + `ipc_server.rs` | clap 子命令 ↔ 行分隔 JSON 协议 |
+| `plugins/*`（C 插件） | `crates/audplugins` | MusicFree 标准 JS 插件宿主（boa_engine + 自写 polyfill） |
 
 ### 有意没做（或换了实现方式）
 
 - **Winamp 2 皮肤**：原版的 `skins` 插件没重写，改用主题配色 + 强调色
-- **动态 so 插件**：Rust 侧是编译期注册的 trait，运行期只做开关
+- **动态 so 插件**：解码/输出这类内核插件仍是编译期注册的 trait；需要运行期热插拔的是「在线音源」这一类，走 MusicFree 标准的 JS 插件
 - **MPRIS / DBus**：暂时没接，控制通道换成本地 TCP（`control.port`）
 - **专辑封面**：还没从标签里抽图，信息带用首字母色块占位
 - **ReplayGain、gapless、可视化插件框架**：在路线图里
@@ -111,6 +113,9 @@ volume eq-enable eq-gain version quit`。
 <config>/audacious-rs/config.json      # 音量、循环、随机、EQ、主题、迷你模式、上次目录
 <config>/audacious-rs/control.port     # audtool 连接用的端口
 <config>/audacious-rs/playlists/*.m3u  # 「保存列表」默认落点
+<config>/audacious-rs/plugins/*.js     # MusicFree 标准在线插件
+<config>/audacious-rs/plugin-storage.json  # 插件用到的持久化键值
+<cache>/audacious-rs/streams/          # 在线音源下载缓存
 ```
 
 ## 测试
@@ -120,7 +125,7 @@ cargo test
 ```
 
 覆盖：列表推进/删除索引修正、M3U 往返、Goertzel 频段定位、EQ 增益与旁通、
-静音解码器的实时推进。共 10 个用例。
+静音解码器的实时推进、MusicFree 插件加载/cheerio 搜索/取播放地址与歌词。共 13 个用例。
 
 ## 版本
 
@@ -129,6 +134,7 @@ cargo test
 - 5.0.0 首个可运行版本
 - 5.0.1 修掉 Windows 发布版弹出控制台窗口的问题，日志改写到 `%APPDATA%\audacious-rs\app.log`
 - 5.1.0 三套主题（橘黄 / 浅色 / 深色）与工具栏换肤按钮，默认橘黄
+- 5.2.0 MusicFree 标准插件系统（在线搜索 / 取播放地址 / 歌词），在线音源直接播放；解码器换成自带 symphonia 源，修掉 M4A `SeekError` 崩溃
 
 ## 许可证
 
@@ -141,4 +147,4 @@ BSD-2-Clause，与原项目一致。UI 布局参考 Audacious 的 GTK 界面，
 2. MPRIS / DBus 接口，Linux 桌面媒体键
 3. 可视化插件（VU 表、波形）
 4. ReplayGain 与无缝衔接播放
-5. 动态插件（`libloading` 加载 `.so`/`.dll`）与插件设置页
+5. 插件设置页（`userVariables` 表单）与榜单 / 专辑 / 歌单类方法
