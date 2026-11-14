@@ -20,7 +20,7 @@ Audacious 内核的 Rust 重写。二进制名沿用原版命名：`audacious-rs
 - **十段均衡器**：31.5Hz–16kHz，每段 ±24dB，播放中实时生效（`biquad` peaking 滤波）
 - **频谱**：采样旁路 + Goertzel 频段能量，16 段 log 频谱，信息带里跳动
 - **三套主题**：橘黄（默认）、浅色、深色，工具栏右下角「衣服图标」一点即换，配置随存
-- **在线插件（MusicFree 标准）**：把 `.js` 插件丢进插件目录，就能在「插件 → 在线插件」里看到、在「在线搜索」里搜歌、点 ▶ 直接播放网络音源（详见 [PLUGINS.md](PLUGINS.md)）
+- **在线插件（MusicFree / MyGo 标准）**：MusicFree 的 `.js` 直接丢进插件目录；MyGo 的插件目录（`plugin.json` + ES 模块）同样丢进去即可。两种标准都会出现在「插件 → 在线插件」和「在线搜索」里，搜到歌点 ▶ 就能直接播放网络音源（详见 [PLUGINS.md](PLUGINS.md)）
 - **audtool 控制**：本地 TCP 控制协议，25 条命令，脚本可驱动播放器
 - **无设备兜底**：机器没有声卡时自动进入静音解码模式，进度、频谱、切歌照常
 
@@ -38,6 +38,10 @@ Audacious 内核的 Rust 重写。二进制名沿用原版命名：`audacious-rs
 | 均衡器 | 迷你模式 |
 |---|---|
 | ![均衡器](docs/screenshot-eq.png) | ![迷你](docs/screenshot-mini.png) |
+
+MyGo 标准插件（示例 iTunes）在「在线搜索」里出结果并直接播放：
+
+![MyGo 插件](docs/screenshot-mygo.png)
 
 ## 和原版的结构对应
 
@@ -114,6 +118,8 @@ volume eq-enable eq-gain version quit`。
 <config>/audacious-rs/control.port     # audtool 连接用的端口
 <config>/audacious-rs/playlists/*.m3u  # 「保存列表」默认落点
 <config>/audacious-rs/plugins/*.js     # MusicFree 标准在线插件
+<config>/audacious-rs/plugins/<dir>/   # MyGo 标准插件（含 plugin.json）
+<config>/audacious-rs/mygo-data/<id>/  # MyGo 插件的 dataDir
 <config>/audacious-rs/plugin-storage.json  # 插件用到的持久化键值
 <cache>/audacious-rs/streams/          # 在线音源下载缓存
 ```
@@ -125,15 +131,17 @@ cargo test
 ```
 
 覆盖：列表推进/删除索引修正、M3U 往返、Goertzel 频段定位、EQ 增益与旁通、
-静音解码器的实时推进、MusicFree 插件加载/cheerio 搜索/取播放地址与歌词。共 13 个用例。
+静音解码器的实时推进、MusicFree 插件加载/cheerio 搜索/取播放地址与歌词、
+MyGo 插件的 ES 模块改写/搜索/取地址/歌词/设置项。共 17 个用例。
 
 ## 版本
 
-版本号统一在 `Cargo.toml` 的 `workspace.package.version` 维护，按习惯从 **5.0** 起标，当前 **5.1.0**：
+版本号统一在 `Cargo.toml` 的 `workspace.package.version` 维护，按习惯从 **5.0** 起标，当前 **5.3.0**：
 
 - 5.0.0 首个可运行版本
 - 5.0.1 修掉 Windows 发布版弹出控制台窗口的问题，日志改写到 `%APPDATA%\audacious-rs\app.log`
 - 5.1.0 三套主题（橘黄 / 浅色 / 深色）与工具栏换肤按钮，默认橘黄
+- 5.3.0 在线插件支持 MyGo 标准（目录 + `plugin.json` + ES 模块，`search`/`stream`/`lyrics`、`host`/`fetch`/设置项），两种标准在界面里统一展示；新增示例插件 `examples/mygo-plugins/itunes`
 - 5.2.1 插件垫片补齐 `CryptoJS.AES`（CBC/ECB + PKCS7）与完整 `big-integer`（含 `modPow`），修掉真实网易插件 `cannot convert null to object at AES` 报错；`require` 模块补 `default` 自引用，兼容 TS 产物 `axios_1.default(...)` 调用
 - 5.2.0 MusicFree 标准插件系统（在线搜索 / 取播放地址 / 歌词），在线音源直接播放；解码器换成自带 symphonia 源，修掉 M4A `SeekError` 崩溃
 

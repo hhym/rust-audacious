@@ -1152,6 +1152,9 @@
     getUserVariables: function () { return {}; },
   };
 
+  // MyGo 宿主环境里也需要 CryptoJS（AES-ECB 等），这里顺便暴露成全局
+  global.CryptoJS = CryptoJS;
+
   // 宿主用这两个变量拿插件返回值
   global.__invokeDone = false;
   global.__invokeResult = null;

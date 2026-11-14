@@ -8,6 +8,9 @@
 //! 重活交给 Rust 原生函数（`__http` / `__hash` / `__storage`）。
 
 use std::path::{Path, PathBuf};
+
+mod mygo;
+pub use mygo::{discover_mygo, MygoManifest, MygoPlugin, SettingDef};
 use std::sync::{Mutex, OnceLock};
 
 use boa_engine::property::Attribute;
@@ -196,7 +199,17 @@ fn describe(code: &str) -> anyhow::Result<Meta> {
 fn call_method(code: &str, method: &str, args: &[Value]) -> anyhow::Result<Value> {
     let mut ctx = new_context();
     let exports = eval_plugin(&mut ctx, code)?;
-    let args_value = JsValue::from_json(&Value::Array(args.to_vec()), &mut ctx)
+    invoke_exports(&mut ctx, exports, method, args)
+}
+
+/// 在已经准备好的上下文里调用 `exports[method](...args)`，返回 JSON。
+pub(crate) fn invoke_exports(
+    mut ctx: &mut Context,
+    exports: JsValue,
+    method: &str,
+    args: &[Value],
+) -> anyhow::Result<Value> {
+    let args_value = JsValue::from_json(&Value::Array(args.to_vec()), ctx)
         .map_err(|e| anyhow::anyhow!("参数转换失败: {e}"))?;
 
     ctx.register_global_property(js_string!("__plugin"), exports, Attribute::all())
@@ -239,6 +252,11 @@ __invokeDone = false; __invokeResult = null; __invokeError = null;
         if global_bool(&mut ctx, "__invokeDone") {
             break;
         }
+        // MyGo 插件可能有 setTimeout，顺手推进一下
+        if global_bool(&mut ctx, "__hasTimers") {
+            let _ = ctx.eval(Source::from_bytes("__runTimers();"));
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
     }
 
     if let Some(err) = global_string(&mut ctx, "__invokeError") {
@@ -249,14 +267,14 @@ __invokeDone = false; __invokeResult = null; __invokeError = null;
     Ok(serde_json::from_str(&result)?)
 }
 
-fn global_bool(ctx: &mut Context, key: &str) -> bool {
+pub(crate) fn global_bool(ctx: &mut Context, key: &str) -> bool {
     ctx.global_object()
         .get(js_string!(key), ctx)
         .map(|v| v.as_boolean().unwrap_or(false))
         .unwrap_or(false)
 }
 
-fn global_string(ctx: &mut Context, key: &str) -> Option<String> {
+pub(crate) fn global_string(ctx: &mut Context, key: &str) -> Option<String> {
     ctx.global_object()
         .get(js_string!(key), ctx)
         .ok()
@@ -272,7 +290,7 @@ fn eval_plugin(ctx: &mut Context, code: &str) -> anyhow::Result<JsValue> {
         .map_err(|e| anyhow::anyhow!("插件代码执行失败: {e}"))
 }
 
-fn new_context() -> Context {
+pub(crate) fn new_context() -> Context {
     let mut ctx = Context::default();
 
     ctx.register_global_property(
@@ -313,6 +331,12 @@ fn new_context() -> Context {
     )
     .ok();
     ctx.register_global_callable(
+        js_string!("__open"),
+        1,
+        NativeFunction::from_fn_ptr(native_open),
+    )
+    .ok();
+    ctx.register_global_callable(
         js_string!("__log"),
         1,
         NativeFunction::from_fn_ptr(native_log),
@@ -325,7 +349,7 @@ fn new_context() -> Context {
     ctx
 }
 
-fn platform_name() -> &'static str {
+pub(crate) fn platform_name() -> &'static str {
     if cfg!(windows) {
         "win32"
     } else if cfg!(target_os = "macos") {
@@ -431,6 +455,22 @@ fn native_aes(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> boa_engi
     Ok(JsValue::from(JsString::from(aes_crypt(
         &op, &data, &key, &iv, &padding,
     ))))
+}
+
+fn native_open(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> boa_engine::JsResult<JsValue> {
+    let url = args
+        .first()
+        .and_then(|v| v.as_string().map(|s| s.to_std_string_escaped()))
+        .unwrap_or_default();
+    if !url.is_empty() {
+        #[cfg(target_os = "windows")]
+        let _ = std::process::Command::new("cmd").args(["/C", "start", "", &url]).spawn();
+        #[cfg(target_os = "macos")]
+        let _ = std::process::Command::new("open").arg(&url).spawn();
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+    }
+    Ok(JsValue::undefined())
 }
 
 fn native_storage(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> boa_engine::JsResult<JsValue> {
@@ -682,7 +722,7 @@ fn storage_path() -> PathBuf {
         .join("plugin-storage.json")
 }
 
-fn storage_access(key: &str, value: Option<&str>) -> String {
+pub(crate) fn storage_access(key: &str, value: Option<&str>) -> String {
     static LOCK: Mutex<()> = Mutex::new(());
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -710,6 +750,119 @@ fn storage_access(key: &str, value: Option<&str>) -> String {
     }
 
     result
+}
+
+// ------------------------------------------------------------------ 统一门面
+
+/// 两种插件标准，界面上统一成一份列表。
+#[derive(Clone)]
+pub enum OnlinePlugin {
+    /// MusicFree：单个 `.js` 文件
+    MusicFree(Plugin),
+    /// MyGo：一个目录 + `plugin.json`
+    Mygo(MygoPlugin),
+}
+
+impl OnlinePlugin {
+    /// 界面上显示的名字，带标准后缀。
+    pub fn name(&self) -> String {
+        match self {
+            OnlinePlugin::MusicFree(p) => format!("{} · MusicFree", p.info.platform),
+            OnlinePlugin::Mygo(p) => p.display_name(),
+        }
+    }
+
+    pub fn version(&self) -> &str {
+        match self {
+            OnlinePlugin::MusicFree(p) => &p.info.version,
+            OnlinePlugin::Mygo(p) => &p.info.version,
+        }
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        match self {
+            OnlinePlugin::MusicFree(p) => p.info.error.as_deref(),
+            OnlinePlugin::Mygo(p) => p.info.error.as_deref(),
+        }
+    }
+
+    /// 两种标准的"能做什么"，用统一名字回答。
+    pub fn supports(&self, method: &str) -> bool {
+        match self {
+            OnlinePlugin::MusicFree(p) => p.info.supports(method),
+            OnlinePlugin::Mygo(p) => match method {
+                "search" => p.info.supports("search"),
+                "getMediaSource" => p.info.supports("stream"),
+                "getLyric" => p.info.supports("lyrics"),
+                other => p.info.supports(other),
+            },
+        }
+    }
+
+    /// 搜索，返回统一形状的条目数组。
+    pub fn search_tracks(&self, query: &str, page: u32) -> anyhow::Result<Vec<Value>> {
+        match self {
+            OnlinePlugin::MusicFree(p) => {
+                let out = p.search(query, page, "music")?;
+                Ok(out["data"].as_array().cloned().unwrap_or_default())
+            }
+            OnlinePlugin::Mygo(p) => p.search_tracks(query, ((page.max(1) - 1) as u64) * 20),
+        }
+    }
+
+    /// 取播放地址。
+    pub fn media_url(&self, item: &Value, quality: &str) -> anyhow::Result<String> {
+        match self {
+            OnlinePlugin::MusicFree(p) => {
+                let v = p.media_source(item, quality)?;
+                let pick = |x: &Value| {
+                    x.as_str()
+                        .filter(|s| s.starts_with("http"))
+                        .map(|s| s.to_string())
+                        .or_else(|| {
+                            x["url"]
+                                .as_str()
+                                .filter(|s| s.starts_with("http"))
+                                .map(|s| s.to_string())
+                        })
+                };
+                pick(&v)
+                    .or_else(|| pick(&v["data"]))
+                    .ok_or_else(|| anyhow::anyhow!("插件没有返回可播放的地址"))
+            }
+            OnlinePlugin::Mygo(p) => {
+                let v = p.stream(item, quality)?;
+                v["url"]
+                    .as_str()
+                    .filter(|s| s.starts_with("http"))
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| anyhow::anyhow!("stream 没有返回 url"))
+            }
+        }
+    }
+
+    /// 歌词（界面暂未接面板，先留接口）。
+    pub fn lyric(&self, item: &Value) -> anyhow::Result<Value> {
+        match self {
+            OnlinePlugin::MusicFree(p) => p.lyric(item),
+            OnlinePlugin::Mygo(p) => p.lyrics(item),
+        }
+    }
+
+    /// MyGo 插件才有：设置项与读写。
+    pub fn as_mygo(&self) -> Option<&MygoPlugin> {
+        match self {
+            OnlinePlugin::Mygo(p) => Some(p),
+            _ => None,
+        }
+    }
+}
+
+/// 扫描目录：根目录的 `.js` 当 MusicFree 插件，含 `plugin.json` 的子目录当 MyGo 插件。
+pub fn discover_all(dir: &Path) -> Vec<OnlinePlugin> {
+    let mut out: Vec<OnlinePlugin> = discover(dir).into_iter().map(OnlinePlugin::MusicFree).collect();
+    out.extend(discover_mygo(dir).into_iter().map(OnlinePlugin::Mygo));
+    out
 }
 
 #[cfg(test)]

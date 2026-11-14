@@ -1,4 +1,13 @@
-# 在线插件（MusicFree 标准）
+# 在线插件（MusicFree 标准 / MyGo 标准）
+
+`rust-audacious` 的「在线插件」同时支持两套插件标准：
+
+- **MusicFree**：[MusicFreePlugins](https://github.com/hhym/MusicFreePlugins) —— 单个 `.js` 文件；
+- **MyGo**：[mygo-music](https://github.com/hhym/mygo-music) —— 一个目录 + `plugin.json` + ES 模块。
+
+两者在「插件」窗口和「在线搜索」窗口里统一展示，名字后面带 `· MusicFree` / `· MyGo`。
+
+## MusicFree 标准
 
 `rust-audacious` 的「在线插件」直接兼容 [MusicFreePlugins](https://github.com/hhym/MusicFreePlugins)
 的插件标准：一个 `.js` 文件，`module.exports = { platform, version, search, getMediaSource, getLyric, ... }`。
@@ -67,6 +76,92 @@ Windows：     %APPDATA%\audacious-rs\plugins\
   M4A 在探测阶段就会触发 symphonia `SeekError` 崩溃），改用 `crates/audacious/src/engine.rs`
   里的 `SymSource` —— 直接以 `File` 构造 `MediaSourceStream`，自己实现 `Source` 与 `try_seek`。
 
+## MyGo 标准
+
+[mygo-music](https://github.com/hhym/mygo-music) 的插件是**一个目录**，放在插件目录下：
+
+```
+<插件目录>/my-plugin/
+  plugin.json
+  index.js
+  locales/zh-CN.json   # 可选，翻译插件自己显示的文字
+```
+
+`plugin.json`：
+
+```json
+{
+  "id": "example",
+  "name": "Example",
+  "version": "1.0.0",
+  "minAppVersion": "0.1.8",
+  "main": "index.js",
+  "playback": "stream",
+  "permissions": { "network": ["api.example.com", "*.example.com"] },
+  "settings": [{ "key": "apiKey", "label": "API Key", "help": "在你的账号页面获取" }],
+  "navigation": [{ "builtin": "home" }, { "title": "Charts", "page": "charts" }]
+}
+```
+
+`index.js` 是 ES 模块，按名字导出方法，每个方法接收**一个对象参数**：
+
+```js
+export async function search({ query, kind, offset }) {
+  const res = await fetch(`https://api.example.com/search?q=${encodeURIComponent(query)}`, {
+    headers: { authorization: `Bearer ${host.setting("apiKey")}` },
+  });
+  return { tracks: (await res.json()).items.map(toTrack), more: false };
+}
+
+export function stream({ id, quality }) {
+  return { url: `https://api.example.com/audio/${id}.mp3`, type: "mp3" };
+}
+
+export function lyrics({ id }) {
+  return { lrc: "..." };
+}
+```
+
+宿主把 `search` / `stream` / `lyrics` 映射成界面上的「搜索 / 取播放地址 / 歌词」，
+`search` 只走 `kind: "tracks"`；`stream` 返回的 `url` 直接进播放器（`type` 目前只用于记录）。
+
+### 数据结构（和 mygo 一致）
+
+- `Track`：`{ id, name, artists: [{ id, name, imageUrl? }], album: { id, name, imageUrl? }, duration }`，
+  `duration` 单位是**毫秒**；宿主展示时换算成秒。
+- `stream` 返回 `{ url, type, headers?, size?, gain?, peak? }`，`type` 为 `mp3` / `flac` / `ogg` / `wav` / `m4a` / `aac`。
+- `lyrics` 返回 `{ lrc, translation? }` 或 `{ lines }`。
+
+### 宿主提供的全局
+
+| | |
+|---|---|
+| `fetch(url, { method, headers, body, timeout })` | 受 `permissions.network` 白名单限制，域名不在名单里直接抛错 |
+| `host.platform` / `host.arch` | 如 `linux` / `windows`、`x86_64` |
+| `host.dir` / `host.dataDir` | 插件目录 / `<config>/audacious-rs/mygo-data/<id>` |
+| `host.storage.get/set/remove(key)` | JSON 值，跨重启保存（存在 `plugin-storage.json`） |
+| `host.setting(key)` | 在「插件」窗口里填的设置项（`plugin.json` 的 `settings`） |
+| `host.t(text)` / `host.language()` | 读 `locales/<语言>.json`，当前语言 `zh-CN` / `en` |
+| `host.crypto.md5(text)` | 十六进制摘要 |
+| `host.crypto.aesEcbEncrypt(key, text)` | AES-ECB + PKCS#7，输出十六进制 |
+| `host.openURL(url)` | 用系统浏览器打开 |
+| `URL` / `URLSearchParams` / `setTimeout` / `setInterval` / `console` | 常规 JS 环境 |
+
+`plugin.json` 的 `settings` 会直接显示在「插件」窗口每个插件下面，失焦即保存，
+可以声明 `"type": "password"` 以掩码输入。
+
+### ES 模块的处理方式
+
+宿主不是真正的 Node/ESM 运行时：插件代码会被改写后执行 ——
+`import x from "m"` → `require("m")`，去掉 `export` 关键字，再按导出的名字收集函数。
+`require()` 能拿到 MusicFree 那一套库（axios / crypto-js / big-integer / cheerio …），
+所以 MyGo 插件也能复用它们。
+
+### 示例
+
+仓库里有一个开箱可用的例子：[`examples/mygo-plugins/itunes`](examples/mygo-plugins/itunes)（iTunes 公开搜索，无需 key）。
+把它整个目录复制到插件目录，点「重新扫描」即可。
+
 ## 已知边界
 
 - 没有真 Node 语义：`setTimeout` / 事件循环 / `Buffer` / 流式响应 / `dayjs.extend` 未实现；
@@ -75,3 +170,13 @@ Windows：     %APPDATA%\audacious-rs\plugins\
 - 网易系插件已实测：`search` 能拿到真实结果；部分第三方中转 API 会限流（返回 429），
   这类错误来自插件自己的接口，不是宿主问题。
 - 插件异常会在「在线搜索」窗口里显示错误文本（含调用栈），便于定位。
+
+### MyGo 标准的限制
+
+- 没有真正的 ESM 语义：`import` 被改写成 `require`，动态 `import()`、顶层 `await` 不支持。
+- `host.spawn`（启动外部程序）、`host.signInPrompt` / `waitForRedirect` / `webSignIn`（登录窗口与 cookie）
+  这版都还没实现，调用会抛错；`permissions.process` 因此不生效。
+- `fetch` 只能拿到文本 / JSON（没有 `arrayBuffer`），也没有流式响应。
+- `stream` 返回的 `headers` 目前没有透传到下载请求（和 MusicFree 的 `headers` 一样，是下一步的事）。
+- 只映射了 `search` / `stream` / `lyrics` 三个方法；`home`、`browse`、`playlists`、`show`、`comments` 等
+  mygo 的其它导出，宿主能识别但界面还没有对应的页面。

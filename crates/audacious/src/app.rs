@@ -96,9 +96,11 @@ pub struct App {
     theme_button_rect: Option<egui::Rect>,
     plugins: Vec<audcore::plugin::PluginInfo>,
     /// 在线插件（MusicFree 标准）
-    media_plugins: Vec<audplugins::Plugin>,
+    media_plugins: Vec<audplugins::OnlinePlugin>,
     show_search: bool,
     search_plugin: usize,
+    /// MyGo 插件设置项的编辑缓冲：`插件id/key` → 当前文本
+    mygo_setting_inputs: std::collections::HashMap<String, String>,
     search_query: String,
     search_results: Vec<serde_json::Value>,
     search_status: SearchStatus,
@@ -147,6 +149,7 @@ impl App {
             media_plugins: Vec::new(),
             show_search: false,
             search_plugin: 0,
+            mygo_setting_inputs: std::collections::HashMap::new(),
             search_query: String::new(),
             search_results: Vec::new(),
             search_status: SearchStatus::Idle,
@@ -1301,7 +1304,7 @@ impl App {
     fn reload_media_plugins(&mut self) {
         let dir = audplugins::plugins_dir();
         let _ = std::fs::create_dir_all(&dir);
-        self.media_plugins = audplugins::discover(&dir);
+        self.media_plugins = audplugins::discover_all(&dir);
         if self.search_plugin >= self.media_plugins.len() {
             self.search_plugin = 0;
         }
@@ -1366,7 +1369,7 @@ impl App {
             self.search_status = SearchStatus::Error("没有可用的在线插件".into());
             return;
         };
-        if !plugin.info.supports("search") {
+        if !plugin.supports("search") {
             self.search_status = SearchStatus::Error("该插件不支持搜索".into());
             return;
         }
@@ -1385,13 +1388,7 @@ impl App {
         self.search_status = SearchStatus::Busy;
         std::thread::spawn(move || {
             let result = plugin
-                .search(&query, 1, "music")
-                .map(|v| {
-                    v["data"]
-                        .as_array()
-                        .cloned()
-                        .unwrap_or_default()
-                })
+                .search_tracks(&query, 1)
                 .map_err(|e| e.to_string());
             let _ = tx.send(result);
         });
@@ -1404,7 +1401,7 @@ impl App {
             log::warn!("没有插件可解析");
             return;
         };
-        if !plugin.info.supports("getMediaSource") {
+        if !plugin.supports("getMediaSource") {
             self.toast("该插件不支持取播放地址");
             return;
         }
@@ -1418,24 +1415,8 @@ impl App {
         std::thread::spawn(move || {
             log::info!("resolving media for {:?}", item["title"]);
             let result = plugin
-                .media_source(&item, "standard")
-                .ok()
-                .and_then(|v| {
-                    // 插件的返回五花八门：{url} / {data:{url}} / 直接一个字符串地址
-                    let pick = |x: &serde_json::Value| {
-                        x.as_str()
-                            .filter(|s| s.starts_with("http"))
-                            .map(|s| s.to_string())
-                            .or_else(|| {
-                                x["url"]
-                                    .as_str()
-                                    .filter(|s| s.starts_with("http"))
-                                    .map(|s| s.to_string())
-                            })
-                    };
-                    pick(&v).or_else(|| pick(&v["data"]))
-                })
-                .ok_or_else(|| "插件没有返回可播放的地址".to_string());
+                .media_url(&item, "standard")
+                .map_err(|e| e.to_string());
             log::info!("resolve result: {:?}", result);
             let _ = tx.send(result.map(|url| (item, url, play_now)));
         });
@@ -1474,7 +1455,7 @@ impl App {
                     let current = self
                         .media_plugins
                         .get(self.search_plugin)
-                        .map(|pl| pl.info.platform.clone())
+                        .map(|pl| pl.name())
                         .unwrap_or_default();
                     egui::ComboBox::from_id_salt("search-plugin")
                         .selected_text(current)
@@ -1482,7 +1463,7 @@ impl App {
                             let names: Vec<String> = self
                                 .media_plugins
                                 .iter()
-                                .map(|pl| pl.info.platform.clone())
+                                .map(|pl| pl.name())
                                 .collect();
                             for (i, name) in names.into_iter().enumerate() {
                                 ui.selectable_value(&mut self.search_plugin, i, name);
@@ -1602,7 +1583,7 @@ impl App {
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label(
-                        RichText::new(self.t("在线插件（MusicFree 标准）", "Online plugins (MusicFree)"))
+                        RichText::new(self.t("在线插件（MusicFree / MyGo）", "Online plugins (MusicFree / MyGo)"))
                             .strong()
                             .color(p.accent),
                     );
@@ -1623,8 +1604,8 @@ impl App {
                 if self.media_plugins.is_empty() {
                     ui.label(
                         RichText::new(self.t(
-                            "把 MusicFree 插件 .js 放进下面目录，点“重新扫描”即可加载：",
-                            "Put MusicFree .js plugins in this folder, then rescan:",
+                            "把 MusicFree 的 .js 或 MyGo 插件目录（含 plugin.json）放进下面目录，点“重新扫描”即可加载：",
+                            "Put MusicFree .js files or MyGo plugin folders (with plugin.json) here, then rescan:",
                         ))
                         .small()
                         .color(p.dim),
@@ -1636,34 +1617,76 @@ impl App {
                             .color(p.dim),
                     );
                 } else {
-                    for pl in &self.media_plugins {
-                        let info = &pl.info;
+                    let plugins = self.media_plugins.clone();
+                    for pl in &plugins {
                         ui.horizontal(|ui| {
                             ui.label("●");
                             ui.label(
                                 RichText::new(format!(
                                     "{}  v{}",
-                                    info.platform,
-                                    if info.version.is_empty() { "?" } else { &info.version }
+                                    pl.name(),
+                                    if pl.version().is_empty() { "?" } else { pl.version() }
                                 ))
                                 .color(p.text),
                             );
-                            if info.supports("search") {
+                            if pl.supports("search") {
                                 ui.label(RichText::new("search").small().color(p.dim));
                             }
-                            if info.supports("getMediaSource") {
+                            if pl.supports("getMediaSource") {
                                 ui.label(RichText::new("media").small().color(p.dim));
                             }
-                            if info.supports("getLyric") {
+                            if pl.supports("getLyric") {
                                 ui.label(RichText::new("lyric").small().color(p.dim));
                             }
                         });
-                        if let Some(err) = &info.error {
+                        if let Some(err) = pl.error() {
                             ui.label(
                                 RichText::new(format!("  加载失败：{err}"))
                                     .small()
                                     .color(egui::Color32::from_rgb(200, 80, 80)),
                             );
+                        }
+
+                        // MyGo 插件声明的设置项，直接在这里填
+                        if let Some(mygo) = pl.as_mygo() {
+                            if !mygo.settings().is_empty() {
+                                for def in mygo.settings() {
+                                    if def.key.is_empty() {
+                                        continue;
+                                    }
+                                    let buf_key = format!("{}/{}", mygo.manifest.id, def.key);
+                                    let entry = self
+                                        .mygo_setting_inputs
+                                        .entry(buf_key)
+                                        .or_insert_with(|| mygo.setting(&def.key));
+                                    let mut save = false;
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new(if def.label.is_empty() {
+                                                def.key.clone()
+                                            } else {
+                                                def.label.clone()
+                                            })
+                                            .small()
+                                            .color(p.dim),
+                                        );
+                                        let width = (ui.available_width() - 60.0).max(120.0);
+                                        let resp = ui.add_sized(
+                                            [width, 20.0],
+                                            egui::TextEdit::singleline(entry)
+                                                .password(def.kind.as_deref() == Some("password")),
+                                        );
+                                        save = resp.lost_focus() && !resp.changed();
+                                    });
+                                    if !def.help.is_empty() {
+                                        ui.label(RichText::new(&def.help).small().color(p.dim));
+                                    }
+                                    if save {
+                                        mygo.set_setting(&def.key, entry.trim());
+                                        self.toast(format!("已保存 {}", def.label));
+                                    }
+                                }
+                            }
                         }
                     }
                 }
