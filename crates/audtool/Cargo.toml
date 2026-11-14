@@ -1,0 +1,16 @@
+[package]
+name = "audtool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "audtool"
+path = "src/main.rs"
+
+[dependencies]
+audcore = { path = "../audcore" }
+clap = { version = "4", features = ["derive"] }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true

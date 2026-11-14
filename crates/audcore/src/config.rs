@@ -1,0 +1,100 @@
+//! 配置持久化，对应 libaudcore/audconfig.c。
+//!
+//! 用 JSON 存到平台配置目录，字段变更时用 `#[serde(default)]` 保持向后兼容。
+
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+use crate::playlist::RepeatMode;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Config {
+    /// 音量 0.0 - 1.0
+    pub volume: f32,
+    pub repeat: RepeatMode,
+    pub shuffle: bool,
+    /// 均衡器开关
+    pub eq_enabled: bool,
+    /// 十段增益（dB），与 `EQ_BANDS` 一一对应
+    pub eq_gains: Vec<f32>,
+    /// 主题强调色
+    pub accent: [u8; 3],
+    /// 深色主题
+    pub dark: bool,
+    /// 迷你模式
+    pub mini: bool,
+    /// 上次浏览目录
+    #[serde(default)]
+    pub last_dir: Option<PathBuf>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            volume: 0.8,
+            repeat: RepeatMode::Off,
+            shuffle: false,
+            eq_enabled: false,
+            eq_gains: vec![0.0; crate::EQ_BANDS.len()],
+            accent: [235, 152, 52],
+            dark: true,
+            mini: false,
+            last_dir: dirs::audio_dir().or_else(dirs::home_dir),
+        }
+    }
+}
+
+impl Config {
+    /// 配置文件路径：`<config>/audacious-rs/config.json`
+    pub fn path() -> PathBuf {
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(crate::APP_NAME)
+            .join("config.json")
+    }
+
+    pub fn load() -> Self {
+        match std::fs::read_to_string(Self::path()) {
+            Ok(text) => serde_json::from_str(&text).unwrap_or_else(|err| {
+                log::warn!("配置解析失败，使用默认值: {err}");
+                Config::default()
+            }),
+            Err(_) => Config::default(),
+        }
+    }
+
+    pub fn save(&self) -> anyhow::Result<()> {
+        let path = Self::path();
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let text = serde_json::to_string_pretty(self)?;
+        std::fs::write(path, text)?;
+        Ok(())
+    }
+
+    pub fn clamp(&mut self) {
+        self.volume = self.volume.clamp(0.0, 1.0);
+        while self.eq_gains.len() < crate::EQ_BANDS.len() {
+            self.eq_gains.push(0.0);
+        }
+        self.eq_gains.truncate(crate::EQ_BANDS.len());
+        for g in &mut self.eq_gains {
+            *g = g.clamp(-24.0, 24.0);
+        }
+    }
+}
+
+/// 秒数转 `mm:ss` / `h:mm:ss`。
+pub fn format_time(seconds: f64) -> String {
+    if !seconds.is_finite() || seconds < 0.0 {
+        return "--:--".into();
+    }
+    let total = seconds.round() as u64;
+    let (h, m, s) = (total / 3600, (total % 3600) / 60, total % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m:02}:{s:02}")
+    }
+}

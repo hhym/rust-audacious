@@ -1,0 +1,21 @@
+[package]
+name = "audacious-rs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "audacious-rs"
+path = "src/main.rs"
+
+[dependencies]
+audcore = { path = "../audcore" }
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+egui = "0.31"
+rodio = { version = "0.20", features = ["symphonia-all"] }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+dirs = "5"

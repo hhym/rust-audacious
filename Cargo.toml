@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["crates/audcore", "crates/audacious", "crates/audtool"]
+
+[workspace.package]
+version = "5.0.0"
+edition = "2021"
+license = "BSD-2-Clause"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
