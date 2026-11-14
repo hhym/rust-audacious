@@ -11,6 +11,14 @@ fn main() {
             Ok(v) => {
                 let text = serde_json::to_string_pretty(&v).unwrap_or_default();
                 println!("result ({} chars):\n{}", text.len(), text.chars().take(1200).collect::<String>());
+                if plugin.info.supports("getMediaSource") {
+                    if let Some(item) = v["data"].as_array().and_then(|a| a.first()) {
+                        match plugin.media_source(item, "standard") {
+                            Ok(src) => println!("media_source: {}", serde_json::to_string(&src).unwrap_or_default()),
+                            Err(e) => println!("media_source error: {e}"),
+                        }
+                    }
+                }
             }
             Err(e) => println!("search error: {e}"),
         }

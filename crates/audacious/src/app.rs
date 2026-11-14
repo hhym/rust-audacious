@@ -1421,10 +1421,19 @@ impl App {
                 .media_source(&item, "standard")
                 .ok()
                 .and_then(|v| {
-                    let url = v["url"].as_str().map(|s| s.to_string()).or_else(|| {
-                        v["data"].as_str().map(|s| s.to_string())
-                    });
-                    url
+                    // 插件的返回五花八门：{url} / {data:{url}} / 直接一个字符串地址
+                    let pick = |x: &serde_json::Value| {
+                        x.as_str()
+                            .filter(|s| s.starts_with("http"))
+                            .map(|s| s.to_string())
+                            .or_else(|| {
+                                x["url"]
+                                    .as_str()
+                                    .filter(|s| s.starts_with("http"))
+                                    .map(|s| s.to_string())
+                            })
+                    };
+                    pick(&v).or_else(|| pick(&v["data"]))
                 })
                 .ok_or_else(|| "插件没有返回可播放的地址".to_string());
             log::info!("resolve result: {:?}", result);

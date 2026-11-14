@@ -134,6 +134,7 @@ cargo test
 - 5.0.0 首个可运行版本
 - 5.0.1 修掉 Windows 发布版弹出控制台窗口的问题，日志改写到 `%APPDATA%\audacious-rs\app.log`
 - 5.1.0 三套主题（橘黄 / 浅色 / 深色）与工具栏换肤按钮，默认橘黄
+- 5.2.1 插件垫片补齐 `CryptoJS.AES`（CBC/ECB + PKCS7）与完整 `big-integer`（含 `modPow`），修掉真实网易插件 `cannot convert null to object at AES` 报错；`require` 模块补 `default` 自引用，兼容 TS 产物 `axios_1.default(...)` 调用
 - 5.2.0 MusicFree 标准插件系统（在线搜索 / 取播放地址 / 歌词），在线音源直接播放；解码器换成自带 symphonia 源，修掉 M4A `SeekError` 崩溃
 
 ## 许可证

@@ -301,6 +301,12 @@ fn new_context() -> Context {
     )
     .ok();
     ctx.register_global_callable(
+        js_string!("__aes"),
+        5,
+        NativeFunction::from_fn_ptr(native_aes),
+    )
+    .ok();
+    ctx.register_global_callable(
         js_string!("__storage"),
         2,
         NativeFunction::from_fn_ptr(native_storage),
@@ -413,6 +419,17 @@ fn native_hash(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> boa_eng
         &algo,
         &data,
         key.as_deref(),
+    ))))
+}
+
+fn native_aes(_this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> boa_engine::JsResult<JsValue> {
+    let op = args.first().and_then(|v| v.as_string().map(|s| s.to_std_string_escaped())).unwrap_or_default();
+    let data = args.get(1).and_then(|v| v.as_string().map(|s| s.to_std_string_escaped())).unwrap_or_default();
+    let key = args.get(2).and_then(|v| v.as_string().map(|s| s.to_std_string_escaped())).unwrap_or_default();
+    let iv = args.get(3).and_then(|v| v.as_string().map(|s| s.to_std_string_escaped())).unwrap_or_default();
+    let padding = args.get(4).and_then(|v| v.as_string().map(|s| s.to_std_string_escaped())).unwrap_or_default();
+    Ok(JsValue::from(JsString::from(aes_crypt(
+        &op, &data, &key, &iv, &padding,
     ))))
 }
 
@@ -556,6 +573,108 @@ fn b64(bytes: Vec<u8>) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
+
+/// 把 4 种组合（CBC/ECB × 加密/解密 × PKCS7/无填充）收敛到一个宏里。
+macro_rules! aes_run {
+    ($ty:ty, $data:expr, $key:expr, $iv:expr, $enc:expr, $pad:expr) => {{
+        use aes::cipher::block_padding::{NoPadding, Pkcs7};
+        use aes::cipher::{BlockDecryptMut, BlockEncryptMut, KeyInit, KeyIvInit};
+
+        let data: Vec<u8> = $data;
+        let key: Vec<u8> = $key;
+        let iv: Vec<u8> = $iv;
+        let enc: bool = $enc;
+        let pad: bool = $pad;
+
+        let run: Result<Vec<u8>, String> = if enc {
+            let mut buf = data.clone();
+            if pad {
+                buf.resize(data.len() + 16 - (data.len() % 16) + 16, 0);
+            }
+            if iv.is_empty() {
+                let cipher = match ecb::Encryptor::<$ty>::new_from_slice(&key) {
+                    Ok(cipher) => cipher,
+                    Err(err) => return serde_json::json!({ "error": format!("{err:?}") }).to_string(),
+                };
+                let out = if pad {
+                    cipher.encrypt_padded_mut::<Pkcs7>(&mut buf, data.len())
+                } else {
+                    cipher.encrypt_padded_mut::<NoPadding>(&mut buf, data.len())
+                };
+                out.map(|b| b.to_vec()).map_err(|e| format!("{e:?}"))
+            } else {
+                let cipher = match cbc::Encryptor::<$ty>::new_from_slices(&key, &iv) {
+                    Ok(cipher) => cipher,
+                    Err(err) => return serde_json::json!({ "error": format!("{err:?}") }).to_string(),
+                };
+                let out = if pad {
+                    cipher.encrypt_padded_mut::<Pkcs7>(&mut buf, data.len())
+                } else {
+                    cipher.encrypt_padded_mut::<NoPadding>(&mut buf, data.len())
+                };
+                out.map(|b| b.to_vec()).map_err(|e| format!("{e:?}"))
+            }
+        } else {
+            let mut buf = data.clone();
+            if iv.is_empty() {
+                let cipher = match ecb::Decryptor::<$ty>::new_from_slice(&key) {
+                    Ok(cipher) => cipher,
+                    Err(err) => return serde_json::json!({ "error": format!("{err:?}") }).to_string(),
+                };
+                let out = if pad {
+                    cipher.decrypt_padded_mut::<Pkcs7>(&mut buf)
+                } else {
+                    cipher.decrypt_padded_mut::<NoPadding>(&mut buf)
+                };
+                out.map(|b| b.to_vec()).map_err(|e| format!("{e:?}"))
+            } else {
+                let cipher = match cbc::Decryptor::<$ty>::new_from_slices(&key, &iv) {
+                    Ok(cipher) => cipher,
+                    Err(err) => return serde_json::json!({ "error": format!("{err:?}") }).to_string(),
+                };
+                let out = if pad {
+                    cipher.decrypt_padded_mut::<Pkcs7>(&mut buf)
+                } else {
+                    cipher.decrypt_padded_mut::<NoPadding>(&mut buf)
+                };
+                out.map(|b| b.to_vec()).map_err(|e| format!("{e:?}"))
+            }
+        };
+
+        run
+    }};
+}
+
+/// AES-128/192/256 的 CBC / ECB，输入输出都是 base64。
+fn aes_crypt(op: &str, data_b64: &str, key_b64: &str, iv_b64: &str, padding: &str) -> String {
+    use base64::Engine;
+
+    let engine = base64::engine::general_purpose::STANDARD;
+    let data = match engine.decode(data_b64) {
+        Ok(bytes) => bytes,
+        Err(err) => return serde_json::json!({ "error": format!("数据不是合法 base64: {err}") }).to_string(),
+    };
+    let key = match engine.decode(key_b64) {
+        Ok(bytes) => bytes,
+        Err(err) => return serde_json::json!({ "error": format!("密钥不是合法 base64: {err}") }).to_string(),
+    };
+    let iv = engine.decode(iv_b64).unwrap_or_default();
+    let encrypting = op == "encrypt";
+    let use_pkcs7 = padding.is_empty() || padding == "pkcs7";
+
+    let result = match key.len() {
+        16 => aes_run!(aes::Aes128, data, key, iv, encrypting, use_pkcs7),
+        24 => aes_run!(aes::Aes192, data, key, iv, encrypting, use_pkcs7),
+        32 => aes_run!(aes::Aes256, data, key, iv, encrypting, use_pkcs7),
+        other => Err(format!("密钥长度 {other} 字节，AES 只支持 16/24/32")),
+    };
+
+    match result {
+        Ok(bytes) => serde_json::json!({ "data": engine.encode(bytes) }).to_string(),
+        Err(err) => serde_json::json!({ "error": err }).to_string(),
+    }
+}
+
 fn storage_path() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -647,6 +766,48 @@ module.exports = {
         assert_eq!(out["data"][0]["id"], Value::from(42));
         assert_eq!(out["data"][0]["title"], Value::from("hey"));
         assert_eq!(out["data"][0]["artist"], Value::from("Artist"));
+    }
+
+    const NETEASE: &str = r#"
+const CryptoJs = require("crypto-js");
+const bigInt = require("big-integer");
+function AES(a, b) {
+  var c = CryptoJs.enc.Utf8.parse(b),
+    d = CryptoJs.enc.Utf8.parse("0102030405060708"),
+    e = CryptoJs.enc.Utf8.parse(a),
+    f = CryptoJs.AES.encrypt(e, c, { iv: d, mode: CryptoJs.mode.CBC });
+  return f.toString();
+}
+function Rsa(text) {
+  text = text.split("").reverse().join("");
+  const d = "010001";
+  const e = "00e0b509f6259df8642dbc35662901477df22677ec152b5ff68ace615bb7b725152b3ab17a876aea8a5aa76d2e417629ec4ee341f56135fccf695280104e0312ecbda92557c93870114af6c9d05c4f7f0c3685b7a46bee255932575cce10b424d813cfe4875d3e82047b97ddef52741d546b8e289dc6935b3ece0462db0a22b8e7";
+  const hexText = text.split("").map(function (_) { return _.charCodeAt(0).toString(16); }).join("");
+  const res = bigInt(hexText, 16).modPow(bigInt(d, 16), bigInt(e, 16)).toString(16);
+  return Array(256 - res.length).fill("0").join("").concat(res);
+}
+module.exports = {
+  platform: "NetEaseAes",
+  version: "0.0.0",
+  async search() {
+    return { isEnd: true, data: [{ id: "1", title: AES('{"csrf_token":""}', "0CoJUm6Qyw8W8jud"), rsa: Rsa("abcdefghijklmnop") }] };
+  },
+};
+"#;
+
+    #[test]
+    fn aes_and_rsa_like_netease_plugin() {
+        let out = call_method(NETEASE, "search", &[Value::String("x".into()), Value::from(1), Value::String("music".into())])
+            .unwrap();
+        // 与 `openssl enc -aes-128-cbc` 的结果对齐
+        assert_eq!(
+            out["data"][0]["title"],
+            Value::from("eHhjXckqrtZkqcwCalCMx0QuU6Lj9L7Wxouw1iMCnB4=")
+        );
+        assert_eq!(
+            out["data"][0]["rsa"],
+            Value::from("d15a1683c992095d0c234c19966605c5c5964911268bbeda8cb8d08d834913e59d53b32358903a121b5fca784c1f5ae44951fd02524df58ecc98e52cc7cf8689b42c2e93ddf05b0592512d87f5960467e2f086c018849d76014d323500e30f13ef4cafbb0cf5a66731a3f1776c75ca35d0062dac70a3e33245afabcf47938487")
+        );
     }
 
     #[test]

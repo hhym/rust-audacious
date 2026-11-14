@@ -38,12 +38,18 @@ Windows：     %APPDATA%\audacious-rs\plugins\
 |---|---|
 | `axios` | `axios(config)` / `axios.get/post/put/patch/delete/head/options`，`params`、`headers`、`data`、`timeout`、`responseType:"text"`；返回 Promise，`data` 自动按 JSON 解析 |
 | `cheerio` | `load(html)` + 选择器 `tag` `*` `.class` `#id` `[attr]` `[attr=v]` 后代 `>` 逗号分组；集合支持 `each/eq/first/last/find/parent/children/filter/text/html/attr/data/val/hasClass/is/remove` |
-| `crypto-js` | `MD5` `SHA1` `SHA256`、`HmacSHA1` `HmacSHA256` `HmacMD5`、`enc.Hex` `enc.Base64` `enc.Utf8` |
+| `crypto-js` | `MD5` `SHA1` `SHA256`、`HmacSHA1` `HmacSHA256` `HmacMD5`；`enc.Hex` `enc.Base64` `enc.Utf8` `enc.Latin1`；`lib.WordArray`；`AES.encrypt/decrypt`（CBC / ECB，PKCS7 或无填充，密钥 128/192/256 位）；`mode` / `pad` 常量 |
 | `dayjs` | `dayjs()` / `dayjs.unix()`，`format` `valueOf` `unix` `add` `subtract` `toDate` 等常用子集 |
 | `qs` | `stringify` / `parse` |
 | `he` | `decode` / `encode` / `decodeHTML` / `encodeHTML` |
-| `big-integer` | `bigInt(...)` 的加减乘除、比较、`toString` |
+| `big-integer` | 基于 JS `BigInt` 的完整实现：`bigInt(value, radix)`、`add/subtract/multiply/divide/mod`、`modPow`（网易 RSA 加密用）、`pow/gcd`、`compare`、位运算、`toString(radix)` |
 | `musicfree/storage` | `getItem` / `setItem` / `removeItem`，落到 `<config>/audacious-rs/plugin-storage.json` |
+
+`crypto-js` 的 AES 由 Rust 侧 `aes` crate 完成（`__aes`），WordArray 的 UTF-8 / Hex / Base64 编解码在 JS 里手写，
+`CipherParams.toString()` 默认输出 Base64 —— 和真 CryptoJS 的用法保持一致（网易系插件的 `AES(text, key)` 直接返回可用密文）。
+
+`require()` 返回的模块同时挂了一个指向自身的 `default`（`axios.default === axios` 等），
+兼容 TS 编译产物里的 `axios_1.default(...)` 调用方式。
 
 另外注入了 `env`（`os` / `appVersion` / `lang` / `getUserVariables`）、`process`（`platform` / `version` / `nextTick`）、
 `console`、`module`/`exports`、`require`/`__musicfree_require`。
@@ -66,4 +72,6 @@ Windows：     %APPDATA%\audacious-rs\plugins\
 - 没有真 Node 语义：`setTimeout` / 事件循环 / `Buffer` / 流式响应 / `dayjs.extend` 未实现；
   `webdav`、`@react-native-cookies/cookies` 只给了 stub。
 - 需要登录态或加密签名的插件可能跑不通（缺 cookie 容器与自定义 UA 配置）。
+- 网易系插件已实测：`search` 能拿到真实结果；部分第三方中转 API 会限流（返回 429），
+  这类错误来自插件自己的接口，不是宿主问题。
 - 插件异常会在「在线搜索」窗口里显示错误文本（含调用栈），便于定位。
