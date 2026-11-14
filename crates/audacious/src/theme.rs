@@ -16,6 +16,8 @@ pub struct Palette {
     pub accent_soft: Color32,
     pub text: Color32,
     pub dim: Color32,
+    /// 是否深色系（决定 base visuals 与表格遮罩）
+    pub dark: bool,
 }
 
 fn shade(c: Color32, factor: f32) -> Color32 {
@@ -23,40 +25,57 @@ fn shade(c: Color32, factor: f32) -> Color32 {
     Color32::from_rgb(f(c.r()), f(c.g()), f(c.b()))
 }
 
+fn tint(c: Color32, alpha: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), alpha)
+}
+
+/// 给菜单里的小色块用：只关心主题底色。
+pub fn palette_for(theme: audcore::Theme, accent: [u8; 3]) -> Palette {
+    let mut cfg = audcore::Config::default();
+    cfg.theme = theme;
+    cfg.accent = accent;
+    palette(&cfg)
+}
+
+/// 按主题与强调色生成整套配色。
 pub fn palette(cfg: &audcore::Config) -> Palette {
-    let accent = Color32::from_rgb(cfg.accent[0], cfg.accent[1], cfg.accent[2]);
-    if cfg.dark {
-        Palette {
-            bg: Color32::from_rgb(24, 25, 28),
-            panel: Color32::from_rgb(32, 34, 38),
+    let raw = Color32::from_rgb(cfg.accent[0], cfg.accent[1], cfg.accent[2]);
+
+    match cfg.theme {
+        audcore::Theme::Dark => Palette {
+            bg: Color32::from_rgb(23, 24, 27),
+            panel: Color32::from_rgb(31, 33, 37),
             panel_alt: Color32::from_rgb(38, 40, 45),
-            field: Color32::from_rgb(20, 21, 24),
-            accent,
-            accent_soft: Color32::from_rgba_unmultiplied(
-                cfg.accent[0],
-                cfg.accent[1],
-                cfg.accent[2],
-                46,
-            ),
+            field: Color32::from_rgb(18, 19, 22),
+            accent: raw,
+            accent_soft: tint(raw, 46),
             text: Color32::from_rgb(226, 228, 232),
-            dim: Color32::from_rgb(140, 144, 152),
-        }
-    } else {
-        Palette {
-            bg: Color32::from_rgb(246, 246, 244),
-            panel: Color32::from_rgb(238, 238, 235),
-            panel_alt: Color32::from_rgb(231, 231, 227),
-            field: Color32::from_rgb(255, 255, 252),
-            accent: shade(accent, 0.85),
-            accent_soft: Color32::from_rgba_unmultiplied(
-                cfg.accent[0],
-                cfg.accent[1],
-                cfg.accent[2],
-                40,
-            ),
-            text: Color32::from_rgb(38, 40, 44),
-            dim: Color32::from_rgb(112, 116, 124),
-        }
+            dim: Color32::from_rgb(138, 142, 150),
+            dark: true,
+        },
+        audcore::Theme::Light => Palette {
+            bg: Color32::from_rgb(245, 246, 248),
+            panel: Color32::from_rgb(236, 238, 241),
+            panel_alt: Color32::from_rgb(227, 230, 234),
+            field: Color32::from_rgb(255, 255, 255),
+            accent: shade(raw, 0.78),
+            accent_soft: tint(raw, 42),
+            text: Color32::from_rgb(32, 35, 40),
+            dim: Color32::from_rgb(106, 112, 121),
+            dark: false,
+        },
+        // 橘黄：暖米底 + 橙色面板，强调色压暗一点保证对比度
+        audcore::Theme::Amber => Palette {
+            bg: Color32::from_rgb(253, 242, 227),
+            panel: Color32::from_rgb(247, 224, 197),
+            panel_alt: Color32::from_rgb(240, 210, 176),
+            field: Color32::from_rgb(255, 251, 244),
+            accent: shade(raw, 0.80),
+            accent_soft: tint(raw, 64),
+            text: Color32::from_rgb(59, 40, 20),
+            dim: Color32::from_rgb(133, 98, 62),
+            dark: false,
+        },
     }
 }
 
@@ -127,7 +146,7 @@ pub fn apply_style(ctx: &egui::Context, cfg: &audcore::Config) {
     let p = palette(cfg);
     let mut style = (*ctx.style()).clone();
 
-    let mut visuals = if cfg.dark {
+    let mut visuals = if p.dark {
         egui::Visuals::dark()
     } else {
         egui::Visuals::light()

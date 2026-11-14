@@ -87,8 +87,12 @@ pub struct App {
     show_about: bool,
     toast: Option<(String, Instant)>,
     port: u16,
-    style_key: (bool, [u8; 3]),
+    style_key: (audcore::Theme, [u8; 3]),
     mini_applied: bool,
+    /// 主题切换菜单是否展开
+    theme_menu_open: bool,
+    /// 主题按钮的位置（菜单贴着它弹出）
+    theme_button_rect: Option<egui::Rect>,
     plugins: Vec<audcore::plugin::PluginInfo>,
 }
 
@@ -117,8 +121,10 @@ impl App {
             show_about: false,
             toast: None,
             port,
-            style_key: (config.dark, config.accent),
+            style_key: (config.theme, config.accent),
             mini_applied: !config.mini,
+            theme_menu_open: false,
+            theme_button_rect: None,
             plugins: Vec::new(),
         };
         app.plugins = app.collect_plugins();
@@ -275,8 +281,8 @@ impl eframe::App for App {
         }
 
         let p = theme::palette(&self.config);
-        if self.style_key != (self.config.dark, self.config.accent) {
-            self.style_key = (self.config.dark, self.config.accent);
+        if self.style_key != (self.config.theme, self.config.accent) {
+            self.style_key = (self.config.theme, self.config.accent);
             theme::apply_style(ctx, &self.config);
         }
 
@@ -315,6 +321,7 @@ impl eframe::App for App {
             self.playlist_panel(ctx, &p);
         }
 
+        self.theme_menu_ui(ctx, &p);
         self.settings_ui(ctx, &p);
         self.eq_ui(ctx, &p);
         self.plugins_ui(ctx, &p);
@@ -526,6 +533,39 @@ impl App {
                         self.shared.send(Cmd::SetVolume(muted));
                         let _ = self.config.save();
                     }
+
+                    // 右下角：主题切换按钮（衣服图标，点一下换一套皮肤）
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            ui.add_space(10.0);
+                            let (rect, resp) =
+                                ui.allocate_exact_size(vec2(30.0, 30.0), egui::Sense::click());
+                            if resp.hovered() {
+                                ui.painter().rect_filled(
+                                    rect,
+                                    egui::CornerRadius::same(6),
+                                    p.accent_soft,
+                                );
+                            }
+                            paint_shirt(ui.painter(), rect, p.accent, p.panel);
+                            let resp = resp.on_hover_text(self.t(
+                                "切换主题（橘黄 / 浅色 / 深色）",
+                                "Switch theme (amber / light / dark)",
+                            ));
+                            if resp.clicked() {
+                                self.theme_menu_open = !self.theme_menu_open;
+                            }
+                            self.theme_button_rect = Some(rect);
+
+                            let current = if self.has_cjk {
+                                self.config.theme.label()
+                            } else {
+                                self.config.theme.label_en()
+                            };
+                            ui.label(RichText::new(current).small().color(p.dim));
+                        },
+                    );
                 });
             });
     }
@@ -656,7 +696,7 @@ impl App {
                         painter.rect_filled(rect, CornerRadius::ZERO, p.accent_soft);
                     }
                     if resp.hovered() {
-                        let fill = if self.config.dark {
+                        let fill = if p.dark {
                             Color32::from_rgba_unmultiplied(255, 255, 255, 12)
                         } else {
                             Color32::from_rgba_unmultiplied(0, 0, 0, 10)
@@ -788,7 +828,7 @@ impl App {
     fn nowband_ui(&mut self, ctx: &egui::Context, p: &Palette) {
         egui::TopBottomPanel::bottom("nowband")
             .exact_height(96.0)
-            .frame(egui::Frame::NONE.fill(if self.config.dark {
+            .frame(egui::Frame::NONE.fill(if p.dark {
                 Color32::from_rgb(17, 18, 21)
             } else {
                 p.panel_alt
@@ -957,6 +997,98 @@ impl App {
             });
     }
 
+    /// 贴着主题按钮弹出的小菜单，三选一，点完立即换肤并存盘。
+    fn theme_menu_ui(&mut self, ctx: &egui::Context, p: &Palette) {
+        if !self.theme_menu_open {
+            return;
+        }
+        let Some(anchor) = self.theme_button_rect else {
+            self.theme_menu_open = false;
+            return;
+        };
+
+        // 每个主题的底色小方块，先算好避免在闭包里反复借用 self
+        let items: Vec<(audcore::Theme, &'static str, egui::Color32, bool)> =
+            audcore::Theme::all()
+                .into_iter()
+                .map(|t| {
+                    let bg = theme::palette_for(t, self.config.accent).bg;
+                    let label = if self.has_cjk { t.label() } else { t.label_en() };
+                    (t, label, bg, self.config.theme == t)
+                })
+                .collect();
+
+        let pos = egui::pos2(anchor.right() - 160.0, anchor.bottom() + 6.0);
+        let mut chosen = None;
+        let area = egui::Area::new(egui::Id::new("theme_menu"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style())
+                    .inner_margin(egui::Margin::same(8))
+                    .show(ui, |ui| {
+                        ui.set_min_width(152.0);
+                        for (t, label, bg, selected) in &items {
+                            ui.horizontal(|ui| {
+                                let (rect, _) = ui
+                                    .allocate_exact_size(vec2(12.0, 12.0), egui::Sense::hover());
+                                ui.painter().rect_filled(
+                                    rect,
+                                    egui::CornerRadius::same(3),
+                                    *bg,
+                                );
+                                ui.painter().rect_stroke(
+                                    rect,
+                                    egui::CornerRadius::same(3),
+                                    Stroke::new(1.0_f32, p.dim),
+                                    egui::StrokeKind::Inside,
+                                );
+                                let text_color = if *selected { p.accent } else { p.text };
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new(*label).color(text_color),
+                                        )
+                                        .fill(egui::Color32::TRANSPARENT)
+                                        .stroke(Stroke::NONE),
+                                    )
+                                    .clicked()
+                                {
+                                    chosen = Some(*t);
+                                }
+                            });
+                        }
+                    });
+            });
+
+        if let Some(t) = chosen {
+            self.theme_menu_open = false;
+            self.set_theme(t);
+        }
+
+        // 点菜单外面或按 Esc 收起
+        let pointer = ctx.input(|i| i.pointer.interact_pos());
+        let pressed = ctx.input(|i| i.pointer.any_pressed());
+        let escaped = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        if escaped
+            || (pressed
+                && pointer
+                    .map(|pos| !area.response.rect.contains(pos) && !anchor.contains(pos))
+                    .unwrap_or(true))
+        {
+            self.theme_menu_open = false;
+        }
+    }
+
+    fn set_theme(&mut self, t: audcore::Theme) {
+        if self.config.theme == t {
+            return;
+        }
+        self.config.theme = t;
+        // 让下一帧的 style_key 检查发现变化并重刷 style
+        let _ = self.config.save();
+    }
+
     fn settings_ui(&mut self, ctx: &egui::Context, p: &Palette) {
         let mut open = self.show_settings;
         let mut changed = false;
@@ -1020,11 +1152,19 @@ impl App {
 
                 ui.separator();
                 ui.label(RichText::new(self.t("外观", "Appearance")).strong().color(p.accent));
-                let mut dark = self.config.dark;
-                if ui.checkbox(&mut dark, self.t("深色主题", "Dark theme")).changed() {
-                    self.config.dark = dark;
-                    changed = true;
-                }
+                ui.horizontal(|ui| {
+                    for t in audcore::Theme::all() {
+                        let label = if self.has_cjk { t.label() } else { t.label_en() };
+                        if ui
+                            .selectable_label(self.config.theme == t, label)
+                            .clicked()
+                            && self.config.theme != t
+                        {
+                            self.config.theme = t;
+                            changed = true;
+                        }
+                    }
+                });
                 ui.horizontal(|ui| {
                     ui.label(self.t("强调色", "Accent"));
                     if ui
@@ -1346,4 +1486,36 @@ pub fn paths_from_args(args: &[String]) -> Vec<PathBuf> {
         .filter(|a| !a.starts_with('-'))
         .map(PathBuf::from)
         .collect()
+}
+
+/// 在给定矩形里画一件 T 恤，用作「换肤」按钮的图标。
+fn paint_shirt(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    color: egui::Color32,
+    collar: egui::Color32,
+) {
+    let r = rect.shrink(4.0);
+    let p = |fx: f32, fy: f32| egui::pos2(r.left() + r.width() * fx, r.top() + r.height() * fy);
+
+    // 身体
+    painter.rect_filled(
+        egui::Rect::from_min_max(p(0.34, 0.28), p(0.66, 0.92)),
+        egui::CornerRadius::same(2),
+        color,
+    );
+    // 左右袖子（梯形）
+    painter.add(egui::Shape::convex_polygon(
+        vec![p(0.35, 0.28), p(0.12, 0.38), p(0.18, 0.56), p(0.35, 0.48)],
+        color,
+        Stroke::NONE,
+    ));
+    painter.add(egui::Shape::convex_polygon(
+        vec![p(0.65, 0.28), p(0.88, 0.38), p(0.82, 0.56), p(0.65, 0.48)],
+        color,
+        Stroke::NONE,
+    ));
+    // 领口：两条斜线勾出 V 形
+    painter.line_segment([p(0.42, 0.28), p(0.50, 0.42)], Stroke::new(1.5_f32, collar));
+    painter.line_segment([p(0.58, 0.28), p(0.50, 0.42)], Stroke::new(1.5_f32, collar));
 }

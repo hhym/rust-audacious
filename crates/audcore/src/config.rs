@@ -7,6 +7,46 @@ use std::path::PathBuf;
 
 use crate::playlist::RepeatMode;
 
+/// 界面主题。默认橘黄，另外提供中性浅色与中性深色两套。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Theme {
+    /// 橘黄：暖色米底 + 橙色强调（默认）
+    #[default]
+    Amber,
+    /// 浅色：中性灰白
+    Light,
+    /// 深色：中性炭黑
+    Dark,
+}
+
+impl Theme {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Theme::Amber => "橘黄主题",
+            Theme::Light => "浅色主题",
+            Theme::Dark => "深色主题",
+        }
+    }
+
+    pub fn label_en(&self) -> &'static str {
+        match self {
+            Theme::Amber => "Amber theme",
+            Theme::Light => "Light theme",
+            Theme::Dark => "Dark theme",
+        }
+    }
+
+    /// 深色系（决定 egui 的 base visuals）
+    pub fn is_dark(&self) -> bool {
+        matches!(self, Theme::Dark)
+    }
+
+    pub fn all() -> [Theme; 3] {
+        [Theme::Amber, Theme::Light, Theme::Dark]
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     /// 音量 0.0 - 1.0
@@ -19,8 +59,9 @@ pub struct Config {
     pub eq_gains: Vec<f32>,
     /// 主题强调色
     pub accent: [u8; 3],
-    /// 深色主题
-    pub dark: bool,
+    /// 界面主题：橘黄（默认）/ 浅色 / 深色
+    #[serde(default)]
+    pub theme: Theme,
     /// 迷你模式
     pub mini: bool,
     /// 上次浏览目录
@@ -37,7 +78,7 @@ impl Default for Config {
             eq_enabled: false,
             eq_gains: vec![0.0; crate::EQ_BANDS.len()],
             accent: [235, 152, 52],
-            dark: true,
+            theme: Theme::default(),
             mini: false,
             last_dir: dirs::audio_dir().or_else(dirs::home_dir),
         }

@@ -11,7 +11,7 @@ pub mod plugin;
 pub mod spectrum;
 pub mod tags;
 
-pub use config::Config;
+pub use config::{Config, Theme};
 pub use playlist::{Entry, Playlist, RepeatMode};
 
 /// 程序名，与可执行文件保持一致。
