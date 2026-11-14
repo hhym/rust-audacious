@@ -41,6 +41,7 @@ fn main() -> eframe::Result<()> {
     let viewport = egui::ViewportBuilder::default()
         .with_inner_size([1180.0, 720.0])
         .with_min_inner_size([520.0, 130.0])
+        .with_icon(AppIcon::build())
         .with_title(format!("Audacious RS {}", audcore::VERSION));
 
     let options = eframe::NativeOptions {
@@ -56,4 +57,91 @@ fn main() -> eframe::Result<()> {
             Ok(Box::new(app))
         }),
     )
+}
+
+/// 程序图标：代码里现画一个 64×64 的琥珀色圆角方块加白色音符，
+/// 免得打包时还要额外塞一个 .ico 资源。
+struct AppIcon;
+
+impl AppIcon {
+    fn build() -> egui::IconData {
+        let size = 64usize;
+        let mut rgba = vec![0u8; size * size * 4];
+        let radius = 12.0f32;
+
+        for y in 0..size {
+            for x in 0..size {
+                let fx = x as f32 + 0.5;
+                let fy = y as f32 + 0.5;
+
+                // 圆角矩形遮罩
+                let cx = fx.clamp(radius, size as f32 - radius);
+                let cy = fy.clamp(radius, size as f32 - radius);
+                let dist = ((fx - cx).powi(2) + (fy - cy).powi(2)).sqrt();
+                let alpha = if dist > radius {
+                    0.0
+                } else if dist > radius - 1.5 {
+                    (radius - dist) / 1.5
+                } else {
+                    1.0
+                };
+
+                // 竖向渐变：上亮下暗
+                let t = fy / size as f32;
+                let r = (214.0 - 28.0 * t) as u8;
+                let g = (132.0 - 26.0 * t) as u8;
+                let b = (36.0 - 12.0 * t) as u8;
+
+                let idx = (y * size + x) * 4;
+                rgba[idx] = r;
+                rgba[idx + 1] = g;
+                rgba[idx + 2] = b;
+                rgba[idx + 3] = (alpha * 255.0) as u8;
+
+                // 白色的四分音符：符头椭圆 + 符干 + 符尾
+                let note = Self::note_alpha(fx, fy);
+                if note > 0.0 {
+                    let a = (note * 255.0) as u8;
+                    let keep = (rgba[idx + 3] as f32 / 255.0).min(1.0);
+                    let a = (a as f32 * keep) as u8;
+                    rgba[idx] = (r as f32 * (1.0 - note) + 255.0 * note) as u8;
+                    rgba[idx + 1] = (g as f32 * (1.0 - note) + 255.0 * note) as u8;
+                    rgba[idx + 2] = (b as f32 * (1.0 - note) + 255.0 * note) as u8;
+                    rgba[idx + 3] = a.max(rgba[idx + 3]);
+                }
+            }
+        }
+
+        egui::IconData {
+            rgba,
+            width: size as u32,
+            height: size as u32,
+        }
+    }
+
+    /// 音符形状的覆盖透明度（0..1），坐标基于 64×64
+    fn note_alpha(x: f32, y: f32) -> f32 {
+        // 符头：略倾斜的实心椭圆
+        let (cx, cy, rx, ry) = (21.0f32, 45.0f32, 11.5f32, 8.5f32);
+        let dx = (x - cx) / rx;
+        let dy = (y - cy) / ry;
+        let head = 1.0 - (dx * dx + dy * dy);
+        if head > 0.0 {
+            return head.sqrt().min(1.0) * 3.0_f32.min(1.0);
+        }
+
+        // 符干：一根 3px 竖条
+        if (29.0..=32.0).contains(&x) && (17.0..=45.0).contains(&y) {
+            return 1.0;
+        }
+
+        // 符尾：从符干顶端向右下的弧形
+        let sx = (x - 33.0) / 9.0;
+        let sy = (y - 21.0) / 7.0;
+        if x >= 32.0 && sx * sx + sy * sy <= 1.0 && y >= 15.0 && y <= 28.0 {
+            return 1.0;
+        }
+
+        0.0
+    }
 }
