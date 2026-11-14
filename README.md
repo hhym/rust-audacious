@@ -115,7 +115,7 @@ cargo test
 
 ## 版本
 
-按习惯从 **5.0.0** 起标（`Cargo.toml` 里统一用 `workspace.package.version`）。
+按习惯从 **5.0** 起标，当前 **5.0.1**（5.0.1 修掉了 Windows 发布版弹出控制台窗口的问题，并把日志写到 `%APPDATA%\audacious-rs\app.log`）（`Cargo.toml` 里统一用 `workspace.package.version`）。
 
 ## 许可证
 

@@ -1,5 +1,8 @@
 //! audacious-rs 入口：加载配置 → 启动播放引擎 → 启动 audtool 控制服务 → 打开界面。
 
+// 发布版在 Windows 上以 GUI 子系统启动，避免弹出一个黑色控制台窗口。
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod app;
 mod effects;
 mod engine;
@@ -10,7 +13,7 @@ use audcore::Config;
 use engine::{Cmd, Shared};
 
 fn main() -> eframe::Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    init_logging();
 
     let config = Config::load();
     let shared = Shared::spawn(config.clone());
@@ -144,4 +147,23 @@ impl AppIcon {
 
         0.0
     }
+}
+
+/// 日志：平时打到 stderr；Windows 发布版没有控制台，改写到配置目录下的 app.log。
+fn init_logging() {
+    let mut builder =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
+
+    #[cfg(all(windows, not(debug_assertions)))]
+    {
+        let dir = dirs::config_dir()
+            .map(|d| d.join("audacious-rs"))
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(file) = std::fs::File::create(dir.join("app.log")) {
+            builder.target(env_logger::Target::Pipe(Box::new(file)));
+        }
+    }
+
+    let _ = builder.try_init();
 }
