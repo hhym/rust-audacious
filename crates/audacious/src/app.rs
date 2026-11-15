@@ -1319,6 +1319,29 @@ impl App {
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(12.0);
+                        if ui
+                            .add(
+                                egui::Button::new(RichText::new("≡").size(14.0).color(p.dim))
+                                    .min_size(vec2(30.0, 28.0)),
+                            )
+                            .on_hover_text(self.t("待播清单", "Playlists"))
+                            .clicked()
+                        {
+                            self.tab = MainTab::Playlists;
+                        }
+                        if ui
+                            .add(
+                                egui::Button::new(RichText::new("词").size(14.0).color(
+                                    if self.tab == MainTab::Lyrics { p.accent } else { p.dim },
+                                ))
+                                .min_size(vec2(30.0, 28.0)),
+                            )
+                            .on_hover_text(self.t("歌词", "Lyrics"))
+                            .clicked()
+                        {
+                            self.tab = MainTab::Lyrics;
+                        }
+                        ui.add_space(4.0);
                         let mut vol = self.config.volume;
                         if ui
                             .add_sized(
@@ -2749,45 +2772,132 @@ impl App {
                     .inner_margin(egui::Margin::symmetric(10, 10)),
             )
             .show(ctx, |ui| {
+                // 音源标识：圆形 logo + 当前音源名 + 「共 N 个音源 ⌄」
+                let source_name = self
+                    .media_plugins
+                    .get(self.search_plugin)
+                    .map(|pl| pl.name())
+                    .unwrap_or_else(|| self.t("本地音频", "Local audio").to_string());
+                let source_count = self.media_plugins.len();
+                let mut picker_pos: Option<egui::Pos2> = None;
                 ui.horizontal(|ui| {
-                    let (rect, _) = ui.allocate_exact_size(vec2(34.0, 34.0), Sense::hover());
+                    let (rect, _) = ui.allocate_exact_size(vec2(30.0, 30.0), Sense::hover());
+                    ui.painter()
+                        .circle_filled(rect.center(), 15.0, p.accent_soft);
                     if self.logo_texture.is_none() {
                         self.logo_texture = Some(load_logo_texture(ui.ctx()));
                     }
                     if let Some(tex) = &self.logo_texture {
+                        let inner = rect.shrink(4.0);
                         ui.painter().image(
                             tex.id(),
-                            rect,
+                            inner,
                             egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                             Color32::WHITE,
                         );
                     }
                     ui.vertical(|ui| {
                         ui.label(
-                            RichText::new("Audacious RS")
-                                .size(16.0)
+                            RichText::new(elide(&source_name, 16))
+                                .size(14.0)
                                 .strong()
                                 .color(p.text),
                         );
                         ui.label(
-                            RichText::new(self.t("本地 · 在线音源", "Local · online"))
-                                .small()
-                                .color(p.dim),
+                            RichText::new(format!(
+                                "{} {} {}",
+                                self.t("共", "of"),
+                                source_count,
+                                self.t("个音源", "sources")
+                            ))
+                            .small()
+                            .color(p.dim),
                         );
                     });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // 点这个箭头（或下面的大封面）都能换音源
+                        let arrow = ui
+                            .add(egui::Button::new(RichText::new(self.t("切换", "Switch")).size(11.0).color(p.dim)).frame(false))
+                            .on_hover_text(self.t("切换音源", "Switch source"));
+                        picker_pos = Some(arrow.rect.left_bottom() + vec2(0.0, 4.0));
+                        if arrow.clicked() {
+                            self.plugin_picker_open = !self.plugin_picker_open;
+                            self.plugin_picker_source = "sidebar";
+                            if self.plugin_picker_open {
+                                self.plugin_page = self.search_plugin / Self::PLUGIN_PAGE_SIZE;
+                            }
+                        }
+                    });
                 });
+                if self.plugin_picker_open && self.plugin_picker_source == "sidebar" {
+                    if let Some(pos) = picker_pos {
+                        let names: Vec<String> =
+                            self.media_plugins.iter().map(|pl| pl.name()).collect();
+                        let area_id = egui::Id::new(("main-plugin-picker", "sidebar"));
+                        self.plugin_picker_ui(ui.ctx(), pos, &names, p, true, area_id);
+                    }
+                }
 
-                ui.add_space(10.0);
-                ui.label(
-                    RichText::new(self.t("当前音源", "Source"))
-                        .small()
-                        .color(p.dim),
-                );
+                // 播放封面 + 「＋」添加文件
+                ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    self.plugin_selector(ui, p, "sidebar");
-                    if ui.small_button("＋").on_hover_text(self.t("重新扫描插件", "Rescan")).clicked()
-                    {
-                        self.reload_media_plugins();
+                    let (rect, _) = ui.allocate_exact_size(vec2(52.0, 52.0), Sense::hover());
+                    ui.painter()
+                        .rect_filled(rect, CornerRadius::same(8), p.accent_soft);
+                    let painter = ui.painter();
+                    painter.rect_stroke(
+                        rect,
+                        CornerRadius::same(8),
+                        Stroke::new(1.0_f32, p.panel),
+                        StrokeKind::Inside,
+                    );
+                    if !self.state.title.is_empty() {
+                        painter.text(
+                            rect.center(),
+                            Align2::CENTER_CENTER,
+                            self.state
+                                .title
+                                .chars()
+                                .next()
+                                .unwrap_or('♪')
+                                .to_string(),
+                            FontId::proportional(22.0),
+                            p.accent,
+                        );
+                    } else {
+                        painter.text(
+                            rect.center(),
+                            Align2::CENTER_CENTER,
+                            "♪",
+                            FontId::proportional(22.0),
+                            p.accent,
+                        );
+                    }
+                    ui.add_space(4.0);
+                    let (add_rect, resp) =
+                        ui.allocate_exact_size(vec2(52.0, 52.0), Sense::click());
+                    let painter = ui.painter();
+                    painter.rect_filled(add_rect, CornerRadius::same(8), p.bg);
+                    painter.rect_stroke(
+                        add_rect,
+                        CornerRadius::same(8),
+                        Stroke::new(1.0_f32, if resp.hovered() { p.accent } else { p.panel }),
+                        StrokeKind::Inside,
+                    );
+                    painter.text(
+                        add_rect.center(),
+                        Align2::CENTER_CENTER,
+                        "＋",
+                        FontId::proportional(22.0),
+                        if resp.hovered() { p.accent } else { p.dim },
+                    );
+                    if resp.clicked() {
+                        self.browser = Some(Browser::new(
+                            self.config
+                                .last_dir
+                                .clone()
+                                .unwrap_or_else(|| PathBuf::from(".")),
+                        ));
                     }
                 });
 
@@ -2801,7 +2911,13 @@ impl App {
                     self.t("喜欢", "Liked"),
                     Some(self.liked.len()),
                 );
-                self.sidebar_tab(ui, p, MainTab::Playlists, self.t("待播清单", "Playlists"), None);
+                self.sidebar_tab(
+                    ui,
+                    p,
+                    MainTab::Playlists,
+                    self.t("待播清单", "Playlists"),
+                    Some(Self::playlist_files().len()),
+                );
                 self.sidebar_tab(
                     ui,
                     p,
@@ -2877,8 +2993,21 @@ impl App {
                     } else if resp.hovered() {
                         ui.painter().rect_filled(rect, CornerRadius::same(5), p.panel);
                     }
+                    let cover = egui::Rect::from_center_size(
+                        rect.left_center() + vec2(16.0, 0.0),
+                        vec2(18.0, 18.0),
+                    );
+                    ui.painter()
+                        .rect_filled(cover, CornerRadius::same(4), p.accent_soft);
                     ui.painter().text(
-                        rect.left_center() + vec2(6.0, 0.0),
+                        cover.center(),
+                        Align2::CENTER_CENTER,
+                        album.chars().next().unwrap_or('♪').to_string(),
+                        FontId::proportional(9.5),
+                        p.accent,
+                    );
+                    ui.painter().text(
+                        rect.left_center() + vec2(32.0, 0.0),
                         Align2::LEFT_CENTER,
                         text,
                         FontId::proportional(11.5),
@@ -3006,7 +3135,10 @@ impl App {
             ),
             MainTab::Lyrics => (
                 self.t("歌词", "Lyrics"),
-                self.t("跟随正在播放的曲目", "Follows the current track"),
+                self.t(
+                    "跟着唱，可切卡拉OK / 整段滚动",
+                    "Sing along — karaoke or whole-page scroll",
+                ),
             ),
             MainTab::Album => (
                 self.t("专辑", "Album"),
@@ -3061,18 +3193,28 @@ impl App {
         } else {
             format!("{} · {}", self.state.artist, self.state.album)
         };
+        let mut align = self.config.lyric_align;
+        let mut karaoke = self.config.lyric_karaoke;
         ui.horizontal(|ui| {
             ui.add_space(20.0);
             ui.vertical(|ui| {
-                ui.label(RichText::new(&title).size(21.0).color(p.accent));
+                ui.label(RichText::new(&title).size(19.0).strong().color(p.text));
                 ui.label(RichText::new(sub).small().color(p.dim));
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(18.0);
+                // 右侧模式胶囊：卡拉OK 选中时实心强调，整段滚动是描边
+                if lyric_pill(ui, p, self.t("整段滚动", "Scroll"), !karaoke).clicked() {
+                    karaoke = false;
+                }
+                if lyric_pill(ui, p, self.t("卡拉OK", "Karaoke"), karaoke).clicked() {
+                    karaoke = true;
+                }
             });
         });
 
-        // 对齐方式 + 显示模式
-        let mut align = self.config.lyric_align;
-        let mut karaoke = self.config.lyric_karaoke;
-        ui.add_space(6.0);
+        // 对齐方式：小字一行，不抢视觉
+        ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.add_space(20.0);
             ui.label(RichText::new(self.t("对齐", "Align")).small().color(p.dim));
@@ -3081,23 +3223,11 @@ impl App {
                 (1u8, self.t("居中", "Center")),
                 (2u8, self.t("居右", "Right")),
             ] {
-                if ui.selectable_label(align == value, label).clicked() {
+                let small = RichText::new(label).size(11.5);
+                let color = if align == value { p.accent } else { p.dim };
+                if ui.add(egui::Button::new(small.color(color)).frame(false)).clicked() {
                     align = value;
                 }
-            }
-            ui.add_space(14.0);
-            ui.label(RichText::new(self.t("模式", "Mode")).small().color(p.dim));
-            if ui
-                .selectable_label(!karaoke, self.t("滚动歌词", "Scroll"))
-                .clicked()
-            {
-                karaoke = false;
-            }
-            if ui
-                .selectable_label(karaoke, self.t("卡拉OK", "Karaoke"))
-                .clicked()
-            {
-                karaoke = true;
             }
         });
         if align != self.config.lyric_align || karaoke != self.config.lyric_karaoke {
@@ -4269,6 +4399,25 @@ fn open_in_file_manager(dir: &std::path::Path) {
 }
 
 /// 表格里把过长的文字截断，避免把窗口撑宽。
+/// 歌词页右上角的模式胶囊（选中实心、未选中描边）。
+fn lyric_pill(ui: &mut egui::Ui, p: &Palette, label: &str, active: bool) -> egui::Response {
+    let text = RichText::new(label).size(12.0).color(if active {
+        Color32::WHITE
+    } else {
+        p.text
+    });
+    ui.add(
+        egui::Button::new(text)
+            .fill(if active { p.accent } else { p.bg })
+            .stroke(Stroke::new(
+                1.0_f32,
+                if active { p.accent } else { p.panel },
+            ))
+            .corner_radius(egui::CornerRadius::same(6))
+            .min_size(vec2(74.0, 27.0)),
+    )
+}
+
 fn elide(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         text.to_string()
