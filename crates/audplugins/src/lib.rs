@@ -412,10 +412,21 @@ fn call_method(code: &str, method: &str, args: &[Value]) -> anyhow::Result<Value
 
 /// 在已经准备好的上下文里调用 `exports[method](...args)`，返回 JSON。
 pub(crate) fn invoke_exports(
+    ctx: &mut Context,
+    exports: JsValue,
+    method: &str,
+    args: &[Value],
+) -> anyhow::Result<Value> {
+    invoke_exports_with(ctx, exports, method, args, std::time::Duration::from_secs(3))
+}
+
+/// 同 [`invoke_exports`]，但可以给更长的预算：扫码登录这类要等用户操作的方法需要。
+pub(crate) fn invoke_exports_with(
     mut ctx: &mut Context,
     exports: JsValue,
     method: &str,
     args: &[Value],
+    budget: std::time::Duration,
 ) -> anyhow::Result<Value> {
     let args_value = JsValue::from_json(&Value::Array(args.to_vec()), ctx)
         .map_err(|e| anyhow::anyhow!("参数转换失败: {e}"))?;
@@ -454,17 +465,25 @@ __invokeDone = false; __invokeResult = null; __invokeError = null;
     ctx.eval(Source::from_bytes(&src))
         .map_err(|e| anyhow::anyhow!("调用 {method} 失败: {e}"))?;
 
-    // 把微任务队列跑干净；宿主 HTTP 是同步的，通常一两轮就结束
-    for _ in 0..64 {
+    // 把微任务队列跑干净；宿主 HTTP 是同步的，通常一两轮就结束。
+    // 插件也可能在等网络或等用户扫码，这里按预算一直转，预算用完再判超时。
+    let deadline = std::time::Instant::now() + budget;
+    loop {
         ctx.run_jobs().ok();
         if global_bool(&mut ctx, "__invokeDone") {
             break;
         }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "{method} 在 {} 秒内没有返回结果（可能还在等网络响应或用户操作）",
+                budget.as_secs()
+            );
+        }
         // MyGo 插件可能有 setTimeout，顺手推进一下
         if global_bool(&mut ctx, "__hasTimers") {
             let _ = ctx.eval(Source::from_bytes("__runTimers();"));
-            std::thread::sleep(std::time::Duration::from_millis(5));
         }
+        std::thread::sleep(std::time::Duration::from_millis(5));
     }
 
     if let Some(err) = global_string(&mut ctx, "__invokeError") {

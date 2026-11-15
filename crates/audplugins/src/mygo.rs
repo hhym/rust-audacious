@@ -24,7 +24,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::{invoke_exports, platform_name, storage_access};
+use crate::{invoke_exports, invoke_exports_with, platform_name, storage_access};
 
 /// mygo 的插件清单。
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -250,6 +250,16 @@ impl MygoPlugin {
 
     /// 调用任意导出方法，参数是一个对象（和 mygo 的签名一致）。
     pub fn call(&self, method: &str, params: Value) -> anyhow::Result<Value> {
+        self.call_with_budget(method, params, std::time::Duration::from_secs(8))
+    }
+
+    /// 可以指定等待预算的调用：`signIn` 要等用户扫码，给的预算长一些。
+    pub fn call_with_budget(
+        &self,
+        method: &str,
+        params: Value,
+        budget: std::time::Duration,
+    ) -> anyhow::Result<Value> {
         if let Some(err) = &self.info.error {
             anyhow::bail!("插件不可用: {err}");
         }
@@ -257,7 +267,7 @@ impl MygoPlugin {
         let mut ctx = mygo_context(self);
         let exports = eval_module(&mut ctx, &self.code)
             .map_err(|e| anyhow::anyhow!("插件代码执行失败: {e}"))?;
-        invoke_exports(&mut ctx, exports, method, &[params])
+        invoke_exports_with(&mut ctx, exports, method, &[params], budget)
     }
 
     /// 搜索音乐：`search({query, kind:"tracks", offset})`，返回规范化后的条目。
@@ -321,9 +331,16 @@ impl MygoPlugin {
         sink: std::sync::mpsc::Sender<serde_json::Value>,
     ) -> anyhow::Result<Value> {
         crate::set_sign_in_sink(Some(sink));
-        let result = self.call("signIn", json!({}));
+        // 插件通常等用户扫完码才 resolve，给 30 秒预算；超时按「还在等」处理而不是当成失败
+        let result = self.call_with_budget("signIn", json!({}), std::time::Duration::from_secs(30));
         crate::set_sign_in_sink(None);
-        result
+        match result {
+            // 插件还在等用户扫码：不是失败，二维码已经推到宿主了
+            Err(err) if err.to_string().contains("没有返回结果") => {
+                Ok(json!({ "__pending": true }))
+            }
+            other => other,
+        }
     }
 
     /// 歌词：`lyrics({id})` → `{lrc, translation}` 或 `{lines}`
@@ -936,6 +953,40 @@ mod fetch_binary_tests {
         assert_eq!(out["bytes"][0], 0, "{out}");
         assert_eq!(out["bytes"][1], 1, "{out}");
         assert_eq!(out["bytes"][2], 255, "{out}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod pending_tests {
+    use super::*;
+
+    /// 插件等用户扫码时 promise 一直不 resolve：预算用完要报「没有返回结果」，而不是别的错。
+    #[test]
+    fn pending_method_reports_timeout() {
+        let dir = std::env::temp_dir().join(format!("mygo-pending-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("plugin.json"),
+            r#"{"id":"pending-demo","name":"等待演示","version":"1.0.0","main":"index.js","permissions":{"network":[]}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("index.js"),
+            r#"
+            export async function signIn() {
+              await host.signInPrompt({ qr: "https://example.com/qr", text: "扫码" });
+              await new Promise(function () {});
+            }
+            "#,
+        )
+        .unwrap();
+        let plugin = MygoPlugin::load(&dir);
+        assert!(plugin.info.error.is_none(), "{:?}", plugin.info.error);
+        let err = plugin
+            .call_with_budget("signIn", serde_json::json!({}), std::time::Duration::from_millis(300))
+            .expect_err("应当超时");
+        assert!(err.to_string().contains("没有返回结果"), "{err}");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

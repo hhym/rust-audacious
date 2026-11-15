@@ -203,9 +203,17 @@ impl LoginState {
 
         if let Some(rx) = &self.rx {
             match rx.try_recv() {
-                Ok(Event::SignInDone(Ok(_))) => {
+                Ok(Event::SignInDone(Ok(value))) => {
                     self.rx = None;
-                    self.status = Status::Done;
+                    if value["__pending"].as_bool().unwrap_or(false) {
+                        // 二维码已经显示出来了，插件在等手机端确认
+                        self.status = Status::Waiting;
+                        self.message =
+                            "二维码已显示：用手机扫完并在 App 里确认即可，登录态由插件自己保存。"
+                                .into();
+                    } else {
+                        self.status = Status::Done;
+                    }
                 }
                 Ok(Event::SignInDone(Err(err))) => {
                     self.rx = None;

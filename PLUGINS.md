@@ -279,6 +279,8 @@ export async function loginPoll({ key }) {
   没声明的命令直接拒绝；子进程的 stdin/stdout 走 JSON 行协议，helper 由插件包自己带（汽水音乐 1.0.12 的
   `bin/qishui-helper-windows-amd64.exe` 属于这种情况，Linux 包缺该二进制时会得到「请允许插件启动程序」提示）。
 - `host.signInPrompt` 只是把二维码显示出来并立即返回，轮询仍由插件自己做；宿主不碰账号密码。
+- 插件方法调用有等待预算：普通方法 8 秒，`signIn` 30 秒。扫码类插件通常扫完才 resolve，
+  超过预算时宿主把 `signIn` 当作「还在等用户操作」显示二维码，而不是报成失败。
   二维码是本地编码的（`qrcode` crate），不依赖外部图片服务。
 - `fetch` 的响应支持 `text()` / `json()` / `arrayBuffer()` / `bytes()` / `blob()`：
   `arrayBuffer()` 走宿主给的 base64 原始字节，图片 / 音频这类二进制不会被当成文本截坏；
