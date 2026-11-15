@@ -29,6 +29,79 @@ fn tint(c: Color32, alpha: u8) -> Color32 {
     Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), alpha)
 }
 
+/// 从封面里挑一个「能当强调色」的颜色：按 4bit 量化分桶，偏向鲜艳、避开近白近黑的像素。
+pub fn accent_from_image(bytes: &[u8], dark_theme: bool) -> Option<[u8; 3]> {
+    use std::collections::HashMap;
+    let img = image::load_from_memory(bytes).ok()?.thumbnail(48, 48).to_rgba8();
+    let mut buckets: HashMap<u8, (u32, u32, u32, u32)> = HashMap::new();
+    for px in img.pixels() {
+        let [r, g, b, a] = px.0;
+        if a < 32 {
+            continue;
+        }
+        let max = r.max(g).max(b) as f32;
+        let min = r.min(g).min(b) as f32;
+        let sat = if max <= 0.0 { 0.0 } else { (max - min) / max };
+        let lum = 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32;
+        // 太灰、太白、太黑的像素不参与，不然挑出来是灰白
+        if sat < 0.18 || lum < 24.0 || lum > 236.0 {
+            continue;
+        }
+        let key = (((r as u16 >> 4) << 8) | ((g as u16 >> 4) << 4) | (b as u16 >> 4)) as u8;
+        let e = buckets.entry(key).or_insert((0, 0, 0, 0));
+        e.0 += 1;
+        e.1 += r as u32;
+        e.2 += g as u32;
+        e.3 += b as u32;
+    }
+    let best = buckets
+        .values()
+        .max_by_key(|(count, ..)| *count)
+        .copied()?;
+    let n = best.0.max(1);
+    let (r, g, b) = ((best.1 / n) as u8, (best.2 / n) as u8, (best.3 / n) as u8);
+    let pick = vividify([r, g, b], dark_theme);
+    let c = Color32::from_rgb(pick[0], pick[1], pick[2]);
+    if (c.r() as f32 + c.g() as f32 + c.b() as f32) < 120.0 {
+        return None;
+    }
+    Some(pick)
+}
+
+/// 把封面挑出来的颜色调成「能当强调色」的版本：先把饱和度拉到 0.55 以上（避免粉彩感），
+/// 再按深浅主题调亮度——深色主题提亮到看得清，浅色主题压暗一点保对比度。
+fn vividify(c: [u8; 3], dark_theme: bool) -> [u8; 3] {
+    let (r, g, b) = (c[0] as f32, c[1] as f32, c[2] as f32);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let sat = if max <= 0.0 { 0.0 } else { (max - min) / max };
+    let target_sat = if dark_theme { 0.62 } else { 0.58 };
+    let k = if sat > 0.02 {
+        (target_sat / sat).clamp(1.0, 4.0)
+    } else {
+        1.0
+    };
+    let boost = |v: f32| (min + (v - min) * k).clamp(0.0, 255.0);
+    let (mut r, mut g, mut b) = (boost(r), boost(g), boost(b));
+    let max = r.max(g).max(b);
+    if dark_theme {
+        // 深底上的强调色要够亮才看得清
+        let target = 205.0_f32;
+        if max < target {
+            let f = (target / max.max(1.0)).min(2.6);
+            r *= f;
+            g *= f;
+            b *= f;
+        }
+    } else if max > 185.0 {
+        let f = 185.0 / max;
+        r *= f;
+        g *= f;
+        b *= f;
+    }
+    [r as u8, g as u8, b as u8]
+}
+
 /// 给菜单里的小色块用：只关心主题底色。
 pub fn palette_for(theme: audcore::Theme, accent: [u8; 3]) -> Palette {
     let mut cfg = audcore::Config::default();
@@ -262,4 +335,34 @@ pub fn fit_text(text: &str, width: f32, font_size: f32) -> String {
 /// 省略号形式的时长。
 pub fn time_text(seconds: f64) -> String {
     audcore::config::format_time(seconds)
+}
+
+#[cfg(test)]
+mod cover_accent_tests {
+    use super::*;
+
+    fn solid(r: u8, g: u8, b: u8) -> Vec<u8> {
+        let mut img = image::RgbaImage::new(40, 40);
+        for px in img.pixels_mut() {
+            px.0 = [r, g, b, 255];
+        }
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .unwrap();
+        out
+    }
+
+    #[test]
+    fn picks_the_colorful_pixel() {
+        let png = solid(220, 40, 60);
+        let pick = accent_from_image(&png, false).expect("纯红封面应该挑得出颜色");
+        assert!(pick[0] > pick[1] && pick[0] > pick[2], "挑出来偏红：{pick:?}");
+    }
+
+    #[test]
+    fn gray_cover_has_no_accent() {
+        let png = solid(128, 128, 128);
+        assert!(accent_from_image(&png, false).is_none(), "灰封面不该挑出颜色");
+    }
 }

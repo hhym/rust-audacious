@@ -213,6 +213,10 @@ pub struct App {
     album_art: std::collections::HashMap<String, Option<egui::TextureHandle>>,
     /// 迷你播放器用的圆形封面
     album_art_round: std::collections::HashMap<String, Option<egui::TextureHandle>>,
+    /// 按专辑缓存「封面主色」，`None` 表示这张封面挑不出合适的颜色
+    album_accent: std::collections::HashMap<String, Option<[u8; 3]>>,
+    /// 当前生效的封面色（`config.cover_accent` 打开时才有）
+    cover_accent_rgb: Option<[u8; 3]>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -307,6 +311,8 @@ impl App {
             logo_texture: None,
             album_art: std::collections::HashMap::new(),
             album_art_round: std::collections::HashMap::new(),
+            album_accent: std::collections::HashMap::new(),
+            cover_accent_rgb: None,
         };
         app.plugins = app.collect_plugins();
         app.reload_media_plugins();
@@ -521,6 +527,7 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.sync();
+        self.refresh_cover_accent();
         self.poll_media_channels();
         self.poll_home();
         self.login.tick(ctx);
@@ -535,7 +542,7 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
         }
 
-        let p = theme::palette(&self.config);
+        let p = self.pal();
         if self.style_key != (self.config.theme, self.config.accent) {
             self.style_key = (self.config.theme, self.config.accent);
             theme::apply_style(ctx, &self.config);
@@ -1616,12 +1623,18 @@ impl App {
             return;
         };
 
+        // 跟随封面时，小方块里的强调色点也用封面色
+        let live_accent = if self.config.cover_accent {
+            self.cover_accent_rgb.unwrap_or(self.config.accent)
+        } else {
+            self.config.accent
+        };
         // 每个主题的底色小方块，先算好避免在闭包里反复借用 self
         let items: Vec<(audcore::Theme, &'static str, egui::Color32, bool)> =
             audcore::Theme::all()
                 .into_iter()
                 .map(|t| {
-                    let bg = theme::palette_for(t, self.config.accent).bg;
+                    let bg = theme::palette_for(t, live_accent).bg;
                     let label = if self.has_cjk { t.label() } else { t.label_en() };
                     (t, label, bg, self.config.theme == t)
                 })
@@ -1654,7 +1667,7 @@ impl App {
                                 ui.painter().rect_filled(
                                     dot,
                                     egui::CornerRadius::same(3),
-                                    theme::palette_for(*t, self.config.accent).accent,
+                                    theme::palette_for(*t, live_accent).accent,
                                 );
                                 ui.painter().rect_stroke(
                                     rect,
@@ -1676,6 +1689,16 @@ impl App {
                                     chosen = Some(*t);
                                 }
                             });
+                        }
+                        ui.separator();
+                        let mut follow = self.config.cover_accent;
+                        let label = self.t("跟随封面取色", "Accent from cover");
+                        if ui.checkbox(&mut follow, label).changed() {
+                            self.config.cover_accent = follow;
+                            self.album_accent.clear();
+                            self.cover_accent_rgb = None;
+                            let _ = self.config.save();
+                            self.theme_menu_open = false;
                         }
                     });
             });
@@ -1790,6 +1813,16 @@ impl App {
                         .color_edit_button_srgb(&mut self.config.accent)
                         .changed()
                     {
+                        changed = true;
+                    }
+                    let mut follow = self.config.cover_accent;
+                    if ui
+                        .checkbox(&mut follow, self.t("跟随封面", "From cover"))
+                        .changed()
+                    {
+                        self.config.cover_accent = follow;
+                        self.album_accent.clear();
+                        self.cover_accent_rgb = None;
                         changed = true;
                     }
                 });
@@ -3241,7 +3274,47 @@ impl App {
 
     /// 当前主题的强调色（迷你播放器先把 palette 借不走，这里单独取一份）。
     fn config_accent(&self) -> Color32 {
-        theme::palette(&self.config).accent
+        self.pal().accent
+    }
+
+    /// 当前这套配色：跟随封面的强调色会盖掉配置里的 `accent`。
+    fn pal(&self) -> theme::Palette {
+        match self.cover_accent_rgb {
+            Some(a) if self.config.cover_accent => {
+                theme::palette_for(self.config.theme, a)
+            }
+            _ => theme::palette(&self.config),
+        }
+    }
+
+    /// 换曲时重新从封面挑主色，同一张专辑走缓存。
+    fn refresh_cover_accent(&mut self) {
+        if !self.config.cover_accent {
+            self.cover_accent_rgb = None;
+            return;
+        }
+        let album = self.state.album.clone();
+        if album.is_empty() {
+            self.cover_accent_rgb = None;
+            return;
+        }
+        if let Some(cached) = self.album_accent.get(&album) {
+            self.cover_accent_rgb = *cached;
+            return;
+        }
+        let title = self.state.title.clone();
+        let dark = self.config.theme.is_dark();
+        let bytes = self
+            .playlist
+            .entries
+            .iter()
+            .find(|e| e.album == album && (title.is_empty() || e.title == title))
+            .and_then(|e| audcore::tags::read_art(&e.path));
+        let accent = bytes
+            .as_deref()
+            .and_then(|b| theme::accent_from_image(b, dark));
+        self.album_accent.insert(album, accent);
+        self.cover_accent_rgb = accent;
     }
 
     /// 当前曲目在「喜欢」里的样子（本地文件按路径，在线按插件 + id）。

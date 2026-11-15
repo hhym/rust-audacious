@@ -83,6 +83,9 @@ pub struct Config {
     pub eq_gains: Vec<f32>,
     /// 主题强调色
     pub accent: [u8; 3],
+    /// 强调色跟着当前曲目封面取（true 时 `accent` 只当兜底）
+    #[serde(default)]
+    pub cover_accent: bool,
     /// 界面主题：橘黄（默认）/ 浅色 / 深色
     #[serde(default)]
     pub theme: Theme,
@@ -108,6 +111,7 @@ impl Default for Config {
             eq_enabled: false,
             eq_gains: vec![0.0; crate::EQ_BANDS.len()],
             accent: [235, 152, 52],
+            cover_accent: false,
             theme: Theme::default(),
             mini: false,
             last_dir: dirs::audio_dir().or_else(dirs::home_dir),
