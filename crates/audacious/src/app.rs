@@ -2676,14 +2676,16 @@ impl App {
         ui.separator();
     }
 
-    /// 歌词页：按时间轴滚动高亮，数据来自插件的 getLyric / lyrics。
+    /// 歌词页：可切对齐方式（居左/居中/居右）与「滚动歌词 / 卡拉OK」两种模式。
     fn lyrics_tab(&mut self, ui: &mut egui::Ui, p: &Palette) {
-        ui.add_space(10.0);
-        let playing_title = self.state.title.clone();
-        if playing_title.is_empty() {
+        ui.add_space(8.0);
+        let title = self.state.title.clone();
+        if title.is_empty() {
             ui.horizontal(|ui| {
                 ui.add_space(20.0);
-                ui.label(RichText::new(self.t("还没有正在播放的歌", "Nothing playing")).color(p.dim));
+                ui.label(
+                    RichText::new(self.t("还没有正在播放的歌", "Nothing playing")).color(p.dim),
+                );
             });
             return;
         }
@@ -2695,11 +2697,49 @@ impl App {
         ui.horizontal(|ui| {
             ui.add_space(20.0);
             ui.vertical(|ui| {
-                ui.label(RichText::new(&playing_title).size(21.0).color(p.accent));
+                ui.label(RichText::new(&title).size(21.0).color(p.accent));
                 ui.label(RichText::new(sub).small().color(p.dim));
             });
         });
-        ui.add_space(10.0);
+
+        // 对齐方式 + 显示模式
+        let mut align = self.config.lyric_align;
+        let mut karaoke = self.config.lyric_karaoke;
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.add_space(20.0);
+            ui.label(RichText::new(self.t("对齐", "Align")).small().color(p.dim));
+            for (value, label) in [
+                (0u8, self.t("居左", "Left")),
+                (1u8, self.t("居中", "Center")),
+                (2u8, self.t("居右", "Right")),
+            ] {
+                if ui.selectable_label(align == value, label).clicked() {
+                    align = value;
+                }
+            }
+            ui.add_space(14.0);
+            ui.label(RichText::new(self.t("模式", "Mode")).small().color(p.dim));
+            if ui
+                .selectable_label(!karaoke, self.t("滚动歌词", "Scroll"))
+                .clicked()
+            {
+                karaoke = false;
+            }
+            if ui
+                .selectable_label(karaoke, self.t("卡拉OK", "Karaoke"))
+                .clicked()
+            {
+                karaoke = true;
+            }
+        });
+        if align != self.config.lyric_align || karaoke != self.config.lyric_karaoke {
+            self.config.lyric_align = align;
+            self.config.lyric_karaoke = karaoke;
+            let _ = self.config.save();
+        }
+
+        ui.add_space(6.0);
 
         if self.current_online.is_none() {
             ui.horizontal(|ui| {
@@ -2720,7 +2760,8 @@ impl App {
             self.lyric_key = key;
             self.start_lyric_load();
         }
-        match &self.lyric_state {
+
+        match self.lyric_state.clone() {
             LyricState::Loading => {
                 ui.horizontal(|ui| {
                     ui.add_space(20.0);
@@ -2739,54 +2780,162 @@ impl App {
                 });
             }
             LyricState::Plain(text) => {
-                let text = text.clone();
+                let align = self.config.lyric_align;
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         ui.add_space(10.0);
-                        ui.horizontal_wrapped(|ui| {
-                            ui.add_space(20.0);
-                            ui.label(RichText::new(text).size(15.0).color(p.text));
-                        });
+                        let rich = RichText::new(text.clone()).size(15.0).color(p.text);
+                        match align {
+                            0 => {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.add_space(20.0);
+                                    ui.label(rich);
+                                });
+                            }
+                            2 => {
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Min),
+                                    |ui| {
+                                        ui.add_space(20.0);
+                                        ui.label(rich);
+                                    },
+                                );
+                            }
+                            _ => {
+                                ui.vertical_centered(|ui| {
+                                    ui.label(rich);
+                                });
+                            }
+                        }
                     });
             }
             LyricState::Lines(lines) => {
-                let lines = lines.clone();
                 let pos = self.state.position;
+                let len = self.state.length.max(1.0);
                 let mut active = 0usize;
                 for (i, (t, _)) in lines.iter().enumerate() {
                     if *t <= pos + 0.05 {
                         active = i;
                     }
                 }
-                let changed = self.lyric_active != active;
-                self.lyric_active = active;
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.add_space(ui.available_height() * 0.3);
-                        for (i, (_, text)) in lines.iter().enumerate() {
-                            let is_active = i == active;
-                            let color = if is_active { p.accent } else { p.dim };
-                            let size = if is_active { 18.0 } else { 14.5 };
-                            let text = if is_active {
-                                RichText::new(text).size(size).color(color).strong()
-                            } else {
-                                RichText::new(text).size(size).color(color)
-                            };
-                            let resp = ui.horizontal(|ui| {
-                                ui.add_space(20.0);
-                                ui.label(text)
-                            });
-                            if is_active && changed {
-                                ui.scroll_to_rect(resp.response.rect, Some(egui::Align::Center));
+                if self.config.lyric_karaoke {
+                    self.karaoke_view(ui, p, &lines, active, pos, len);
+                } else {
+                    let changed = self.lyric_active != active;
+                    self.lyric_active = active;
+                    let align = self.config.lyric_align;
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.add_space(ui.available_height() * 0.25);
+                            let width = ui.available_width();
+                            for (i, (_, text)) in lines.iter().enumerate() {
+                                let is_active = i == active;
+                                let height = if is_active { 36.0 } else { 26.0 };
+                                let (rect, _) = ui.allocate_exact_size(
+                                    vec2(width, height),
+                                    Sense::hover(),
+                                );
+                                let color = if is_active { p.accent } else { p.dim };
+                                let font = egui::FontId::proportional(if is_active {
+                                    18.0
+                                } else {
+                                    14.5
+                                });
+                                let x = match align {
+                                    0 => rect.left() + 24.0,
+                                    2 => rect.right() - 24.0,
+                                    _ => rect.center().x,
+                                };
+                                let anchor = match align {
+                                    0 => Align2::LEFT_CENTER,
+                                    2 => Align2::RIGHT_CENTER,
+                                    _ => Align2::CENTER_CENTER,
+                                };
+                                ui.painter().text(
+                                    egui::pos2(x, rect.center().y),
+                                    anchor,
+                                    text,
+                                    font,
+                                    color,
+                                );
+                                if is_active && changed {
+                                    ui.scroll_to_rect(rect, Some(egui::Align::Center));
+                                }
                             }
-                        }
-                        ui.add_space(ui.available_height() * 0.5);
-                    });
+                            ui.add_space(ui.available_height() * 0.5);
+                        });
+                }
             }
             LyricState::Idle => {}
         }
+    }
+
+    /// 卡拉OK 模式：上一行 / 当前行（按行时长做扫色）/ 下一行。
+    fn karaoke_view(
+        &self,
+        ui: &mut egui::Ui,
+        p: &Palette,
+        lines: &[(f64, String)],
+        active: usize,
+        pos: f64,
+        len: f64,
+    ) {
+        let align = self.config.lyric_align;
+        let width = ui.available_width();
+        let height = ui.available_height().max(120.0);
+        let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+        let center_y = rect.center().y;
+        let x = match align {
+            0 => rect.left() + 28.0,
+            2 => rect.right() - 28.0,
+            _ => rect.center().x,
+        };
+        let anchor = match align {
+            0 => Align2::LEFT_CENTER,
+            2 => Align2::RIGHT_CENTER,
+            _ => Align2::CENTER_CENTER,
+        };
+        let painter = ui.painter();
+
+        if active > 0 {
+            if let Some((_, prev)) = lines.get(active - 1) {
+                painter.text(
+                    egui::pos2(x, center_y - 58.0),
+                    anchor,
+                    prev,
+                    egui::FontId::proportional(14.0),
+                    p.dim,
+                );
+            }
+        }
+        if let Some((_, next)) = lines.get(active + 1) {
+            painter.text(
+                egui::pos2(x, center_y + 58.0),
+                anchor,
+                next,
+                egui::FontId::proportional(14.0),
+                p.dim,
+            );
+        }
+
+        let Some((start, cur)) = lines.get(active) else { return };
+        let end = lines
+            .get(active + 1)
+            .map(|(t, _)| *t)
+            .unwrap_or(len.max(*start + 3.0));
+        let frac = ((pos - start) / (end - start).max(0.1)).clamp(0.0, 1.0) as f32;
+
+        let font = egui::FontId::proportional(28.0);
+        let text_rect =
+            painter.text(egui::pos2(x, center_y), anchor, cur, font.clone(), p.dim);
+        // 已唱过的部分用强调色扫上去
+        let mut clip = text_rect;
+        clip.set_width(text_rect.width() * frac);
+        clip = clip.intersect(rect);
+        let clipped = painter.with_clip_rect(clip);
+        clipped.text(egui::pos2(x, center_y), anchor, cur, font, p.accent);
     }
 
     /// 当前在线曲目的歌词缓存键。

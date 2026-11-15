@@ -67,6 +67,12 @@ pub struct Config {
     /// 上次浏览目录
     #[serde(default)]
     pub last_dir: Option<PathBuf>,
+    /// 歌词对齐：0 居左 / 1 居中 / 2 居右
+    #[serde(default)]
+    pub lyric_align: u8,
+    /// 歌词模式：false 滚动歌词 / true 卡拉OK
+    #[serde(default)]
+    pub lyric_karaoke: bool,
 }
 
 impl Default for Config {
@@ -81,6 +87,8 @@ impl Default for Config {
             theme: Theme::default(),
             mini: false,
             last_dir: dirs::audio_dir().or_else(dirs::home_dir),
+            lyric_align: 0,
+            lyric_karaoke: false,
         }
     }
 }
@@ -137,5 +145,38 @@ pub fn format_time(seconds: f64) -> String {
         format!("{h}:{m:02}:{s:02}")
     } else {
         format!("{m:02}:{s:02}")
+    }
+}
+
+#[cfg(test)]
+mod lyric_view_tests {
+    use super::Config;
+
+    #[test]
+    fn old_config_without_lyric_fields_uses_defaults() {
+        // 老版本配置没有 lyric_align / lyric_karaoke，应当能读进来并落到默认值
+        let json = r#"{
+            "volume": 0.8,
+            "repeat": "Off",
+            "shuffle": false,
+            "eq_enabled": false,
+            "eq_gains": [],
+            "accent": [235, 152, 52],
+            "mini": false
+        }"#;
+        let config: Config = serde_json::from_str(json).expect("old config should parse");
+        assert_eq!(config.lyric_align, 0, "默认居左");
+        assert!(!config.lyric_karaoke, "默认滚动歌词");
+    }
+
+    #[test]
+    fn lyric_view_fields_round_trip() {
+        let mut config = Config::default();
+        config.lyric_align = 2;
+        config.lyric_karaoke = true;
+        let json = serde_json::to_string(&config).expect("serialize");
+        let back: Config = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.lyric_align, 2);
+        assert!(back.lyric_karaoke);
     }
 }
