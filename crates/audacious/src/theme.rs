@@ -76,6 +76,42 @@ pub fn palette(cfg: &audcore::Config) -> Palette {
             dim: Color32::from_rgb(126, 158, 156),
             dark: true,
         },
+        // 护眼绿：豆沙绿纸底，长时间盯歌词不刺眼
+        audcore::Theme::EyeGreen => Palette {
+            bg: Color32::from_rgb(199, 237, 204),
+            panel: Color32::from_rgb(186, 228, 192),
+            panel_alt: Color32::from_rgb(171, 218, 179),
+            field: Color32::from_rgb(226, 245, 228),
+            accent: Color32::from_rgb(38, 122, 76),
+            accent_soft: tint(Color32::from_rgb(38, 122, 76), 62),
+            text: Color32::from_rgb(24, 46, 30),
+            dim: Color32::from_rgb(78, 112, 88),
+            dark: false,
+        },
+        // 天空蓝：浅蓝底 + 天蓝强调
+        audcore::Theme::SkyBlue => Palette {
+            bg: Color32::from_rgb(226, 240, 253),
+            panel: Color32::from_rgb(212, 231, 250),
+            panel_alt: Color32::from_rgb(197, 220, 245),
+            field: Color32::from_rgb(247, 251, 255),
+            accent: Color32::from_rgb(28, 116, 205),
+            accent_soft: tint(Color32::from_rgb(28, 116, 205), 62),
+            text: Color32::from_rgb(20, 38, 58),
+            dim: Color32::from_rgb(83, 110, 138),
+            dark: false,
+        },
+        // 绚丽紫：深紫底 + 亮紫强调
+        audcore::Theme::Purple => Palette {
+            bg: Color32::from_rgb(26, 18, 38),
+            panel: Color32::from_rgb(36, 25, 52),
+            panel_alt: Color32::from_rgb(47, 33, 68),
+            field: Color32::from_rgb(19, 13, 28),
+            accent: Color32::from_rgb(178, 108, 255),
+            accent_soft: tint(Color32::from_rgb(178, 108, 255), 52),
+            text: Color32::from_rgb(236, 228, 248),
+            dim: Color32::from_rgb(158, 142, 182),
+            dark: true,
+        },
         // 橘黄：暖米底 + 橙色面板，强调色压暗一点保证对比度
         audcore::Theme::Amber => Palette {
             bg: Color32::from_rgb(253, 242, 227),

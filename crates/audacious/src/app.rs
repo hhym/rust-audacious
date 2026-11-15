@@ -1771,7 +1771,7 @@ impl App {
 
                 ui.separator();
                 ui.label(RichText::new(self.t("外观", "Appearance")).strong().color(p.accent));
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     for t in audcore::Theme::all() {
                         let label = if self.has_cjk { t.label() } else { t.label_en() };
                         if ui

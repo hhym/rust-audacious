@@ -20,6 +20,12 @@ pub enum Theme {
     Dark,
     /// 深青：墨青底 + 青绿强调
     Teal,
+    /// 护眼绿：豆沙绿纸底，长时间看歌词不刺眼
+    EyeGreen,
+    /// 天空蓝：浅蓝底 + 天蓝强调
+    SkyBlue,
+    /// 绚丽紫：深紫底 + 亮紫强调
+    Purple,
 }
 
 impl Theme {
@@ -29,6 +35,9 @@ impl Theme {
             Theme::Light => "浅色主题",
             Theme::Dark => "深色主题",
             Theme::Teal => "深青主题",
+            Theme::EyeGreen => "护眼绿主题",
+            Theme::SkyBlue => "天空蓝主题",
+            Theme::Purple => "绚丽紫主题",
         }
     }
 
@@ -38,16 +47,27 @@ impl Theme {
             Theme::Light => "Light theme",
             Theme::Dark => "Dark theme",
             Theme::Teal => "Deep teal theme",
+            Theme::EyeGreen => "Eye-care green theme",
+            Theme::SkyBlue => "Sky blue theme",
+            Theme::Purple => "Vivid purple theme",
         }
     }
 
     /// 深色系（决定 egui 的 base visuals）
     pub fn is_dark(&self) -> bool {
-        matches!(self, Theme::Dark | Theme::Teal)
+        matches!(self, Theme::Dark | Theme::Teal | Theme::Purple)
     }
 
-    pub fn all() -> [Theme; 4] {
-        [Theme::Amber, Theme::Light, Theme::Dark, Theme::Teal]
+    pub fn all() -> [Theme; 7] {
+        [
+            Theme::Amber,
+            Theme::Light,
+            Theme::Dark,
+            Theme::Teal,
+            Theme::EyeGreen,
+            Theme::SkyBlue,
+            Theme::Purple,
+        ]
     }
 }
 
