@@ -4,6 +4,7 @@
 //! 两者除了入口和日志/数据目录之外没有任何差别。
 
 pub mod app;
+mod skin;
 #[cfg(target_os = "android")]
 pub mod android;
 pub mod effects;
@@ -93,6 +94,8 @@ pub extern "C" fn android_main(app: android_activity::AndroidApp) {
 
     let config = Config::load();
     let shared = Shared::spawn(config.clone());
+    // 音频焦点回调要往引擎发命令
+    android::install_shared(shared.clone());
 
     let options = eframe::NativeOptions {
         android_app: Some(app),

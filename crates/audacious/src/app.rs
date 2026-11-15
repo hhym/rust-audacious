@@ -220,6 +220,8 @@ pub struct App {
     album_accent: std::collections::HashMap<String, Option<[u8; 3]>>,
     /// 当前生效的封面色（`config.cover_accent` 打开时才有）
     cover_accent_rgb: Option<[u8; 3]>,
+    /// Winamp 经典皮肤（.wsz），`None` 表示没装皮肤
+    skin: Option<crate::skin::Skin>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -229,6 +231,23 @@ enum LyricState {
     Lines(Vec<(f64, String)>),
     Plain(String),
     Error(String),
+}
+
+/// 经典皮肤的交互结果，画完统一处理（避免绘制时借用冲突）
+#[derive(Clone, Copy, Debug)]
+enum ClassicAction {
+    Prev,
+    Next,
+    Toggle,
+    Pause,
+    Stop,
+    Seek(f64),
+    Volume(f32),
+    Eject,
+    ToggleShuffle,
+    ToggleRepeat,
+    ToggleEqWindow,
+    TogglePlaylistWindow,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -318,6 +337,7 @@ impl App {
             album_art_round: std::collections::HashMap::new(),
             album_accent: std::collections::HashMap::new(),
             cover_accent_rgb: None,
+            skin: None,
         };
         app.plugins = app.collect_plugins();
         app.reload_media_plugins();
@@ -345,7 +365,240 @@ impl App {
             }
         }
 
+        if config.classic_skin {
+            match crate::skin::Skin::load_wsz(&cc.egui_ctx, &crate::skin::current_skin_path()) {
+                Ok(skin) => app.skin = Some(skin),
+                Err(err) => log::warn!("加载经典皮肤失败：{err}"),
+            }
+        }
+
         app
+    }
+
+    /// 从 `<data_dir>/skins/current.wsz` 重新加载皮肤
+    fn load_skin(&mut self, ctx: &egui::Context) {
+        match crate::skin::Skin::load_wsz(ctx, &crate::skin::current_skin_path()) {
+            Ok(skin) => {
+                let name = skin.name.clone();
+                self.skin = Some(skin);
+                self.toast = Some((format!("已应用皮肤《{name}》"), Instant::now()));
+            }
+            Err(err) => {
+                log::warn!("加载皮肤失败：{err}");
+                self.toast = Some((format!("皮肤加载失败：{err}"), Instant::now()));
+            }
+        }
+    }
+
+    /// 经典皮肤模式是否生效（开关打开且确实装上了皮肤）
+    fn classic_active(&self) -> bool {
+        self.config.classic_skin && self.skin.is_some()
+    }
+
+    /// 整屏 Winamp 主窗口：275×116 网格按屏宽等比缩放，控件全部用皮肤位图切图绘制。
+    fn classic_view(&mut self, ui: &mut egui::Ui) {
+        use crate::skin::{MAIN_H, MAIN_W};
+
+        let Some(skin) = self.skin.as_ref() else { return };
+        let scale = (ui.available_width() / MAIN_W).max(0.5);
+        let pos = self.state.position;
+        let len = self.state.length;
+        let status = self.state.status;
+        let volume = self.state.volume;
+        let title = if self.state.title.is_empty() {
+            self.state.message.clone()
+        } else {
+            self.state.title.clone()
+        };
+        let shared = self.shared.clone();
+        let mut actions: Vec<ClassicAction> = Vec::new();
+
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(MAIN_W * scale, MAIN_H * scale),
+            egui::Sense::hover(),
+        );
+        let painter = ui.painter_at(rect);
+        let place = |x: f32, y: f32, w: f32, h: f32| {
+            egui::Rect::from_min_size(rect.min + egui::vec2(x, y) * scale, egui::vec2(w, h) * scale)
+        };
+
+        painter.rect_filled(rect, 0.0, egui::Color32::BLACK);
+        skin.sprite(&painter, "main.bmp", 0.0, 0.0, MAIN_W, MAIN_H, rect, egui::Color32::WHITE);
+
+        // 播放状态指示灯（playpaus.bmp：0 播放 / 9 暂停 / 18 停止）
+        let (lx, sheet_x) = match status {
+            crate::engine::Status::Playing => (24.0, 0.0),
+            crate::engine::Status::Paused => (26.0, 9.0),
+            _ => (26.0, 18.0),
+        };
+        skin.sprite(&painter, "playpaus.bmp", sheet_x, 0.0, 9.0, 9.0, place(lx, 28.0, 9.0, 9.0), egui::Color32::WHITE);
+
+        // 时间 88:88（numbers.bmp 每字 9×13）
+        let cur = pos.max(0.0) as u64;
+        let time = format!("{:02}:{:02}", cur / 60, cur % 60);
+        skin.digits(&painter, &time, rect.min + egui::vec2(48.0, 26.0) * scale, scale, egui::Color32::from_rgb(0x00, 0xFF, 0x00));
+
+        // 曲名跑马灯（text.bmp 5×6 字模，超出裁掉）
+        let marq = egui::Rect::from_min_size(rect.min + egui::vec2(111.0, 24.0) * scale, egui::vec2(154.0, 6.0) * scale);
+        let clipped = painter.with_clip_rect(marq);
+        skin.text(&clipped, &title, marq.min, scale, marq.max.x, egui::Color32::from_rgb(0x00, 0xFF, 0x00));
+
+        // 格式 / 采样率
+        let info = format!("{} {}kHz", if self.state.format.is_empty() { "MP3" } else { &self.state.format }, self.state.sample_rate / 1000);
+        skin.text(&clipped, "", marq.min, scale, marq.max.x, egui::Color32::WHITE);
+        let kbps = egui::Rect::from_min_size(rect.min + egui::vec2(111.0, 43.0) * scale, egui::vec2(100.0, 6.0) * scale);
+        skin.text(&painter.with_clip_rect(kbps), &info, kbps.min, scale, kbps.max.x, egui::Color32::from_rgb(0x00, 0xFF, 0x00));
+
+        // 进度条（posbar.bmp：248×10 背景 + 29×10 滑块）
+        let bar = place(16.0, 72.0, 248.0, 10.0);
+        skin.sprite(&painter, "posbar.bmp", 0.0, 0.0, 248.0, 10.0, bar, egui::Color32::WHITE);
+        let progress = if len > 0.0 {
+            (pos / len).clamp(0.0, 1.0) as f32
+        } else {
+            0.0
+        };
+        let thumb = egui::Rect::from_min_size(
+            bar.min + egui::vec2((248.0 - 29.0) * progress, 0.0) * scale,
+            egui::vec2(29.0, 10.0) * scale,
+        );
+        let bar_resp = ui.interact(bar, ui.id().with("classic_posbar"), egui::Sense::click_and_drag());
+        let active = bar_resp.is_pointer_button_down_on();
+        skin.sprite(&painter, "posbar.bmp", if active { 277.0 } else { 248.0 }, 0.0, 29.0, 10.0, thumb, egui::Color32::WHITE);
+        if bar_resp.clicked() || bar_resp.dragged() {
+            if let Some(p) = bar_resp.interact_pointer_pos() {
+                let frac = ((p.x - bar.min.x) / bar.width()).clamp(0.0, 1.0) as f64;
+                if len > 0.0 {
+                    actions.push(ClassicAction::Seek(frac * len));
+                }
+            }
+        }
+
+        // 音量（volume.bmp：65×13 一帧、28 帧叠在 65×433 里；滑块 14×11）
+        let vol = place(107.0, 57.0, 68.0, 13.0);
+        let frame = ((1.0 - volume.clamp(0.0, 1.0)) * 27.0).round() as f32;
+        skin.sprite(&painter, "volume.bmp", 0.0, frame * 15.0, 68.0, 13.0, vol, egui::Color32::WHITE);
+        let vt = egui::Rect::from_min_size(
+            vol.min + egui::vec2((68.0 - 14.0) * volume.clamp(0.0, 1.0), 1.0) * scale,
+            egui::vec2(14.0, 11.0) * scale,
+        );
+        let vol_resp = ui.interact(vol, ui.id().with("classic_vol"), egui::Sense::click_and_drag());
+        skin.sprite(&painter, "volume.bmp", if vol_resp.is_pointer_button_down_on() { 0.0 } else { 15.0 }, 422.0, 14.0, 11.0, vt, egui::Color32::WHITE);
+        if vol_resp.clicked() || vol_resp.dragged() {
+            if let Some(p) = vol_resp.interact_pointer_pos() {
+                let v = ((p.x - vol.min.x) / vol.width()).clamp(0.0, 1.0);
+                actions.push(ClassicAction::Volume(v));
+            }
+        }
+
+        // 播放控制键（cbuttons.bmp：每键 23×18，按下态在 y=18）
+        let buttons: [(f32, f32, &str, f32, ClassicAction); 5] = [
+            (16.0, 23.0, "", 0.0, ClassicAction::Prev),
+            (39.0, 23.0, "", 23.0, ClassicAction::Toggle),
+            (62.0, 23.0, "", 46.0, ClassicAction::Pause),
+            (85.0, 23.0, "", 69.0, ClassicAction::Stop),
+            (108.0, 22.0, "", 92.0, ClassicAction::Next),
+        ];
+        for (i, (x, w, _label, sx, action)) in buttons.iter().enumerate() {
+            let r = place(*x, 88.0, *w, 18.0);
+            let resp = ui.interact(r, ui.id().with(("classic_btn", i)), egui::Sense::click());
+            let down = resp.is_pointer_button_down_on();
+            skin.sprite(&painter, "cbuttons.bmp", *sx, if down { 18.0 } else { 0.0 }, *w, 18.0, r, egui::Color32::WHITE);
+            if resp.clicked() {
+                actions.push(*action);
+            }
+        }
+
+        // Eject（22×16）
+        let ej = place(136.0, 89.0, 22.0, 16.0);
+        let ejr = ui.interact(ej, ui.id().with("classic_eject"), egui::Sense::click());
+        skin.sprite(&painter, "cbuttons.bmp", 114.0, if ejr.is_pointer_button_down_on() { 16.0 } else { 0.0 }, 22.0, 16.0, ej, egui::Color32::WHITE);
+        if ejr.clicked() {
+            actions.push(ClassicAction::Eject);
+        }
+
+        // 随机 / 循环（shufrep.bmp）
+        let shuf = place(164.0, 89.0, 47.0, 15.0);
+        let shuf_on = self.config.shuffle;
+        let shuf_resp = ui.interact(shuf, ui.id().with("classic_shuffle"), egui::Sense::click());
+        let shuf_y = if shuf_resp.is_pointer_button_down_on() { 45.0 } else if shuf_on { 30.0 } else { 0.0 };
+        skin.sprite(&painter, "shufrep.bmp", 28.0, shuf_y, 47.0, 15.0, shuf, egui::Color32::WHITE);
+        if shuf_resp.clicked() {
+            actions.push(ClassicAction::ToggleShuffle);
+        }
+        let rep = place(210.0, 89.0, 28.0, 15.0);
+        let rep_on = self.config.repeat != audcore::RepeatMode::Off;
+        let rep_resp = ui.interact(rep, ui.id().with("classic_repeat"), egui::Sense::click());
+        let rep_y = if rep_resp.is_pointer_button_down_on() { 45.0 } else if rep_on { 30.0 } else { 0.0 };
+        skin.sprite(&painter, "shufrep.bmp", 0.0, rep_y, 28.0, 15.0, rep, egui::Color32::WHITE);
+        if rep_resp.clicked() {
+            actions.push(ClassicAction::ToggleRepeat);
+        }
+
+        // EQ / 播放列表开关（shufrep.bmp 的 46×12 区）
+        let eqb = place(219.0, 58.0, 23.0, 12.0);
+        let eq_resp = ui.interact(eqb, ui.id().with("classic_eq"), egui::Sense::click());
+        let eq_on = self.config.eq_enabled;
+        let eq_y = if eq_resp.is_pointer_button_down_on() { 73.0 } else if eq_on { 61.0 } else { 0.0 };
+        skin.sprite(&painter, "shufrep.bmp", 0.0, eq_y, 23.0, 12.0, eqb, egui::Color32::WHITE);
+        if eq_resp.clicked() {
+            actions.push(ClassicAction::ToggleEqWindow);
+        }
+        let plb = place(242.0, 58.0, 23.0, 12.0);
+        let pl_resp = ui.interact(plb, ui.id().with("classic_playlist"), egui::Sense::click());
+        skin.sprite(&painter, "shufrep.bmp", 23.0, if pl_resp.is_pointer_button_down_on() { 73.0 } else { 61.0 }, 23.0, 12.0, plb, egui::Color32::WHITE);
+        if pl_resp.clicked() {
+            actions.push(ClassicAction::TogglePlaylistWindow);
+        }
+
+        drop(painter);
+
+        for action in actions {
+            match action {
+                ClassicAction::Prev => { shared.send(Cmd::Prev); }
+                ClassicAction::Next => { shared.send(Cmd::Next); }
+                ClassicAction::Toggle => { shared.send(Cmd::Toggle); }
+                ClassicAction::Pause => { shared.send(Cmd::Pause); }
+                ClassicAction::Stop => { shared.send(Cmd::Stop); }
+                ClassicAction::Seek(t) => { shared.send(Cmd::Seek(t)); }
+                ClassicAction::Volume(v) => {
+                    self.config.volume = v;
+                    shared.send(Cmd::SetVolume(v));
+                }
+                ClassicAction::Eject => {
+                    #[cfg(target_os = "android")]
+                    {
+                        crate::android::open_audio_picker();
+                    }
+                    #[cfg(not(target_os = "android"))]
+                    {
+                        self.browser = Some(Browser::new(
+                            self.config
+                                .last_dir
+                                .clone()
+                                .unwrap_or_else(|| PathBuf::from(".")),
+                        ));
+                    }
+                }
+                ClassicAction::ToggleShuffle => {
+                    self.config.shuffle = !self.config.shuffle;
+                    if let Ok(mut pl) = shared.playlist.lock() {
+                        pl.shuffle = self.config.shuffle;
+                    }
+                }
+                ClassicAction::ToggleRepeat => {
+                    self.config.repeat = match self.config.repeat {
+                        audcore::RepeatMode::Off => audcore::RepeatMode::All,
+                        audcore::RepeatMode::All => audcore::RepeatMode::Track,
+                        audcore::RepeatMode::Track => audcore::RepeatMode::Off,
+                    };
+                    if let Ok(mut pl) = shared.playlist.lock() {
+                        pl.repeat = self.config.repeat;
+                    }
+                }
+                ClassicAction::ToggleEqWindow => { self.show_eq = !self.show_eq; }
+                ClassicAction::TogglePlaylistWindow => { /* 播放列表窗口下一步做 */ }
+            }
+        }
     }
 
     fn collect_plugins(&self) -> Vec<audcore::plugin::PluginInfo> {
@@ -559,6 +812,15 @@ impl eframe::App for App {
                 .filter_map(|f| f.path.clone())
                 .collect()
         });
+        // 音频焦点：播放中申请，停止后释放（来电/其他 App 抢占时 android.rs 会暂停）
+        #[cfg(target_os = "android")]
+        {
+            crate::android::maintain_focus(
+                matches!(self.state.status, crate::engine::Status::Playing),
+                matches!(self.state.status, crate::engine::Status::Stopped),
+            );
+        }
+
         // SAF 选完的音频由 android.rs 的后台线程落盘，这里每帧取走
         #[cfg(target_os = "android")]
         {
@@ -584,6 +846,18 @@ impl eframe::App for App {
                         });
                     });
             }
+        }
+
+        // 经典皮肤整屏模式：只画 Winamp 风格窗口
+        if self.classic_active() {
+            #[cfg(target_os = "android")]
+            if crate::android::take_skin_ready() {
+                self.load_skin(ctx);
+            }
+            egui::CentralPanel::default()
+                .frame(egui::Frame::NONE.fill(egui::Color32::BLACK))
+                .show(ctx, |ui| self.classic_view(ui));
+            return;
         }
 
         if !dropped.is_empty() {
@@ -1853,6 +2127,66 @@ impl App {
                         }
                     }
                 });
+                ui.separator();
+                ui.label(
+                    RichText::new(self.t("外观 · 经典皮肤", "Classic skin"))
+                        .strong()
+                        .color(p.accent),
+                );
+                let mut classic = self.config.classic_skin;
+                if ui
+                    .checkbox(
+                        &mut classic,
+                        self.t("使用 Winamp 经典皮肤界面", "Classic Winamp UI"),
+                    )
+                    .changed()
+                {
+                    self.config.classic_skin = classic;
+                    if classic {
+                        if self.skin.is_none() {
+                            self.load_skin(ctx);
+                        }
+                        if self.skin.is_none() {
+                            self.config.classic_skin = false;
+                            classic = false;
+                        }
+                    }
+                    changed = true;
+                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(self.t("导入 .wsz 皮肤", "Import .wsz"))
+                        .clicked()
+                    {
+                        #[cfg(target_os = "android")]
+                        {
+                            crate::android::open_skin_picker();
+                        }
+                        #[cfg(not(target_os = "android"))]
+                        {
+                            self.toast = Some((
+                                format!(
+                                    "把 .wsz 放到 {} 后点「重新加载」",
+                                    crate::skin::current_skin_path().display()
+                                ),
+                                Instant::now(),
+                            ));
+                        }
+                    }
+                    if self.skin.is_some()
+                        && ui.button(self.t("重新加载", "Reload")).clicked()
+                    {
+                        self.load_skin(ctx);
+                    }
+                });
+                if let Some(skin) = &self.skin {
+                    ui.label(
+                        RichText::new(format!("当前皮肤：{}", skin.name))
+                            .small()
+                            .weak(),
+                    );
+                }
+
                 let mut eq = self.config.eq_enabled;
                 if ui
                     .checkbox(&mut eq, self.t("启用均衡器", "Equalizer"))

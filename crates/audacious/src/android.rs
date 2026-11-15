@@ -16,12 +16,15 @@ use std::sync::mpsc::{channel, Sender};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use crate::engine::{Cmd, Shared, Status};
+
 use jni::objects::{JClass, JObject, JString, JValue};
 use jni::sys::{jint, JNIEnv};
 use jni::{JNIEnv as Env, JavaVM};
 
 /// 拉起系统文件选择器的 requestCode；Java 侧原样带回。
 const REQ_PICK_AUDIO: jint = 0x51AF;
+const REQ_PICK_SKIN: jint = 0x51B0;
 /// `Activity.RESULT_OK`
 const RESULT_OK: jint = -1;
 
@@ -33,11 +36,18 @@ struct Job {
 }
 
 static APP: OnceLock<android_activity::AndroidApp> = OnceLock::new();
+static SHARED: OnceLock<Shared> = OnceLock::new();
+/// 当前是否握着音频焦点（避免每帧重复申请）
+static FOCUS_HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// 是不是因为焦点丢失才暂停的（只有这种暂停才自动恢复）
+static AUTO_PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static JOBS: OnceLock<Sender<Job>> = OnceLock::new();
 static PICKED: OnceLock<Mutex<Vec<PathBuf>>> = OnceLock::new();
 static STATUS: OnceLock<Mutex<String>> = OnceLock::new();
 static BYTES: AtomicU64 = AtomicU64::new(0);
 static TOTAL: AtomicU64 = AtomicU64::new(0);
+/// 皮肤导入完成，等 UI 重新加载
+static SKIN_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn jobs() -> Option<&'static Sender<Job>> {
     JOBS.get()
@@ -74,6 +84,34 @@ pub fn take_status() -> Option<String> {
 /// 记住 `AndroidApp`，后续 JNI 调用要靠它拿 JavaVM / Activity。
 pub fn install(app: &android_activity::AndroidApp) {
     let _ = APP.set(app.clone());
+}
+
+/// 记住引擎句柄，音频焦点回调直接往引擎发命令。
+pub fn install_shared(shared: Shared) {
+    let _ = SHARED.set(shared);
+}
+
+/// 每帧调一次：播放中申请焦点，停止时释放。
+pub fn maintain_focus(playing: bool, stopped: bool) {
+    use std::sync::atomic::Ordering;
+    let Some(app) = APP.get() else { return };
+
+    if playing && !FOCUS_HELD.swap(true, Ordering::Relaxed) {
+        if let Err(err) = call_activity(app, "requestAudioFocus") {
+            log::warn!("申请音频焦点失败：{err}");
+            FOCUS_HELD.store(false, Ordering::Relaxed);
+        }
+    } else if stopped && FOCUS_HELD.swap(false, Ordering::Relaxed) {
+        let _ = call_activity(app, "abandonAudioFocus");
+        AUTO_PAUSED.store(false, Ordering::Relaxed);
+    }
+}
+
+fn call_activity(app: &android_activity::AndroidApp, method: &str) -> jni::errors::Result<()> {
+    with_activity(app, |env, activity| {
+        env.call_method(activity, method, "()V", &[])?;
+        Ok(())
+    })
 }
 
 /// 起后台导入线程；必须在 `install` 之后、UI 起来之前调一次。
@@ -118,18 +156,32 @@ fn import_dir() -> PathBuf {
 
 /// 打开系统文件选择器（多选音频）。没有 Activity 上下文时返回 false。
 pub fn open_audio_picker() -> bool {
+    launch_picker(false)
+}
+
+/// 打开系统文件选择器（单选 .wsz 皮肤）。
+pub fn open_skin_picker() -> bool {
+    launch_picker(true)
+}
+
+fn launch_picker(skin: bool) -> bool {
     let Some(app) = APP.get() else {
         log::warn!("没有 AndroidApp 上下文，无法打开 SAF 选择器");
         return false;
     };
 
-    match start_picker(app) {
+    match start_picker(app, skin) {
         Ok(()) => true,
         Err(err) => {
             log::error!("打开 SAF 选择器失败：{err}");
             false
         }
     }
+}
+
+/// 皮肤是否已经导入完成（UI 每帧查一次，导完就重新加载）
+pub fn take_skin_ready() -> bool {
+    SKIN_READY.swap(false, std::sync::atomic::Ordering::Relaxed)
 }
 
 fn with_activity<T>(
@@ -142,7 +194,7 @@ fn with_activity<T>(
     f(&mut env, &activity)
 }
 
-fn start_picker(app: &android_activity::AndroidApp) -> jni::errors::Result<()> {
+fn start_picker(app: &android_activity::AndroidApp, skin: bool) -> jni::errors::Result<()> {
     with_activity(app, |env, activity| {
         let intent = env.new_object("android/content/Intent", "()V", &[])?;
         let action = env.new_string("android.intent.action.OPEN_DOCUMENT")?;
@@ -152,26 +204,29 @@ fn start_picker(app: &android_activity::AndroidApp) -> jni::errors::Result<()> {
             "(Ljava/lang/String;)Landroid/content/Intent;",
             &[JValue::Object(&JObject::from(action))],
         )?;
-        let mime = env.new_string("audio/*")?;
+        // 皮肤是 zip 换扩展名，只能按 */* 让它出现在选择器里
+        let mime = env.new_string(if skin { "*/*" } else { "audio/*" })?;
         env.call_method(
             &intent,
             "setType",
             "(Ljava/lang/String;)Landroid/content/Intent;",
             &[JValue::Object(&JObject::from(mime))],
         )?;
-        // 允许一次选多首
-        let extra_multi = env.new_string("android.intent.extra.ALLOW_MULTIPLE")?;
-        env.call_method(
-            &intent,
-            "putExtra",
-            "(Ljava/lang/String;Z)Landroid/content/Intent;",
-            &[JValue::Object(&JObject::from(extra_multi)), JValue::Bool(1)],
-        )?;
+        if !skin {
+            // 音频允许多选；皮肤一次一个
+            let extra_multi = env.new_string("android.intent.extra.ALLOW_MULTIPLE")?;
+            env.call_method(
+                &intent,
+                "putExtra",
+                "(Ljava/lang/String;Z)Landroid/content/Intent;",
+                &[JValue::Object(&JObject::from(extra_multi)), JValue::Bool(1)],
+            )?;
+        }
         env.call_method(
             activity,
             "startActivityForResult",
             "(Landroid/content/Intent;I)V",
-            &[JValue::Object(&intent), JValue::Int(REQ_PICK_AUDIO)],
+            &[JValue::Object(&intent), JValue::Int(if skin { REQ_PICK_SKIN } else { REQ_PICK_AUDIO })],
         )?;
         Ok(())
     })
@@ -190,7 +245,24 @@ pub extern "system" fn Java_io_github_hhym_audaciousrs_MainActivity_nativeOnActi
     result_code: jint,
     data: JObject,
 ) {
-    if request_code != REQ_PICK_AUDIO || result_code != RESULT_OK || data.is_null() {
+    if result_code != RESULT_OK || data.is_null() {
+        return;
+    }
+    if request_code == REQ_PICK_SKIN {
+        match install_skin(&mut env, &data) {
+            Ok(()) => {
+                SKIN_READY.store(true, Ordering::Relaxed);
+                set_status("皮肤已导入，正在应用…");
+                log::info!("WSZ 皮肤已复制到私有目录");
+            }
+            Err(err) => {
+                set_status("皮肤导入失败");
+                log::error!("导入皮肤失败：{err}");
+            }
+        }
+        return;
+    }
+    if request_code != REQ_PICK_AUDIO {
         return;
     }
     match enqueue_uris(&mut env, &data) {
@@ -200,6 +272,44 @@ pub extern "system" fn Java_io_github_hhym_audaciousrs_MainActivity_nativeOnActi
             log::info!("SAF 选中 {n} 个文件并已交给导入线程");
         }
         Err(err) => log::error!("处理 SAF 结果失败：{err}"),
+    }
+}
+
+/// Java 侧 `MainActivity.nativeOnAudioFocusChange` 的实现。
+///
+/// AUDIOFOCUS_LOSS(-1) / LOSS_TRANSIENT(-2)：抢占就暂停，并记住是「被抢」导致的；
+/// GAIN(1) / GAIN_TRANSIENT(2)：只有被抢暂停过才自动续播，用户自己按的暂停不会被打断；
+/// CAN_DUCK(-3) 先不处理（不降音量，保持原样）。
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "system" fn Java_io_github_hhym_audaciousrs_MainActivity_nativeOnAudioFocusChange(
+    _env: Env,
+    _class: JClass,
+    change: jint,
+) {
+    use std::sync::atomic::Ordering;
+    let Some(shared) = SHARED.get() else { return };
+    let status = shared
+        .state
+        .lock()
+        .map(|s| s.status)
+        .unwrap_or(Status::Stopped);
+
+    match change {
+        -1 | -2 => {
+            if matches!(status, Status::Playing) {
+                log::info!("音频焦点被抢占（{change}），暂停");
+                shared.send(Cmd::Pause);
+                AUTO_PAUSED.store(true, Ordering::Relaxed);
+            }
+        }
+        1 | 2 => {
+            if AUTO_PAUSED.swap(false, Ordering::Relaxed) {
+                log::info!("音频焦点恢复，续播");
+                shared.send(Cmd::Play);
+            }
+        }
+        _ => log::debug!("音频焦点变化 {change}，忽略"),
     }
 }
 
@@ -308,8 +418,57 @@ fn enqueue_uris(env: &mut Env, data: &JObject) -> anyhow::Result<usize> {
     Ok(queued)
 }
 
+/// 把选中的 .wsz 复制成 `skins/current.wsz`。
+fn install_skin(env: &mut Env, data: &JObject) -> anyhow::Result<()> {
+    let uri = env
+        .call_method(data, "getData", "()Landroid/net/Uri;", &[])?
+        .l()?;
+    if uri.is_null() {
+        anyhow::bail!("选择器没返回 URI");
+    }
+    let Some(app) = APP.get() else {
+        anyhow::bail!("AndroidApp 还没装好");
+    };
+    let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as jni::sys::jobject) };
+    let resolver = env
+        .call_method(
+            &activity,
+            "getContentResolver",
+            "()Landroid/content/ContentResolver;",
+            &[],
+        )?
+        .l()?;
+
+    let mode = env.new_string("r")?;
+    let pfd = env
+        .call_method(
+            &resolver,
+            "openFileDescriptor",
+            "(Landroid/net/Uri;Ljava/lang/String;)Landroid/os/ParcelFileDescriptor;",
+            &[JValue::Object(&uri), JValue::Object(&JObject::from(mode))],
+        )?
+        .l()?;
+    if pfd.is_null() {
+        anyhow::bail!("openFileDescriptor 返回 null");
+    }
+    let fd = env.call_method(&pfd, "detachFd", "()I", &[])?.i()?;
+    if fd < 0 {
+        anyhow::bail!("detachFd 失败");
+    }
+
+    let dest = crate::skin::current_skin_path();
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // 先写临时文件再改名，避免加载到写了一半的包
+    let tmp = dest.with_extension("wsz.tmp");
+    copy_fd(fd, &tmp, 0)?;
+    std::fs::rename(&tmp, &dest)?;
+    Ok(())
+}
+
 /// 把 detach 出来的 fd 读进私有目录。跑在后台线程，顺便刷新进度。
-fn copy_fd(fd: i32, dest: &std::path::Path, size: u64) -> std::io::Result<PathBuf> {
+fn copy_fd(fd: i32, dest: &std::path::Path, _size: u64) -> std::io::Result<PathBuf> {
     use std::io::{Read, Write};
 
     let mut src = unsafe { std::fs::File::from_raw_fd(fd) };
