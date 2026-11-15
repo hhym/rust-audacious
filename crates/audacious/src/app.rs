@@ -2025,13 +2025,13 @@ impl App {
                                 .color(p.text),
                             );
                             if pl.supports("search") {
-                                ui.label(RichText::new("search").small().color(p.dim));
+                                ui.label(RichText::new("搜索").small().color(p.dim));
                             }
                             if pl.supports("getMediaSource") {
-                                ui.label(RichText::new("media").small().color(p.dim));
+                                ui.label(RichText::new("取流").small().color(p.dim));
                             }
-                            if pl.supports("getLyric") {
-                                ui.label(RichText::new("lyric").small().color(p.dim));
+                            if pl.supports("getLyric") || pl.supports("lyrics") {
+                                ui.label(RichText::new("歌词").small().color(p.dim));
                             }
                         });
                         if let Some(err) = pl.error() {
@@ -2066,32 +2066,41 @@ impl App {
                                     let entry = self
                                         .mygo_setting_inputs
                                         .entry(buf_key)
-                                        .or_insert_with(|| mygo.setting(&def.key));
+                                        .or_insert_with(|| {
+                                            let raw = mygo.setting(&def.key);
+                                            if raw.trim() == "null" || raw.trim() == "undefined" {
+                                                String::new()
+                                            } else {
+                                                raw
+                                            }
+                                        });
                                     let mut save = false;
                                     ui.horizontal(|ui| {
-                                        ui.label(
-                                            RichText::new(if def.label.is_empty() {
-                                                def.key.clone()
-                                            } else {
-                                                def.label.clone()
-                                            })
-                                            .small()
-                                            .color(p.dim),
-                                        );
+                                        let label = if def.label.is_empty() {
+                                            def.key.clone()
+                                        } else {
+                                            zh_plugin_text(&def.label)
+                                        };
+                                        ui.label(RichText::new(label).small().color(p.dim));
                                         let width = (ui.available_width() - 60.0).max(120.0);
                                         let resp = ui.add_sized(
                                             [width, 20.0],
                                             egui::TextEdit::singleline(entry)
+                                                .hint_text("未设置")
                                                 .password(def.kind.as_deref() == Some("password")),
                                         );
                                         save = resp.lost_focus() && !resp.changed();
                                     });
                                     if !def.help.is_empty() {
-                                        ui.label(RichText::new(&def.help).small().color(p.dim));
+                                        ui.label(
+                                            RichText::new(zh_plugin_text(&def.help))
+                                                .small()
+                                                .color(p.dim),
+                                        );
                                     }
                                     if save {
                                         mygo.set_setting(&def.key, entry.trim());
-                                        self.toast(format!("已保存 {}", def.label));
+                                        self.toast(format!("已保存 {}", zh_plugin_text(&def.label)));
                                     }
                                 }
                             }
@@ -3820,4 +3829,103 @@ fn load_logo_texture(ctx: &egui::Context) -> egui::TextureHandle {
     let pixels = image.into_raw();
     let color = egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
     ctx.load_texture("app-logo", color, egui::TextureOptions::LINEAR)
+}
+
+/// 插件设置里的英文标签 / 说明翻成中文；没收录的原样返回。
+fn zh_plugin_text(text: &str) -> String {
+    let exact: &[(&str, &str)] = &[
+        // 字段名
+        ("Local library index", "本地曲库索引位置"),
+        ("LRCLLib endpoint", "歌词库服务地址"),
+        ("Cache lifetime (hours)", "歌词缓存时间（小时）"),
+        ("Request timeout (ms)", "请求超时（毫秒）"),
+        ("Write .lrc beside local songs", "在本地歌曲旁写入 .lrc"),
+        ("Songs per background sync", "每次后台同步的歌曲数"),
+        ("Background sync interval (minutes)", "后台同步间隔（分钟）"),
+        ("Source script URLs", "曲源脚本地址列表"),
+        ("Source script (pasted)", "粘贴的曲源脚本"),
+        ("Catalog", "目录"),
+        ("Catalog browsing", "目录浏览"),
+        ("Sync credential (optional)", "同步凭据（可选）"),
+        ("Download quality (lossless / high / standard)", "下载音质（无损 / 高 / 标准）"),
+        // 说明
+        (
+            "Claims the Concept Edition's free VIP once a day while signed in. Enter 0 to turn it off.",
+            "登录后每天可领取一次概念版免费 VIP；填 0 关闭。",
+        ),
+        (
+            "Path to MusicGo's local/index.json. The default is the one beside this plugin's data folder.",
+            "MusicGo 本地曲库索引 local/index.json 的路径；留空时用插件数据目录旁的那一份。",
+        ),
+        (
+            "A LRCLLib-compatible server. Defaults: https://lrclib.net. Its host must be in the plugin's network permission.",
+            "兼容 LRCLLib 的服务器地址，默认 https://lrclib.net；该域名要写进插件的网络权限里。",
+        ),
+        (
+            "How long a found lyric is kept before LRCLLib is asked again. Default: 168 (one week). Set 0 to turn caching off.",
+            "找到的歌词缓存多久后重新向 LRCLLib 请求。默认 168 小时（一周），填 0 关闭缓存。",
+        ),
+        ("How long to wait for LRCLLib per request. Default: 8000.", "单次请求 LRCLLib 的最长等待时间，默认 8000 毫秒。"),
+        (
+            "Default: true. Writes found lyrics beside your audio files, so they show while playing from Local Files too. Existing .lrc files are never overwritten. Set to false to stop.",
+            "默认开启：把找到的歌词写在音频文件旁边，本地文件播放时也能显示；已有的 .lrc 不会被覆盖，填 false 关闭。",
+        ),
+        (
+            "Default: 25. How many songs may be looked up each time the app starts or plays a song; keeps the load on the public LRCLLib service small.",
+            "默认 25：每次启动或播放时最多补多少首歌的歌词，避免给公共 LRCLLib 服务造成压力。",
+        ),
+        (
+            "Default: 15. Minimum minutes between two background lookups.",
+            "默认 15：两次后台补词之间的最小间隔（分钟）。",
+        ),
+        (
+            "One or more LX Music custom source js links, separated by new lines. Commas or semicolons only split when another link follows. Every source is asked at once when a song plays, and the fastest answer plays.",
+            "一个或多个 LX Music 自定义源 js 链接，每行一个。逗号/分号只有在后面还跟链接时才作为分隔符。播放时所有源同时请求，谁先返回就用谁。",
+        ),
+        (
+            "Optional. Paste a script here and it joins the one above.",
+            "可选：把脚本内容粘贴到这里，会和上面的链接一起加载。",
+        ),
+        (
+            "wy, b, or leave it empty for both. These are source keys, not catalog names; the choice covers search and the discovery pages.",
+            "填 wy、b，或留空表示两者都用。这里填的是音源标识而不是目录名，会同时影响搜索和发现页。",
+        ),
+        (
+            "on or off. Turn it off to hide charts, playlists, daily picks, synced lists and the account menu, leaving search and the source adapter.",
+            "开或关。关掉后隐藏排行榜、歌单、每日推荐、同步列表和账号菜单，只留搜索和音源适配。",
+        ),
+        (
+            "Only needed when QR sign-in is unavailable. Paste the cookie of your own signed-in web session; it stays on this device and is used just to read your own lists.",
+            "只有扫码登录不可用时才需要。粘贴你自己网页端登录后的 Cookie；只保存在本机，仅用于读取你自己的歌单。",
+        ),
+        (
+            "默认无损：优先 FLAC，没有 FLAC 时自动回退到最高音质 MP3(320)，可改为 high(MP3 320) 或 standard(MP3 128)。",
+            "默认无损：优先 FLAC，没有 FLAC 时自动回退到最高音质 MP3(320)，可改为 high(MP3 320) 或 standard(MP3 128)。",
+        ),
+        (
+            "Default: lossless first, then fall back to high quality MP3 (320) automatically if LOAC is absent. Can be set to high (MP3 320) or standard (MP3 128).",
+            "默认无损：优先 FLAC，没有 FLAC 时自动回退到最高音质 MP3(320)；也可以改成 high(MP3 320) 或 standard(MP3 128)。",
+        ),
+    ];
+    let trimmed = text.trim();
+    if let Some((_, zh)) = exact.iter().find(|(en, _)| *en == trimmed) {
+        return (*zh).to_string();
+    }
+    text.to_string()
+}
+
+#[cfg(test)]
+mod zh_text_tests {
+    use super::zh_plugin_text;
+
+    #[test]
+    fn translates_known_labels() {
+        assert_eq!(zh_plugin_text("LRCLLib endpoint"), "歌词库服务地址");
+        assert_eq!(zh_plugin_text("  Request timeout (ms)  "), "请求超时（毫秒）");
+    }
+
+    #[test]
+    fn keeps_unknown_text() {
+        assert_eq!(zh_plugin_text("Some custom option"), "Some custom option");
+    }
 }
