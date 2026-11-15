@@ -3209,6 +3209,14 @@ impl App {
         ui.add_space(10.0);
         ui.separator();
         ui.add_space(6.0);
+        // 当前插件支持扫码登录时，在「刷新」后面给一个入口
+        let login_target: Option<(String, String)> = self
+            .media_plugins
+            .get(self.search_plugin)
+            .and_then(|pl| pl.as_mygo())
+            .filter(|mygo| mygo.supports_login())
+            .map(|mygo| (mygo.manifest.id.clone(), mygo.manifest.name.clone()));
+        let mut open_login_for: Option<String> = None;
         ui.horizontal(|ui| {
             ui.add_space(16.0);
             ui.label(
@@ -3220,6 +3228,20 @@ impl App {
             if ui.button(self.t("刷新", "Refresh")).clicked() {
                 self.load_home();
             }
+            if let Some((id, name)) = &login_target {
+                if ui
+                    .button(self.t("扫码登录", "Scan to sign in"))
+                    .on_hover_text(format!(
+                        "{}{} 支持扫码登录（loginQr / loginPoll）",
+                        self.t("这个插件", "This plugin"),
+                        self.t("：", ": ")
+                    ))
+                    .clicked()
+                {
+                    log::info!("home 页扫码登录：{name}");
+                    open_login_for = Some(id.clone());
+                }
+            }
             if self.home_rx.is_some() {
                 ui.spinner();
                 ui.label(
@@ -3229,6 +3251,9 @@ impl App {
                 );
             }
         });
+        if let Some(id) = open_login_for {
+            self.open_login(&id);
+        }
         ui.add_space(4.0);
 
         if let Some(err) = self.home_error.clone() {
