@@ -151,11 +151,12 @@ MyGo 插件的 ES 模块改写/搜索/取地址/歌词/设置项。共 32 个用
 
 ## 版本
 
-版本号统一在 `Cargo.toml` 的 `workspace.package.version` 维护，按习惯从 **5.0** 起标，当前 **5.12.1**：
+版本号统一在 `Cargo.toml` 的 `workspace.package.version` 维护，按习惯从 **5.0** 起标，当前 **5.12.2**：
 
 - 5.0.0 首个可运行版本
 - 5.0.1 修掉 Windows 发布版弹出控制台窗口的问题，日志改写到 `%APPDATA%\audacious-rs\app.log`
 - 5.1.0 三套主题（橘黄 / 浅色 / 深色）与工具栏换肤按钮，默认橘黄
+- 5.12.2 界面按设计稿继续维护（二）：顶部搜索条右侧补了「音 / ≡ / 随」三个小方按钮——「音」贴着按钮弹出音源选择层（每页 16 个那套，点外面收起）、「≡」跳待播清单、「随」切换随机播放并写回配置；新增 `audcore::tags::read_art()` 读内嵌封面（ID3 APIC / FLAC PICTURE），侧栏播放封面、底部播放条封面、按专辑每行的小封面都改用真实缩略图（40px 解码缓存，读不到才退回字母块），按专辑行高 30px、封面 22px
 - 5.12.1 界面按设计稿维护：歌词页把「卡拉OK / 整段滚动」做成右上角模式胶囊（选中实心、未选中描边），副标题改为「跟着唱，可切卡拉OK / 整段滚动」，对齐方式收成一行小字；侧栏顶部改成「圆形音源 logo + 当前音源 + 共 N 个音源 + 切换」，下面是 52px 播放封面 + 「＋」添加文件双格；播放条右侧新增「词 / ≡」两个方按钮（一键跳歌词页 / 待播清单），待播清单显示已保存歌单数；按专辑条目加了圆角小封面块
 - 5.12.0 宿主补齐 MyGo 登录与子进程协议：`host.signInPrompt()` 把插件推来的二维码显示成扫码窗（QQ Music 0.3.0 可直接扫码登录），`host.spawn()` 按 `permissions.process` 白名单拉起插件自带 helper（`write/readLine/kill/closeStdin/wait` 全套）；顺带补 `URLSearchParams.sort()` 与 `Headers.getSetCookie()`，修掉汽水音乐 1.0.12 登录即报「not a callable function」；扫描线程栈加大到 16MB，QQ Music 0.3.0 的混淆 dist 不再把宿主扫崩（45 用例）
 - 5.11.1 修复 MyGo 模块改写：跨多行的 `export { a,\n b as c };` 现在能正确拆开（汽水音乐 1.0.12、QQ Music 0.3.0 之前因残留 `export` 报语法错）；新增 `examples/try_plugins` 插件体检工具

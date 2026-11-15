@@ -209,6 +209,8 @@ pub struct App {
     lyric_active: usize,
     /// 侧栏 / 关于页用的应用图标纹理
     logo_texture: Option<egui::TextureHandle>,
+    /// 按专辑名缓存的封面缩略图（`None` 表示这轮已经试过、没读到封面）
+    album_art: std::collections::HashMap<String, Option<egui::TextureHandle>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -301,6 +303,7 @@ impl App {
             lyric_rx: None,
             lyric_active: 0,
             logo_texture: None,
+            album_art: std::collections::HashMap::new(),
         };
         app.plugins = app.collect_plugins();
         app.reload_media_plugins();
@@ -1259,14 +1262,29 @@ impl App {
                         Stroke::new(1.0_f32, p.accent),
                         StrokeKind::Inside,
                     );
-                    if let Some(ch) = self.state.title.chars().next() {
-                        painter.text(
-                            rect.center(),
-                            Align2::CENTER_CENTER,
-                            ch.to_string(),
-                            FontId::proportional(18.0),
-                            p.accent,
-                        );
+                    match self.current_cover(ui.ctx()) {
+                        Some(tex) if !self.state.title.is_empty() => {
+                            ui.painter().image(
+                                tex.id(),
+                                rect.shrink(1.0),
+                                egui::Rect::from_min_max(
+                                    egui::pos2(0.0, 0.0),
+                                    egui::pos2(1.0, 1.0),
+                                ),
+                                Color32::WHITE,
+                            );
+                        }
+                        _ => {
+                            if let Some(ch) = self.state.title.chars().next() {
+                                painter.text(
+                                    rect.center(),
+                                    Align2::CENTER_CENTER,
+                                    ch.to_string(),
+                                    FontId::proportional(18.0),
+                                    p.accent,
+                                );
+                            }
+                        }
                     }
 
                     ui.add_space(8.0);
@@ -2852,18 +2870,34 @@ impl App {
                         StrokeKind::Inside,
                     );
                     if !self.state.title.is_empty() {
-                        painter.text(
-                            rect.center(),
-                            Align2::CENTER_CENTER,
-                            self.state
-                                .title
-                                .chars()
-                                .next()
-                                .unwrap_or('♪')
-                                .to_string(),
-                            FontId::proportional(22.0),
-                            p.accent,
-                        );
+                        let cover_tex = self.current_cover(ui.ctx());
+                        match cover_tex {
+                            Some(tex) => {
+                                ui.painter().image(
+                                    tex.id(),
+                                    rect.shrink(1.0),
+                                    egui::Rect::from_min_max(
+                                        egui::pos2(0.0, 0.0),
+                                        egui::pos2(1.0, 1.0),
+                                    ),
+                                    Color32::WHITE,
+                                );
+                            }
+                            None => {
+                                painter.text(
+                                    rect.center(),
+                                    Align2::CENTER_CENTER,
+                                    self.state
+                                        .title
+                                        .chars()
+                                        .next()
+                                        .unwrap_or('♪')
+                                        .to_string(),
+                                    FontId::proportional(22.0),
+                                    p.accent,
+                                );
+                            }
+                        }
                     } else {
                         painter.text(
                             rect.center(),
@@ -2983,10 +3017,21 @@ impl App {
                     );
                 }
                 for (album, count) in albums.iter().take(8) {
+                    // 第一次用到这张专辑时去读文件里的内嵌封面，之后走缓存
+                    if !self.album_art.contains_key(album) {
+                        let bytes = self
+                            .playlist
+                            .entries
+                            .iter()
+                            .find(|e| &e.display_album() == album)
+                            .and_then(|e| audcore::tags::read_art(&e.path));
+                        let tex = bytes.and_then(|b| cover_texture(ui.ctx(), &b, album));
+                        self.album_art.insert(album.clone(), tex);
+                    }
                     let text = format!("{}  ·  {}", elide(album, 14), count);
                     let width = ui.available_width();
                     let (rect, resp) =
-                        ui.allocate_exact_size(vec2(width, 24.0), Sense::click());
+                        ui.allocate_exact_size(vec2(width, 30.0), Sense::click());
                     if self.tab == MainTab::Album && self.album_filter == *album {
                         ui.painter()
                             .rect_filled(rect, CornerRadius::same(5), p.accent_soft);
@@ -2994,23 +3039,38 @@ impl App {
                         ui.painter().rect_filled(rect, CornerRadius::same(5), p.panel);
                     }
                     let cover = egui::Rect::from_center_size(
-                        rect.left_center() + vec2(16.0, 0.0),
-                        vec2(18.0, 18.0),
+                        rect.left_center() + vec2(18.0, 0.0),
+                        vec2(22.0, 22.0),
                     );
-                    ui.painter()
-                        .rect_filled(cover, CornerRadius::same(4), p.accent_soft);
+                    match self.album_art.get(album) {
+                        Some(Some(tex)) => {
+                            ui.painter().image(
+                                tex.id(),
+                                cover,
+                                egui::Rect::from_min_max(
+                                    egui::pos2(0.0, 0.0),
+                                    egui::pos2(1.0, 1.0),
+                                ),
+                                Color32::WHITE,
+                            );
+                        }
+                        _ => {
+                            ui.painter()
+                                .rect_filled(cover, CornerRadius::same(4), p.accent_soft);
+                            ui.painter().text(
+                                cover.center(),
+                                Align2::CENTER_CENTER,
+                                album.chars().next().unwrap_or('♪').to_string(),
+                                FontId::proportional(10.5),
+                                p.accent,
+                            );
+                        }
+                    }
                     ui.painter().text(
-                        cover.center(),
-                        Align2::CENTER_CENTER,
-                        album.chars().next().unwrap_or('♪').to_string(),
-                        FontId::proportional(9.5),
-                        p.accent,
-                    );
-                    ui.painter().text(
-                        rect.left_center() + vec2(32.0, 0.0),
+                        rect.left_center() + vec2(36.0, 0.0),
                         Align2::LEFT_CENTER,
                         text,
-                        FontId::proportional(11.5),
+                        FontId::proportional(12.0),
                         p.dim,
                     );
                     if resp.clicked() {
@@ -3061,6 +3121,26 @@ impl App {
         }
     }
 
+    /// 当前播放曲目的内嵌封面（在线曲目没有文件，返回 None）。
+    fn current_cover(&mut self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
+        let album = self.state.album.clone();
+        if album.is_empty() {
+            return None;
+        }
+        if !self.album_art.contains_key(&album) {
+            let title = self.state.title.clone();
+            let bytes = self
+                .playlist
+                .entries
+                .iter()
+                .find(|e| e.album == album && (title.is_empty() || e.title == title))
+                .and_then(|e| audcore::tags::read_art(&e.path));
+            let tex = bytes.and_then(|b| cover_texture(ctx, &b, &album));
+            self.album_art.insert(album.clone(), tex);
+        }
+        self.album_art.get(&album).cloned().flatten()
+    }
+
     fn album_counts_btn_count(&self) -> usize {
         self.album_counts()
             .iter()
@@ -3087,6 +3167,9 @@ impl App {
 
     /// 顶部搜索条：常驻，回车或点「搜索」跳到搜索页。
     fn top_search_bar(&mut self, ctx: &egui::Context, p: &Palette) {
+        let mut top_picker_pos: Option<egui::Pos2> = None;
+        // 本帧刚点开时不要走「点外面就收起」的判断，否则同一次点击会立刻关掉
+        let mut top_just_opened = false;
         egui::TopBottomPanel::top("topsearch")
             .exact_height(50.0)
             .frame(egui::Frame::NONE.fill(p.bg))
@@ -3095,7 +3178,7 @@ impl App {
                     ui.add_space(12.0);
                     let hint = self.t("歌名 / 歌手", "Song / artist");
                     let edit = ui.add_sized(
-                        vec2((ui.available_width() - 96.0).max(200.0), 30.0),
+                        vec2((ui.available_width() - 220.0).max(180.0), 30.0),
                         egui::TextEdit::singleline(&mut self.search_query).hint_text(hint),
                     );
                     let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -3108,9 +3191,53 @@ impl App {
                         self.tab = MainTab::Search;
                         self.start_search();
                     }
-                    ui.add_space(6.0);
+                    // 右侧三个小方按钮：音源 / 待播清单 / 随机
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(10.0);
+                        let mut shuffle = self.playlist.shuffle;
+                        if top_icon_button(ui, p, "随", shuffle)
+                            .on_hover_text(self.t("随机播放", "Shuffle"))
+                            .clicked()
+                        {
+                            shuffle = !shuffle;
+                            if let Ok(mut pl) = self.shared.playlist.lock() {
+                                pl.shuffle = shuffle;
+                            }
+                            self.config.shuffle = shuffle;
+                            let _ = self.config.save();
+                        }
+                        if top_icon_button(ui, p, "≡", self.tab == MainTab::Playlists)
+                            .on_hover_text(self.t("待播清单", "Playlists"))
+                            .clicked()
+                        {
+                            self.tab = MainTab::Playlists;
+                        }
+                        let src_btn = top_icon_button(
+                            ui,
+                            p,
+                            "音",
+                            self.plugin_picker_open && self.plugin_picker_source == "topsearch",
+                        )
+                        .on_hover_text(self.t("切换音源", "Switch source"));
+                        top_picker_pos = Some(src_btn.rect.left_bottom() + vec2(0.0, 4.0));
+                        if src_btn.clicked() {
+                            self.plugin_picker_open = !self.plugin_picker_open;
+                            self.plugin_picker_source = "topsearch";
+                            top_just_opened = self.plugin_picker_open;
+                            if self.plugin_picker_open {
+                                self.plugin_page = self.search_plugin / Self::PLUGIN_PAGE_SIZE;
+                            }
+                        }
+                    });
                 });
             });
+        // 弹层画在面板外面，否则会被 50px 高的面板裁掉
+        if self.plugin_picker_open && self.plugin_picker_source == "topsearch" {
+            let names: Vec<String> = self.media_plugins.iter().map(|pl| pl.name()).collect();
+            let pos = top_picker_pos.unwrap_or_else(|| egui::pos2(880.0, 56.0));
+            let area_id = egui::Id::new(("main-plugin-picker", "topsearch"));
+            self.plugin_picker_ui(ctx, pos, &names, p, !top_just_opened, area_id);
+        }
     }
 
     /// 内容区标题：大字标题 + 一行说明，右侧是音源选择。
@@ -4627,4 +4754,29 @@ mod zh_text_tests {
     fn keeps_unknown_text() {
         assert_eq!(zh_plugin_text("Some custom option"), "Some custom option");
     }
+}
+
+/// 顶部搜索条右侧的小方按钮（选中时强调色描边 + 浅底）。
+fn top_icon_button(ui: &mut egui::Ui, p: &Palette, label: &str, active: bool) -> egui::Response {
+    let text = RichText::new(label).size(13.0).color(if active { p.accent } else { p.dim });
+    ui.add(
+        egui::Button::new(text)
+            .fill(if active { p.accent_soft } else { p.panel_alt })
+            .stroke(Stroke::new(1.0_f32, if active { p.accent } else { p.panel }))
+            .corner_radius(egui::CornerRadius::same(6))
+            .min_size(vec2(30.0, 28.0)),
+    )
+}
+
+/// 把内嵌封面解码成 40px 缩略图纹理；失败返回 None（界面退回字母块）。
+fn cover_texture(ctx: &egui::Context, bytes: &[u8], key: &str) -> Option<egui::TextureHandle> {
+    let image = image::load_from_memory(bytes).ok()?.thumbnail(40, 40).to_rgba8();
+    let size = [image.width() as usize, image.height() as usize];
+    let pixels = image.into_raw();
+    let color = egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
+    Some(ctx.load_texture(
+        format!("cover-{key}"),
+        color,
+        egui::TextureOptions::LINEAR,
+    ))
 }

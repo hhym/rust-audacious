@@ -46,6 +46,14 @@ pub fn read(path: &Path) -> Metadata {
     meta
 }
 
+/// 读第一张内嵌封面（ID3 APIC / FLAC PICTURE），解码交给界面做缩略图。
+pub fn read_art(path: &Path) -> Option<Vec<u8>> {
+    let tagged = Probe::open(path).ok()?.read().ok()?;
+    let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
+    let picture = tag.pictures().first()?;
+    Some(picture.data().to_vec())
+}
+
 fn format_from_ext(path: &Path) -> String {
     let ext = path
         .extension()
