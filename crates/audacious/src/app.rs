@@ -222,6 +222,8 @@ pub struct App {
     cover_accent_rgb: Option<[u8; 3]>,
     /// Winamp 经典皮肤（.wsz），`None` 表示没装皮肤
     skin: Option<crate::skin::Skin>,
+    /// 经典模式下是否显示播放列表窗口
+    show_playlist: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -248,6 +250,7 @@ enum ClassicAction {
     ToggleRepeat,
     ToggleEqWindow,
     TogglePlaylistWindow,
+    PlayAt(usize),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -338,6 +341,7 @@ impl App {
             album_accent: std::collections::HashMap::new(),
             cover_accent_rgb: None,
             skin: None,
+            show_playlist: true,
         };
         app.plugins = app.collect_plugins();
         app.reload_media_plugins();
@@ -413,17 +417,27 @@ impl App {
         let shared = self.shared.clone();
         let mut actions: Vec<ClassicAction> = Vec::new();
 
+        // 主窗口下面紧贴播放列表，剩下的高度给列表
+        let pl_h = ((ui.available_height() / scale) - MAIN_H).clamp(140.0, 420.0);
         let (rect, _) = ui.allocate_exact_size(
-            egui::vec2(MAIN_W * scale, MAIN_H * scale),
+            egui::vec2(MAIN_W * scale, (MAIN_H + pl_h) * scale),
             egui::Sense::hover(),
+        );
+        let main_rect = egui::Rect::from_min_size(
+            rect.min,
+            egui::vec2(MAIN_W * scale, MAIN_H * scale),
+        );
+        let pl_rect = egui::Rect::from_min_size(
+            main_rect.min + egui::vec2(0.0, MAIN_H * scale),
+            egui::vec2(MAIN_W * scale, pl_h * scale),
         );
         let painter = ui.painter_at(rect);
         let place = |x: f32, y: f32, w: f32, h: f32| {
-            egui::Rect::from_min_size(rect.min + egui::vec2(x, y) * scale, egui::vec2(w, h) * scale)
+            egui::Rect::from_min_size(main_rect.min + egui::vec2(x, y) * scale, egui::vec2(w, h) * scale)
         };
 
         painter.rect_filled(rect, 0.0, egui::Color32::BLACK);
-        skin.sprite(&painter, "main.bmp", 0.0, 0.0, MAIN_W, MAIN_H, rect, egui::Color32::WHITE);
+        skin.sprite(&painter, "main.bmp", 0.0, 0.0, MAIN_W, MAIN_H, main_rect, egui::Color32::WHITE);
 
         // 播放状态指示灯（playpaus.bmp：0 播放 / 9 暂停 / 18 停止）
         let (lx, sheet_x) = match status {
@@ -436,17 +450,17 @@ impl App {
         // 时间 88:88（numbers.bmp 每字 9×13）
         let cur = pos.max(0.0) as u64;
         let time = format!("{:02}:{:02}", cur / 60, cur % 60);
-        skin.digits(&painter, &time, rect.min + egui::vec2(48.0, 26.0) * scale, scale, egui::Color32::from_rgb(0x00, 0xFF, 0x00));
+        skin.digits(&painter, &time, main_rect.min + egui::vec2(48.0, 26.0) * scale, scale, egui::Color32::from_rgb(0x00, 0xFF, 0x00));
 
         // 曲名跑马灯（text.bmp 5×6 字模，超出裁掉）
-        let marq = egui::Rect::from_min_size(rect.min + egui::vec2(111.0, 24.0) * scale, egui::vec2(154.0, 6.0) * scale);
+        let marq = egui::Rect::from_min_size(main_rect.min + egui::vec2(111.0, 24.0) * scale, egui::vec2(154.0, 6.0) * scale);
         let clipped = painter.with_clip_rect(marq);
         skin.text(&clipped, &title, marq.min, scale, marq.max.x, egui::Color32::from_rgb(0x00, 0xFF, 0x00));
 
         // 格式 / 采样率
         let info = format!("{} {}kHz", if self.state.format.is_empty() { "MP3" } else { &self.state.format }, self.state.sample_rate / 1000);
         skin.text(&clipped, "", marq.min, scale, marq.max.x, egui::Color32::WHITE);
-        let kbps = egui::Rect::from_min_size(rect.min + egui::vec2(111.0, 43.0) * scale, egui::vec2(100.0, 6.0) * scale);
+        let kbps = egui::Rect::from_min_size(main_rect.min + egui::vec2(111.0, 43.0) * scale, egui::vec2(100.0, 6.0) * scale);
         skin.text(&painter.with_clip_rect(kbps), &info, kbps.min, scale, kbps.max.x, egui::Color32::from_rgb(0x00, 0xFF, 0x00));
 
         // 进度条（posbar.bmp：248×10 背景 + 29×10 滑块）
@@ -545,9 +559,127 @@ impl App {
         }
         let plb = place(242.0, 58.0, 23.0, 12.0);
         let pl_resp = ui.interact(plb, ui.id().with("classic_playlist"), egui::Sense::click());
-        skin.sprite(&painter, "shufrep.bmp", 23.0, if pl_resp.is_pointer_button_down_on() { 73.0 } else { 61.0 }, 23.0, 12.0, plb, egui::Color32::WHITE);
+        let pl_y = if pl_resp.is_pointer_button_down_on() {
+            73.0
+        } else if self.show_playlist {
+            61.0
+        } else {
+            0.0
+        };
+        skin.sprite(&painter, "shufrep.bmp", 23.0, pl_y, 23.0, 12.0, plb, egui::Color32::WHITE);
         if pl_resp.clicked() {
             actions.push(ClassicAction::TogglePlaylistWindow);
+        }
+
+        // ---- 播放列表窗口（pledit.bmp 边框 + pledit.txt 配色） ----
+        if self.show_playlist && skin.has("pledit.bmp") {
+            use egui::Color32;
+            let white = Color32::WHITE;
+            let pr = pl_rect;
+            let pp = |x: f32, y: f32, w: f32, h: f32| {
+                egui::Rect::from_min_size(pr.min + egui::vec2(x, y) * scale, egui::vec2(w, h) * scale)
+            };
+
+            // 顶部 20px：左角 + 平铺 + 标题条 + 右角
+            skin.sprite(&painter, "pledit.bmp", 0.0, 21.0, 25.0, 20.0, pp(0.0, 0.0, 25.0, 20.0), white);
+            let (tw, th) = skin.size("pledit.bmp").unwrap_or((280, 186));
+            let mut x = 25.0;
+            while x < MAIN_W - 25.0 {
+                let w = (MAIN_W - 25.0 - x).min(25.0);
+                skin.sprite(&painter, "pledit.bmp", 127.0, 21.0, w, 20.0, pp(x, 0.0, w, 20.0), white);
+                x += 25.0;
+            }
+            skin.sprite(&painter, "pledit.bmp", 26.0, 21.0, 100.0, 20.0, pp((MAIN_W - 100.0) / 2.0, 0.0, 100.0, 20.0), white);
+            skin.sprite(&painter, "pledit.bmp", 153.0, 21.0, 25.0, 20.0, pp(MAIN_W - 25.0, 0.0, 25.0, 20.0), white);
+            skin.text(&painter, "PLAYLIST", pp((MAIN_W - 100.0) / 2.0 + 22.0, 7.0, 1.0, 1.0).min, scale, pr.max.x, white);
+
+            // 左右边框平铺（左 12、右 20 宽）
+            let mut y = 20.0;
+            while y < pl_h - 38.0 {
+                let h = (pl_h - 38.0 - y).min(29.0);
+                skin.sprite(&painter, "pledit.bmp", 0.0, 42.0, 12.0, h, pp(0.0, y, 12.0, h), white);
+                skin.sprite(&painter, "pledit.bmp", 31.0, 42.0, 20.0, h, pp(MAIN_W - 20.0, y, 20.0, h), white);
+                y += 29.0;
+            }
+
+            // 列表区域背景
+            let list = pp(12.0, 20.0, MAIN_W - 32.0, pl_h - 58.0);
+            painter.rect_filled(list, 0.0, skin.pledit.normal_bg);
+
+            // 底部 38px
+            let by = pl_h - 38.0;
+            skin.sprite(&painter, "pledit.bmp", 0.0, 72.0, 125.0, 38.0, pp(0.0, by, 125.0, 38.0), white);
+            skin.sprite(&painter, "pledit.bmp", 126.0, 72.0, 150.0, 38.0, pp(MAIN_W - 150.0, by, 150.0, 38.0), white);
+            // 底部按钮：加歌 / 删除 / 选择 / 杂项 / 列表选项
+            let (bl, br) = (skin.pledit.normal_bg, skin.pledit.current);
+            let menu_btn = |x: f32, sx: f32, sy: f32, id: &str| {
+                let r = pp(x, by + 8.0, 22.0, 18.0);
+                let resp = ui.interact(r, ui.id().with(id), egui::Sense::click());
+                skin.sprite(&painter, "pledit.bmp", sx, if resp.is_pointer_button_down_on() { sy + 19.0 } else { sy }, 22.0, 18.0, r, white);
+                resp.clicked()
+            };
+            if menu_btn(14.0, 0.0, 149.0, "pl_add") {
+                actions.push(ClassicAction::Eject);
+            }
+            let _ = menu_btn(43.0, 54.0, 111.0, "pl_rem");
+            let _ = menu_btn(72.0, 54.0, 130.0, "pl_sel");
+            let _ = menu_btn(101.0, 54.0, 149.0, "pl_misc");
+            let _ = menu_btn(MAIN_W - 44.0, 0.0, 111.0, "pl_menu");
+
+            // 行（用系统字体，能显示中文；颜色取 pledit.txt）
+            let rows: Vec<(String, String, Option<f64>, usize)> = {
+                let pl = &self.playlist;
+                pl.entries
+                    .iter()
+                    .enumerate()
+                    .map(|(i, e)| (e.artist.clone(), e.display_title().to_string(), e.length, i))
+                    .collect()
+            };
+            let current = self.state.current;
+            let font = egui::FontId::new(11.0 * scale.max(1.0), egui::FontFamily::Proportional);
+            let row_h = 14.0 * scale.max(1.0);
+
+            ui.scope_builder(egui::UiBuilder::new().max_rect(list), |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for (artist, title, len, idx) in &rows {
+                            let (w, h) = (ui.available_width(), row_h);
+                            let (r, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
+                            let is_cur = current == Some(*idx);
+                            if is_cur {
+                                ui.painter().rect_filled(r, 0.0, skin.pledit.selected_bg);
+                            }
+                            let color = if is_cur { br } else { bl };
+                            let label = if artist.is_empty() {
+                                format!("{}. {}", idx + 1, title)
+                            } else {
+                                format!("{}. {} - {}", idx + 1, artist, title)
+                            };
+                            ui.painter().text(
+                                r.min + egui::vec2(2.0, 1.0),
+                                egui::Align2::LEFT_TOP,
+                                &label,
+                                font.clone(),
+                                color,
+                            );
+                            if let Some(len) = len {
+                                let t = format!("{}:{:02}", (*len as u64) / 60, (*len as u64) % 60);
+                                ui.painter().text(
+                                    r.max - egui::vec2(2.0, 1.0),
+                                    egui::Align2::RIGHT_BOTTOM,
+                                    t,
+                                    font.clone(),
+                                    color,
+                                );
+                            }
+                            if resp.clicked() {
+                                actions.push(ClassicAction::PlayAt(*idx));
+                            }
+                        }
+                    });
+            });
+            let _ = (tw, th);
         }
 
         drop(painter);
@@ -596,7 +728,10 @@ impl App {
                     }
                 }
                 ClassicAction::ToggleEqWindow => { self.show_eq = !self.show_eq; }
-                ClassicAction::TogglePlaylistWindow => { /* 播放列表窗口下一步做 */ }
+                ClassicAction::TogglePlaylistWindow => {
+                    self.show_playlist = !self.show_playlist;
+                }
+                ClassicAction::PlayAt(i) => { shared.send(Cmd::PlayIndex(i)); }
             }
         }
     }
