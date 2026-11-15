@@ -716,6 +716,22 @@ fn client() -> &'static reqwest::blocking::Client {
 }
 
 /// 把 JS 传进来的配置转成一次真实请求，返回 JSON 字符串。
+/// 给「扫码登录」用：直接下载一张图片（二维码），返回原始字节。
+pub fn fetch_bytes(url: &str) -> anyhow::Result<Vec<u8>> {
+    let resp = client()
+        .get(url)
+        .send()
+        .map_err(|e| anyhow::anyhow!("下载图片失败: {e}"))?;
+    if !resp.status().is_success() {
+        anyhow::bail!("下载图片失败: HTTP {}", resp.status());
+    }
+    let bytes = resp.bytes().map_err(|e| anyhow::anyhow!("读取图片失败: {e}"))?;
+    if bytes.len() > 4 * 1024 * 1024 {
+        anyhow::bail!("图片太大（{} 字节）", bytes.len());
+    }
+    Ok(bytes.to_vec())
+}
+
 fn http_request(config_json: &str) -> String {
     let cfg: Value = serde_json::from_str(config_json).unwrap_or(Value::Null);
     let url = cfg["url"].as_str().unwrap_or_default().to_string();

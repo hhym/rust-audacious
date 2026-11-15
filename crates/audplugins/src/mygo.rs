@@ -279,6 +279,22 @@ impl MygoPlugin {
         self.call("stream", json!({ "id": id, "quality": quality, "track": track }))
     }
 
+    /// 插件是否支持扫码登录（导出 `loginQr` 与 `loginPoll`）。
+    pub fn supports_login(&self) -> bool {
+        self.info.supports("loginQr") && self.info.supports("loginPoll")
+    }
+
+    /// 让插件生成一张登录二维码：`loginQr({})` →
+    /// `{ key, qrImage?（图片 URL 或 data:image/png;base64,）, qrUrl?（二维码里编的链接）, tip? }`
+    pub fn login_qr(&self) -> anyhow::Result<Value> {
+        self.call("loginQr", json!({}))
+    }
+
+    /// 轮询登录状态：`loginPoll({ key })` → `{ status: waiting|scanned|done|expired|failed, message? }`
+    pub fn login_poll(&self, key: &str) -> anyhow::Result<Value> {
+        self.call("loginPoll", json!({ "key": key }))
+    }
+
     /// 歌词：`lyrics({id})` → `{lrc, translation}` 或 `{lines}`
     pub fn lyrics(&self, item: &Value) -> anyhow::Result<Value> {
         let track = item
@@ -630,6 +646,33 @@ export const extra = 1;
         let got: Vec<&str> = names.iter().map(|(k, _)| k.as_str()).collect();
         assert!(got.contains(&"search"));
         assert!(got.contains(&"stream"));
+    }
+
+    #[test]
+    fn mygo_qr_login() {
+        let dir = std::env::temp_dir().join(format!("mygo-qr-{}", std::process::id()));
+        write_plugin(
+            &dir,
+            r#"{"id":"qr","name":"QR","version":"1.0.0","main":"index.js"}"#,
+            r#"
+export async function loginQr() {
+  return { key: "k1", qrUrl: "https://example.com/login", tip: "用手机扫" };
+}
+export async function loginPoll({ key }) {
+  return { status: key === "k1" ? "done" : "failed", message: "ok" };
+}
+export async function search() { return { tracks: [], more: false }; }
+"#,
+        );
+        let plugin = MygoPlugin::load(&dir);
+        assert!(plugin.info.error.is_none(), "{:?}", plugin.info.error);
+        assert!(plugin.supports_login());
+        let qr = plugin.login_qr().unwrap();
+        assert_eq!(qr["key"], "k1");
+        assert_eq!(qr["qrUrl"], "https://example.com/login");
+        let poll = plugin.login_poll("k1").unwrap();
+        assert_eq!(poll["status"], "done");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -196,11 +196,42 @@ export function lyrics({ id }) {
   这类错误来自插件自己的接口，不是宿主问题。
 - 插件异常会在「在线搜索」窗口里显示错误文本（含调用栈），便于定位。
 
+### 扫码登录（MyGo 扩展，可选导出）
+
+除了标准的 `search` / `stream` / `lyrics`，插件还可以导出两个方法，宿主会显示「扫码登录」按钮：
+
+```js
+// 生成一张新二维码
+export async function loginQr() {
+  // 用插件自己的接口拿到二维码图片 / 二维码里的链接
+  return {
+    key: "会话标识",                        // 必填（轮询时原样传回）
+    qrImage: "data:image/png;base64,...",  // 图片 URL 或 data URL，宿主会下载并显示
+    qrUrl: "https://...",                  // 二维码里编的链接（没有图片时也会显示出来）
+    tip: "用 B 站 App 扫码",
+  };
+}
+
+// 轮询状态，宿主每 2 秒调一次
+export async function loginPoll({ key }) {
+  return { status: "waiting" }; // waiting | scanned | done | expired | failed
+}
+```
+
+约定：
+
+- 登录态由插件自己保存（`host.storage.set("session", ...)` 或 `settings`），宿主不接触账号密码，也不存 cookie 容器；
+- 宿主只负责：拉二维码 → 解码 PNG/JPEG（也接受 http 图片地址，会走宿主网络）→ 显示 → 每 2 秒轮询 → 成功时提示；
+- `status` 为 `done` 后窗口出现「完成」按钮，`expired` 提示刷新二维码；
+- 详细的「登录窗口 + 浏览器回跳」还没做，需要这类登录的插件可以先走这个扫码流程。
+
+`examples/mygo-plugins/qr-demo/` 是一个不联网的演示插件（点「刷新二维码」会重新生成，4 次轮询后进入 `done`）。
+
 ### MyGo 标准的限制
 
 - 没有真正的 ESM 语义：`import` 被改写成 `require`，动态 `import()`、顶层 `await` 不支持。
-- `host.spawn`（启动外部程序）、`host.signInPrompt` / `waitForRedirect` / `webSignIn`（登录窗口与 cookie）
-  这版都还没实现，调用会抛错；`permissions.process` 因此不生效。
+- `host.spawn`（启动外部程序）、`host.signInPrompt` / `waitForRedirect` / `webSignIn`（浏览器回跳登录）
+  这版都还没实现，调用会抛错；`permissions.process` 因此不生效。扫码登录改走下面的 `loginQr` / `loginPoll` 扩展。
 - `fetch` 只能拿到文本 / JSON（没有 `arrayBuffer`），也没有流式响应。
 - `stream` 返回的 `headers` 目前没有透传到下载请求（和 MusicFree 的 `headers` 一样，是下一步的事）。
 - 只映射了 `search` / `stream` / `lyrics` 三个方法；`home`、`browse`、`playlists`、`show`、`comments` 等

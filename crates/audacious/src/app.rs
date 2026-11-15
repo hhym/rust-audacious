@@ -114,6 +114,8 @@ pub struct App {
     tab: MainTab,
     /// 「喜欢」列表
     liked: Liked,
+    /// 扫码登录窗口
+    login: crate::login::LoginState,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -174,6 +176,7 @@ impl App {
             resolve_rx: None,
             tab: MainTab::Songs,
             liked: Liked::load(),
+            login: crate::login::LoginState::default(),
         };
         app.plugins = app.collect_plugins();
         app.reload_media_plugins();
@@ -251,6 +254,25 @@ impl App {
         }
     }
 
+    /// 按插件 id 找 MyGo 插件并打开扫码登录窗口。
+    fn open_login(&mut self, id: &str) {
+        let found = self
+            .media_plugins
+            .iter()
+            .filter_map(|pl| pl.as_mygo())
+            .find(|mygo| mygo.manifest.id == id);
+        match found {
+            Some(mygo) => {
+                if mygo.supports_login() {
+                    self.login.open(mygo.clone());
+                } else {
+                    self.toast("这个插件没有实现扫码登录（loginQr / loginPoll）");
+                }
+            }
+            None => self.toast("找不到该插件，先点「重新扫描」"),
+        }
+    }
+
     fn toast(&mut self, message: impl Into<String>) {
         self.toast = Some((message.into(), Instant::now()));
     }
@@ -320,6 +342,7 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.sync();
         self.poll_media_channels();
+        self.login.tick(ctx);
 
         if self.config.mini != self.mini_applied {
             self.mini_applied = self.config.mini;
@@ -378,6 +401,9 @@ impl eframe::App for App {
         self.plugins_ui(ctx, &p);
         self.search_ui(ctx, &p);
         self.about_ui(ctx, &p);
+        if let Some(msg) = self.login.ui(ctx, &p, self.has_cjk) {
+            self.toast(msg);
+        }
 
         let pending = self.browser_ui(ctx, &p);
         if !pending.is_empty() {
@@ -1723,6 +1749,19 @@ impl App {
 
                         // MyGo 插件声明的设置项，直接在这里填
                         if let Some(mygo) = pl.as_mygo() {
+                            if mygo.supports_login() {
+                                let id = mygo.manifest.id.clone();
+                                if ui
+                                    .button(self.t("扫码登录", "Scan to sign in"))
+                                    .on_hover_text(self.t(
+                                        "插件支持扫码登录（导出 loginQr / loginPoll）",
+                                        "This plugin supports QR sign-in (loginQr / loginPoll)",
+                                    ))
+                                    .clicked()
+                                {
+                                    self.open_login(&id);
+                                }
+                            }
                             if !mygo.settings().is_empty() {
                                 for def in mygo.settings() {
                                     if def.key.is_empty() {
