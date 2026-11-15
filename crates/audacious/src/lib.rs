@@ -87,8 +87,9 @@ pub extern "C" fn android_main(app: android_activity::AndroidApp) {
         );
     }
     init_logging();
-    // SAF 选择器要靠 AndroidApp 拿 JavaVM 与 Activity
+    // SAF 选择器要靠 AndroidApp 拿 JavaVM 与 Activity；导入线程同时起来
     android::install(&app);
+    android::start_importer();
 
     let config = Config::load();
     let shared = Shared::spawn(config.clone());

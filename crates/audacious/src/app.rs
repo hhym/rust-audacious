@@ -169,6 +169,9 @@ pub struct App {
     plugin_pick: Option<PluginPick>,
     /// 安装结果提示：成功与否 + 文案
     plugin_install_msg: Option<(bool, String)>,
+    /// Android SAF 导入的临时提示（进度 / 结果），几秒后自动消失
+    #[cfg(target_os = "android")]
+    import_msg: Option<(String, Instant)>,
     /// 后台下载安装
     install_rx: Option<Receiver<Result<audplugins::install::InstalledPlugin, String>>>,
     /// MyGo 插件设置项的编辑缓冲：`插件id/key` → 当前文本
@@ -286,6 +289,8 @@ impl App {
             plugin_url_input: String::new(),
             plugin_pick: None,
             plugin_install_msg: None,
+            #[cfg(target_os = "android")]
+            import_msg: None,
             install_rx: None,
             mygo_setting_inputs: std::collections::HashMap::new(),
             search_query: String::new(),
@@ -554,12 +559,30 @@ impl eframe::App for App {
                 .filter_map(|f| f.path.clone())
                 .collect()
         });
-        // SAF 选完的音频由 android.rs 落盘后塞进通道，这里每帧取走
+        // SAF 选完的音频由 android.rs 的后台线程落盘，这里每帧取走
         #[cfg(target_os = "android")]
         {
             let picked = crate::android::take_picked();
             if !picked.is_empty() {
                 self.add_paths(&picked);
+            }
+            if let Some(msg) = crate::android::take_status() {
+                self.import_msg = Some((msg, Instant::now()));
+            }
+            match &self.import_msg {
+                Some((_, at)) if at.elapsed() > Duration::from_secs(4) => self.import_msg = None,
+                _ => {}
+            }
+            if let Some((msg, _)) = self.import_msg.clone() {
+                egui::Area::new(egui::Id::new("import_toast"))
+                    .anchor(Align2::CENTER_BOTTOM, vec2(0.0, -96.0))
+                    .order(egui::Order::Foreground)
+                    .interactable(false)
+                    .show(ctx, |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.label(RichText::new(msg).small());
+                        });
+                    });
             }
         }
 

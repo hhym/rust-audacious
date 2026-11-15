@@ -3,14 +3,18 @@
 //! - Java 侧：`android/java/io/github/hhym/audaciousrs/MainActivity.java` 继承
 //!   `android.app.NativeActivity`，把 `onActivityResult` 转给这里的 JNI 方法；
 //! - Rust 侧：[`open_audio_picker`] 用 JNI 拉起 `ACTION_OPEN_DOCUMENT`，
-//!   回调里把选中的内容 URI 通过 `ContentResolver` 读到 App 私有目录
-//!   （`files/imported/`），再把落地路径塞进通道，由 UI 每帧取走。
+//!   回调里只做「查文件名 + detachFd」，真正的读盘拷进 `files/imported/`
+//!   交给一个后台线程，UI 线程不会被几十 MB 的整轨卡住。
 //!
-//! 之所以要拷一份：SAF 给的是 `content://` URI，不是文件路径，symphonia 要能随机读的
+//! 为什么拷一份：SAF 给的是 `content://` URI，不是文件路径，symphonia 要能随机读的
 //! `File`；替身 fd 又会随进程/授权生命周期失效，落盘最省心。
 
+use std::os::unix::io::FromRawFd;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{channel, Sender};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use jni::objects::{JClass, JObject, JString, JValue};
 use jni::sys::{jint, JNIEnv};
@@ -21,11 +25,50 @@ const REQ_PICK_AUDIO: jint = 0x51AF;
 /// `Activity.RESULT_OK`
 const RESULT_OK: jint = -1;
 
+/// 回调 → 后台导入线程的一个待拷文件。
+struct Job {
+    fd: i32,
+    name: String,
+    size: u64,
+}
+
 static APP: OnceLock<android_activity::AndroidApp> = OnceLock::new();
+static JOBS: OnceLock<Sender<Job>> = OnceLock::new();
 static PICKED: OnceLock<Mutex<Vec<PathBuf>>> = OnceLock::new();
+static STATUS: OnceLock<Mutex<String>> = OnceLock::new();
+static BYTES: AtomicU64 = AtomicU64::new(0);
+static TOTAL: AtomicU64 = AtomicU64::new(0);
+
+fn jobs() -> Option<&'static Sender<Job>> {
+    JOBS.get()
+}
 
 fn picked() -> &'static Mutex<Vec<PathBuf>> {
     PICKED.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn status_slot() -> &'static Mutex<String> {
+    STATUS.get_or_init(|| Mutex::new(String::new()))
+}
+
+fn set_status(text: impl Into<String>) {
+    *status_slot().lock().unwrap_or_else(|e| e.into_inner()) = text.into();
+}
+
+/// UI 每帧调用：取走这次选择器落地的文件路径（取完即清空）。
+pub fn take_picked() -> Vec<PathBuf> {
+    let mut list = picked().lock().unwrap_or_else(|e| e.into_inner());
+    std::mem::take(&mut *list)
+}
+
+/// UI 每帧调用：取走最新状态提示（导入进度/结果），取完即清空。
+pub fn take_status() -> Option<String> {
+    let mut slot = status_slot().lock().unwrap_or_else(|e| e.into_inner());
+    if slot.is_empty() {
+        None
+    } else {
+        Some(std::mem::take(&mut *slot))
+    }
 }
 
 /// 记住 `AndroidApp`，后续 JNI 调用要靠它拿 JavaVM / Activity。
@@ -33,10 +76,44 @@ pub fn install(app: &android_activity::AndroidApp) {
     let _ = APP.set(app.clone());
 }
 
-/// UI 每帧调用：取走这次选择器落地的文件路径（取完即清空）。
-pub fn take_picked() -> Vec<PathBuf> {
-    let mut list = picked().lock().unwrap_or_else(|e| e.into_inner());
-    std::mem::take(&mut *list)
+/// 起后台导入线程；必须在 `install` 之后、UI 起来之前调一次。
+pub fn start_importer() {
+    if JOBS.get().is_some() {
+        return;
+    }
+    let (tx, rx) = channel::<Job>();
+    if JOBS.set(tx).is_ok() {
+        let spawned = std::thread::Builder::new()
+            .name("saf-import".into())
+            .spawn(move || {
+                for job in rx {
+                    let dest = import_dir().join(&job.name);
+                    match copy_fd(job.fd, &dest, job.size) {
+                        Ok(path) => {
+                            picked()
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .push(path.clone());
+                            log::info!("导入 → {}", path.display());
+                            set_status(format!("已导入 {}", job.name));
+                        }
+                        Err(err) => {
+                            log::error!("导入 {} 失败：{err}", job.name);
+                            set_status(format!("导入失败：{err}"));
+                        }
+                    }
+                }
+            });
+        if spawned.is_err() {
+            log::error!("导入线程起不来");
+        }
+    }
+}
+
+fn import_dir() -> PathBuf {
+    let dir = audcore::config::data_dir().join("imported");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
 }
 
 /// 打开系统文件选择器（多选音频）。没有 Activity 上下文时返回 false。
@@ -102,8 +179,8 @@ fn start_picker(app: &android_activity::AndroidApp) -> jni::errors::Result<()> {
 
 /// Java 侧 `MainActivity.nativeOnActivityResult` 的实现。
 ///
-/// 静态 native 方法：第二个参数是 `JClass`；回调跑在 UI 线程，
-/// 只做「读流 → 落盘 → 塞通道」，重活留给主循环。
+/// 静态 native 方法：第二个参数是 `JClass`。回调跑在 UI 线程，因此这里只做
+/// 查名字 / `openFileDescriptor` / `detachFd` 这些毫秒级动作，读盘交给后台线程。
 #[no_mangle]
 #[allow(non_snake_case)]
 pub extern "system" fn Java_io_github_hhym_audaciousrs_MainActivity_nativeOnActivityResult(
@@ -116,19 +193,17 @@ pub extern "system" fn Java_io_github_hhym_audaciousrs_MainActivity_nativeOnActi
     if request_code != REQ_PICK_AUDIO || result_code != RESULT_OK || data.is_null() {
         return;
     }
-    match import_uris(&mut env, &data) {
-        Ok(paths) => {
-            if !paths.is_empty() {
-                log::info!("SAF 选中 {} 个文件", paths.len());
-                let mut list = picked().lock().unwrap_or_else(|e| e.into_inner());
-                list.extend(paths);
-            }
+    match enqueue_uris(&mut env, &data) {
+        Ok(0) => log::warn!("SAF 没有返回可用文件"),
+        Ok(n) => {
+            set_status(format!("正在导入 {n} 首…"));
+            log::info!("SAF 选中 {n} 个文件并已交给导入线程");
         }
-        Err(err) => log::error!("导入 SAF 文件失败：{err}"),
+        Err(err) => log::error!("处理 SAF 结果失败：{err}"),
     }
 }
 
-fn import_uris(env: &mut Env, data: &JObject) -> anyhow::Result<Vec<PathBuf>> {
+fn enqueue_uris(env: &mut Env, data: &JObject) -> anyhow::Result<usize> {
     let mut uris: Vec<JObject> = Vec::new();
 
     // 多选走 ClipData，单选走 getData()
@@ -164,15 +239,12 @@ fn import_uris(env: &mut Env, data: &JObject) -> anyhow::Result<Vec<PathBuf>> {
         }
     }
 
-    let activity = unsafe {
-        JObject::from_raw(
-            APP.get()
-                .map(|a| a.activity_as_ptr() as jni::sys::jobject)
-                .unwrap_or(std::ptr::null_mut()),
-        )
+    let Some(app) = APP.get() else {
+        anyhow::bail!("AndroidApp 还没装好");
     };
+    let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as jni::sys::jobject) };
     if activity.is_null() {
-        return Ok(Vec::new());
+        anyhow::bail!("拿不到 Activity");
     }
     let resolver = env
         .call_method(
@@ -183,63 +255,114 @@ fn import_uris(env: &mut Env, data: &JObject) -> anyhow::Result<Vec<PathBuf>> {
         )?
         .l()?;
 
-    let dir = audcore::config::data_dir().join("imported");
-    let _ = std::fs::create_dir_all(&dir);
+    let Some(sender) = jobs() else {
+        anyhow::bail!("导入线程没起来");
+    };
 
-    let mut out = Vec::new();
+    let mut queued = 0usize;
+    let mut total = 0u64;
     for uri in uris {
-        match copy_uri(env, &resolver, &uri, &dir) {
-            Ok(path) => out.push(path),
-            Err(err) => log::warn!("跳过某个文件：{err}"),
+        let name = display_name(env, &resolver, &uri).unwrap_or_else(|| "imported".to_string());
+        let ext = extension_for(env, &resolver, &uri);
+        let safe_name = unique_name(&import_dir(), &sanitize(&name, ext));
+
+        let mode = env.new_string("r")?;
+        let pfd = env
+            .call_method(
+                &resolver,
+                "openFileDescriptor",
+                "(Landroid/net/Uri;Ljava/lang/String;)Landroid/os/ParcelFileDescriptor;",
+                &[JValue::Object(&uri), JValue::Object(&JObject::from(mode))],
+            )?
+            .l()?;
+        if pfd.is_null() {
+            log::warn!("openFileDescriptor 返回 null，跳过这个文件");
+            continue;
         }
+        let size = env
+            .call_method(&pfd, "getStatSize", "()J", &[])?
+            .j()
+            .unwrap_or(-1);
+        let size = if size > 0 { size as u64 } else { 0 };
+        // detach 后 fd 归 Rust 所有，Java 侧不再关它
+        let fd = env.call_method(&pfd, "detachFd", "()I", &[])?.i()?;
+        if fd < 0 {
+            log::warn!("detachFd 失败，跳过这个文件");
+            continue;
+        }
+
+        total += size;
+        let job = Job {
+            fd,
+            name: safe_name,
+            size,
+        };
+        if sender.send(job).is_err() {
+            anyhow::bail!("导入线程已退出");
+        }
+        queued += 1;
     }
-    Ok(out)
+
+    BYTES.store(0, Ordering::Relaxed);
+    TOTAL.store(total, Ordering::Relaxed);
+    Ok(queued)
 }
 
-/// 把一个 `content://` 读进私有目录，返回落地路径。
-fn copy_uri(
-    env: &mut Env,
-    resolver: &JObject,
-    uri: &JObject,
-    dir: &std::path::Path,
-) -> anyhow::Result<PathBuf> {
-    let name = display_name(env, resolver, uri).unwrap_or_else(|| "imported".to_string());
-    let ext = extension_for(env, resolver, uri);
-    let safe_name = sanitize(&name, ext);
-    let mut dest = dir.join(&safe_name);
-    let mut n = 1;
-    while dest.exists() {
-        dest = dir.join(format!("{n}-{safe_name}"));
-        n += 1;
-    }
+/// 把 detach 出来的 fd 读进私有目录。跑在后台线程，顺便刷新进度。
+fn copy_fd(fd: i32, dest: &std::path::Path, size: u64) -> std::io::Result<PathBuf> {
+    use std::io::{Read, Write};
 
-    let stream = env
-        .call_method(
-            resolver,
-            "openInputStream",
-            "(Landroid/net/Uri;)Ljava/io/InputStream;",
-            &[JValue::Object(uri)],
-        )?
-        .l()?;
-    if stream.is_null() {
-        anyhow::bail!("openInputStream 返回 null");
-    }
-
-    let mut file = std::fs::File::create(&dest)?;
-    let buf = env.new_byte_array(64 * 1024)?;
+    let mut src = unsafe { std::fs::File::from_raw_fd(fd) };
+    let mut out = std::fs::File::create(dest)?;
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut last = Instant::now();
     loop {
-        let read = env
-            .call_method(&stream, "read", "([B)I", &[JValue::Object(&buf)])?
-            .i()?;
-        if read <= 0 {
+        let n = src.read(&mut buf)?;
+        if n == 0 {
             break;
         }
-        let bytes = env.convert_byte_array(&buf)?;
-        std::io::Write::write_all(&mut file, &bytes[..read as usize])?;
+        out.write_all(&buf[..n])?;
+        let done = BYTES.fetch_add(n as u64, Ordering::Relaxed) + n as u64;
+
+        // 进度提示每 150ms 刷一次，避免每读一块就抢一次锁
+        if last.elapsed() >= Duration::from_millis(150) {
+            last = Instant::now();
+            let total = TOTAL.load(Ordering::Relaxed);
+            if total > 0 {
+                let pct = (done.min(total) * 100 / total) as u32;
+                set_status(format!("正在导入… {pct}%"));
+            }
+        }
     }
-    let _ = env.call_method(&stream, "close", "()V", &[]);
-    log::info!("导入 → {}", dest.display());
-    Ok(dest)
+    Ok(dest.to_path_buf())
+}
+
+/// 同名文件不覆盖：`2-xxx.mp3`。
+fn unique_name(dir: &std::path::Path, name: &str) -> String {
+    if !dir.join(name).exists() {
+        return name.to_string();
+    }
+    let path = std::path::Path::new(name);
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "imported".into());
+    let ext = path
+        .extension()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut n = 2;
+    loop {
+        let candidate = if ext.is_empty() {
+            format!("{n}-{stem}")
+        } else {
+            format!("{n}-{stem}.{ext}")
+        };
+        if !dir.join(&candidate).exists() {
+            return candidate;
+        }
+        n += 1;
+    }
 }
 
 /// `OpenableColumns.DISPLAY_NAME`
@@ -269,9 +392,7 @@ fn display_name(env: &mut Env, resolver: &JObject, uri: &JObject) -> Option<Stri
         .z()
         .ok()?;
     let name = if moved {
-        let column = env
-            .new_string("_display_name")
-            .ok()?;
+        let column = env.new_string("_display_name").ok()?;
         let col = env
             .call_method(
                 &cursor,
@@ -300,7 +421,9 @@ fn display_name(env: &mut Env, resolver: &JObject, uri: &JObject) -> Option<Stri
 
 fn read_string(env: &mut Env, obj: JObject) -> Option<String> {
     let text = JString::from(obj);
-    env.get_string(&text).ok().map(|s| s.to_string_lossy().into_owned())
+    env.get_string(&text)
+        .ok()
+        .map(|s| s.to_string_lossy().into_owned())
 }
 
 fn extension_for(env: &mut Env, resolver: &JObject, uri: &JObject) -> &'static str {
@@ -340,7 +463,9 @@ fn sanitize(name: &str, ext: &str) -> String {
     let base = if base.is_empty() { "imported" } else { base };
     let has_ext = base
         .rsplit_once('.')
-        .map(|(_, e)| !e.is_empty() && e.len() <= 5 && e.chars().all(|c| c.is_ascii_alphanumeric()))
+        .map(|(_, e)| {
+            !e.is_empty() && e.len() <= 5 && e.chars().all(|c| c.is_ascii_alphanumeric())
+        })
         .unwrap_or(false);
     if has_ext {
         base.to_string()
