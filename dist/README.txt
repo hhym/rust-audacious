@@ -1,4 +1,4 @@
-rust-audacious 5.6.2 · Windows x64 免安装版
+rust-audacious 5.7.0 · Windows x64 免安装版
 =========================================
 
 Audacious 内核的 Rust 重写，单文件可执行，无需安装运行库。

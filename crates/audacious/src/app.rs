@@ -141,9 +141,10 @@ pub struct App {
 enum MainTab {
     Home,
     Search,
-    Songs,
     Liked,
     Playlists,
+    Songs,
+    Lyrics,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2204,60 +2205,337 @@ fn remote_entry(item: &serde_json::Value, url: &str) -> audcore::Entry {
 }
 
 impl App {
-    /// 主面板：上方是标签栏（首页/搜索/歌曲/喜欢/播放列表 + 插件切换），下方按标签渲染内容。
+    /// 主面板：左侧导航栏 + 顶部搜索条 + 内容区。
     fn main_panel(&mut self, ctx: &egui::Context, p: &Palette) {
-        self.main_nav_ui(ctx, p);
+        self.sidebar_ui(ctx, p);
+        self.top_search_bar(ctx, p);
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(p.bg))
-            .show(ctx, |ui| match self.tab {
-                MainTab::Home => self.home_tab(ui, p),
-                MainTab::Search => self.search_tab(ui, p),
-                MainTab::Songs => {
-                    self.songs_toolbar(ui, p);
-                    self.playlist_table(ui, p);
+            .show(ctx, |ui| {
+                self.page_header(ui, p);
+                match self.tab {
+                    MainTab::Home => self.home_tab(ui, p),
+                    MainTab::Search => self.search_tab(ui, p),
+                    MainTab::Songs => {
+                        self.songs_toolbar(ui, p);
+                        self.playlist_table(ui, p);
+                    }
+                    MainTab::Liked => self.liked_tab(ui, p),
+                    MainTab::Playlists => self.playlists_tab(ui, p),
+                    MainTab::Lyrics => self.lyrics_tab(ui, p),
                 }
-                MainTab::Liked => self.liked_tab(ui, p),
-                MainTab::Playlists => self.playlists_tab(ui, p),
             });
     }
 
-    fn main_nav_ui(&mut self, ctx: &egui::Context, p: &Palette) {
-        let tabs = [
-            (MainTab::Home, self.t("首页", "Home")),
-            (MainTab::Search, self.t("搜索", "Search")),
-            (MainTab::Songs, self.t("歌曲", "Songs")),
-            (MainTab::Liked, self.t("喜欢", "Liked")),
-            (MainTab::Playlists, self.t("播放列表", "Playlists")),
-        ];
-        egui::TopBottomPanel::top("mainnav")
-            .exact_height(38.0)
-            .frame(egui::Frame::NONE.fill(p.panel_alt))
+    /// 左侧栏：应用名、在线音源、导航、我的歌单、按专辑。
+    fn sidebar_ui(&mut self, ctx: &egui::Context, p: &Palette) {
+        egui::SidePanel::left("sidebar")
+            .exact_width(236.0)
+            .resizable(false)
+            .frame(
+                egui::Frame::NONE
+                    .fill(p.bg)
+                    .stroke(egui::Stroke::new(1.0, p.panel))
+                    .inner_margin(egui::Margin::symmetric(10, 10)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    let (rect, _) = ui.allocate_exact_size(vec2(30.0, 30.0), Sense::hover());
+                    ui.painter()
+                        .rect_filled(rect, CornerRadius::same(15), p.accent_soft);
+                    ui.painter().text(
+                        rect.center(),
+                        Align2::CENTER_CENTER,
+                        "A",
+                        FontId::proportional(17.0),
+                        p.accent,
+                    );
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new("Audacious RS")
+                                .size(16.0)
+                                .strong()
+                                .color(p.text),
+                        );
+                        ui.label(
+                            RichText::new(self.t("本地 · 在线音源", "Local · online"))
+                                .small()
+                                .color(p.dim),
+                        );
+                    });
+                });
+
+                ui.add_space(10.0);
+                ui.label(
+                    RichText::new(self.t("当前音源", "Source"))
+                        .small()
+                        .color(p.dim),
+                );
+                ui.horizontal(|ui| {
+                    self.plugin_selector(ui, p, "sidebar");
+                    if ui.small_button("＋").on_hover_text(self.t("重新扫描插件", "Rescan")).clicked()
+                    {
+                        self.reload_media_plugins();
+                    }
+                });
+
+                ui.add_space(12.0);
+                self.sidebar_tab(ui, p, MainTab::Home, self.t("首页", "Home"), None);
+                self.sidebar_tab(ui, p, MainTab::Search, self.t("搜索", "Search"), None);
+                self.sidebar_tab(
+                    ui,
+                    p,
+                    MainTab::Liked,
+                    self.t("喜欢", "Liked"),
+                    Some(self.liked.len()),
+                );
+                self.sidebar_tab(ui, p, MainTab::Playlists, self.t("待播清单", "Playlists"), None);
+                self.sidebar_tab(
+                    ui,
+                    p,
+                    MainTab::Songs,
+                    self.t("歌曲", "Songs"),
+                    Some(self.playlist.len()),
+                );
+                self.sidebar_tab(ui, p, MainTab::Lyrics, self.t("歌词", "Lyrics"), None);
+
+                ui.add_space(10.0);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(self.t("我的歌单", "My playlists"))
+                            .small()
+                            .color(p.dim),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("＋").on_hover_text(self.t("保存当前列表", "Save list")).clicked()
+                        {
+                            self.save_playlist();
+                        }
+                    });
+                });
+                let files = Self::playlist_files();
+                if files.is_empty() {
+                    ui.label(
+                        RichText::new(self.t("还没有保存的歌单", "No saved playlists"))
+                            .small()
+                            .color(p.dim),
+                    );
+                }
+                for file in files.iter().take(6) {
+                    let name = file
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("歌单")
+                        .to_string();
+                    if ui
+                        .add_sized(
+                            vec2(ui.available_width(), 22.0),
+                            egui::Button::new(RichText::new(elide(&name, 18)).small().color(p.text))
+                                .frame(false),
+                        )
+                        .clicked()
+                    {
+                        self.load_playlist_file(file, true);
+                    }
+                }
+
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(self.t("按专辑", "By album"))
+                        .small()
+                        .color(p.dim),
+                );
+                let albums = self.album_counts();
+                if albums.is_empty() {
+                    ui.label(
+                        RichText::new(self.t("列表里有歌后这里会分组", "Albums appear once you add songs"))
+                            .small()
+                            .color(p.dim),
+                    );
+                }
+                for (album, count) in albums.iter().take(8) {
+                    ui.label(
+                        RichText::new(format!("{}  ·  {}", elide(album, 14), count))
+                            .small()
+                            .color(p.dim),
+                    );
+                }
+            });
+    }
+
+    /// 侧栏里的一行导航（左对齐，选中时铺底色）。
+    fn sidebar_tab(
+        &mut self,
+        ui: &mut egui::Ui,
+        p: &Palette,
+        tab: MainTab,
+        label: &str,
+        count: Option<usize>,
+    ) {
+        let selected = self.tab == tab;
+        let width = ui.available_width();
+        let (rect, resp) = ui.allocate_exact_size(vec2(width, 32.0), Sense::click());
+        if selected {
+            ui.painter().rect_filled(rect, CornerRadius::same(6), p.accent_soft);
+        } else if resp.hovered() {
+            ui.painter()
+                .rect_filled(rect, CornerRadius::same(6), p.panel);
+        }
+        let color = if selected { p.accent } else { p.text };
+        ui.painter().text(
+            rect.left_center() + vec2(12.0, 0.0),
+            Align2::LEFT_CENTER,
+            label,
+            FontId::proportional(13.5),
+            color,
+        );
+        if let Some(count) = count {
+            ui.painter().text(
+                rect.right_center() - vec2(12.0, 0.0),
+                Align2::RIGHT_CENTER,
+                count.to_string(),
+                FontId::proportional(11.0),
+                p.dim,
+            );
+        }
+        if resp.clicked() {
+            self.tab = tab;
+        }
+    }
+
+    fn album_counts(&self) -> Vec<(String, usize)> {
+        let mut albums: Vec<(String, usize)> = Vec::new();
+        for entry in &self.playlist.entries {
+            let name = entry.display_album();
+            if name.is_empty() || name == "—" {
+                continue;
+            }
+            match albums.iter_mut().find(|(album, _)| *album == name) {
+                Some((_, count)) => *count += 1,
+                None => albums.push((name, 1)),
+            }
+        }
+        albums.sort_by(|a, b| b.1.cmp(&a.1));
+        albums
+    }
+
+    /// 顶部搜索条：常驻，回车或点「搜索」跳到搜索页。
+    fn top_search_bar(&mut self, ctx: &egui::Context, p: &Palette) {
+        egui::TopBottomPanel::top("topsearch")
+            .exact_height(50.0)
+            .frame(egui::Frame::NONE.fill(p.bg))
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
-                    ui.add_space(8.0);
-                    for (tab, label) in tabs {
-                        let selected = self.tab == tab;
-                        let text = RichText::new(label)
-                            .size(13.0)
-                            .color(if selected { p.accent } else { p.text });
-                        let text = if selected { text.strong() } else { text };
-                        if ui
-                            .add(egui::Button::new(text).frame(false).min_size(vec2(56.0, 24.0)))
-                            .clicked()
-                        {
-                            self.tab = tab;
-                        }
-                    }
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            ui.add_space(8.0);
-                            self.plugin_selector(ui, p, "nav");
-                            ui.label(RichText::new(self.t("来源", "Source")).small().color(p.dim));
-                        },
+                    ui.add_space(12.0);
+                    let hint = self.t("歌名 / 歌手", "Song / artist");
+                    let edit = ui.add_sized(
+                        vec2((ui.available_width() - 96.0).max(200.0), 30.0),
+                        egui::TextEdit::singleline(&mut self.search_query).hint_text(hint),
                     );
+                    let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let busy = matches!(self.search_status, SearchStatus::Busy);
+                    if ui
+                        .add_enabled(!busy, egui::Button::new(self.t("搜索", "Search")))
+                        .clicked()
+                        || enter
+                    {
+                        self.tab = MainTab::Search;
+                        self.start_search();
+                    }
+                    ui.add_space(6.0);
                 });
             });
+    }
+
+    /// 内容区标题：大字标题 + 一行说明，右侧是音源选择。
+    fn page_header(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        let (title, subtitle) = match self.tab {
+            MainTab::Home => (self.t("首页", "Home"), self.t("当前音源的主页", "Home of the current source")),
+            MainTab::Search => (
+                self.t("搜索结果", "Search results"),
+                self.t("输入关键词后回车搜索", "Type a keyword and press Enter"),
+            ),
+            MainTab::Liked => (
+                self.t("我喜欢", "Liked"),
+                self.t("搜索结果里的 ☆、右键「加入喜欢」都会到这里", "Stars from search land here"),
+            ),
+            MainTab::Playlists => (
+                self.t("待播清单", "Playlists"),
+                self.t("本地保存的 m3u / m3u8", "Saved local playlists"),
+            ),
+            MainTab::Songs => (
+                self.t("歌曲", "Songs"),
+                self.t("当前播放队列", "Current queue"),
+            ),
+            MainTab::Lyrics => (
+                self.t("歌词", "Lyrics"),
+                self.t("跟随正在播放的曲目", "Follows the current track"),
+            ),
+        };
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            ui.vertical(|ui| {
+                ui.label(RichText::new(title).size(20.0).strong().color(p.text));
+                ui.label(RichText::new(subtitle).small().color(p.dim));
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(12.0);
+                let hint = match self.tab {
+                    MainTab::Search if !self.search_results.is_empty() => {
+                        format!("{} 条结果", self.search_results.len())
+                    }
+                    MainTab::Songs => format!("队列 {} 首", self.playlist.len()),
+                    MainTab::Liked => format!("{} 首", self.liked.len()),
+                    _ => String::new(),
+                };
+                ui.label(RichText::new(hint).small().color(p.dim));
+            });
+        });
+        ui.add_space(8.0);
+        ui.separator();
+    }
+
+    /// 歌词页：先显示当前曲目信息，插件支持时再补歌词正文。
+    fn lyrics_tab(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        ui.add_space(16.0);
+        let current = self.playlist.current().cloned();
+        match current {
+            Some(entry) => {
+                ui.horizontal(|ui| {
+                    ui.add_space(20.0);
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(entry.display_title()).size(22.0).color(p.accent));
+                        ui.label(
+                            RichText::new(format!(
+                                "{} · {}",
+                                entry.display_artist(),
+                                entry.display_album()
+                            ))
+                            .color(p.dim),
+                        );
+                    });
+                });
+                ui.add_space(20.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(20.0);
+                    ui.label(
+                        RichText::new(self.t(
+                            "歌词面板还没接：在线曲目的 getLyric / lyrics 已可用，下一步按时间轴滚动显示。",
+                            "Lyrics view is not wired yet; plugin lyrics are available, next step is synced scrolling.",
+                        ))
+                        .color(p.dim),
+                    );
+                });
+            }
+            None => {
+                ui.horizontal(|ui| {
+                    ui.add_space(20.0);
+                    ui.label(RichText::new(self.t("还没有正在播放的歌", "Nothing playing")).color(p.dim));
+                });
+            }
+        }
     }
 
     /// 在线插件选择器：显示插件名，点开可以换插件。
@@ -2696,33 +2974,14 @@ impl App {
     }
 
     fn search_tab(&mut self, ui: &mut egui::Ui, p: &Palette) {
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.add_space(12.0);
-            ui.label(RichText::new(self.t("来源", "Source")).small().color(p.dim));
-            self.plugin_selector(ui, p, "search");
-        });
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.add_space(12.0);
-            let hint = self.t("歌名 / 歌手", "Song / artist");
-            let edit = ui.add_sized(
-                vec2((ui.available_width() - 110.0).max(240.0), 26.0),
-                egui::TextEdit::singleline(&mut self.search_query).hint_text(hint),
-            );
-            let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            let busy = matches!(self.search_status, SearchStatus::Busy);
-            if ui
-                .add_enabled(!busy, egui::Button::new(self.t("搜索", "Search")))
-                .clicked()
-                || enter
-            {
-                self.start_search();
-            }
-            if busy {
+        if matches!(self.search_status, SearchStatus::Busy) {
+            ui.horizontal(|ui| {
+                ui.add_space(16.0);
                 ui.spinner();
-            }
-        });
+                ui.label(RichText::new(self.t("正在搜索…", "Searching…")).small().color(p.dim));
+            });
+        }
 
         if let SearchStatus::Error(err) = &self.search_status {
             ui.add_space(4.0);
