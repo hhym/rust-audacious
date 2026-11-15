@@ -97,6 +97,8 @@ pub struct App {
     plugins: Vec<audcore::plugin::PluginInfo>,
     /// 在线插件（MusicFree 标准）
     media_plugins: Vec<audplugins::OnlinePlugin>,
+    /// 后台扫描插件用的接收端（扫描不阻塞界面）
+    scan_rx: Option<std::sync::mpsc::Receiver<Vec<audplugins::OnlinePlugin>>>,
     show_search: bool,
     search_plugin: usize,
     /// MyGo 插件设置项的编辑缓冲：`插件id/key` → 当前文本
@@ -147,6 +149,7 @@ impl App {
             theme_button_rect: None,
             plugins: Vec::new(),
             media_plugins: Vec::new(),
+            scan_rx: None,
             show_search: false,
             search_plugin: 0,
             mygo_setting_inputs: std::collections::HashMap::new(),
@@ -1301,16 +1304,36 @@ impl App {
 
     // ---------------------------------------------------------- 在线插件
 
+    /// 重新扫描插件目录：放到后台线程，避免插件卡死时界面「无响应」。
     fn reload_media_plugins(&mut self) {
         let dir = audplugins::plugins_dir();
         let _ = std::fs::create_dir_all(&dir);
-        self.media_plugins = audplugins::discover_all(&dir);
-        if self.search_plugin >= self.media_plugins.len() {
-            self.search_plugin = 0;
+        if self.scan_rx.is_some() {
+            return;
         }
+        self.scan_rx = Some(audplugins::scan_async(dir));
     }
 
     fn poll_media_channels(&mut self) {
+        if let Some(rx) = &self.scan_rx {
+            match rx.try_recv() {
+                Ok(plugins) => {
+                    let count = plugins.len();
+                    self.media_plugins = plugins;
+                    if self.search_plugin >= self.media_plugins.len() {
+                        self.search_plugin = 0;
+                    }
+                    self.scan_rx = None;
+                    self.toast(format!("已加载 {count} 个在线插件"));
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.scan_rx = None;
+                    self.toast("插件扫描线程异常结束");
+                }
+            }
+        }
+
         if let Some(rx) = &self.search_rx {
             match rx.try_recv() {
                 Ok(Ok(items)) => {
@@ -1587,8 +1610,19 @@ impl App {
                             .strong()
                             .color(p.accent),
                     );
-                    if ui.small_button(self.t("重新扫描", "Rescan")).clicked() {
+                    let scanning = self.scan_rx.is_some();
+                    if ui
+                        .add_enabled(
+                            !scanning,
+                            egui::Button::new(self.t("重新扫描", "Rescan")).small(),
+                        )
+                        .clicked()
+                    {
                         self.reload_media_plugins();
+                    }
+                    if scanning {
+                        ui.spinner();
+                        ui.label(RichText::new(self.t("正在扫描…", "Scanning…")).small().color(p.dim));
                     }
                     if ui.small_button(self.t("打开目录", "Open folder")).clicked() {
                         open_in_file_manager(&audplugins::plugins_dir());

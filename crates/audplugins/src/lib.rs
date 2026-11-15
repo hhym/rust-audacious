@@ -7,8 +7,12 @@
 //! 实现方式：用 `boa_engine` 跑 JS，库由 `polyfill.js` 提供；HTTP、哈希、存储这些
 //! 重活交给 Rust 原生函数（`__http` / `__hash` / `__storage`）。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::Receiver;
+use std::time::Duration;
 
+mod cache;
 mod mygo;
 pub use mygo::{discover_mygo, MygoManifest, MygoPlugin, SettingDef};
 use std::sync::{Mutex, OnceLock};
@@ -55,36 +59,99 @@ pub struct Plugin {
 impl Plugin {
     /// 读文件并跑一遍，拿到 platform / version / 方法列表。
     pub fn load(path: &Path) -> Plugin {
+        Plugin::load_using(path, &HashMap::new()).0
+    }
+
+    /// 带缓存加载：命中「路径 + 修改时间 + 大小」就不再执行插件代码。
+    /// 返回 `(插件, 需要写回缓存的新条目)`。
+    pub(crate) fn load_using(
+        path: &Path,
+        cache: &HashMap<String, cache::Entry>,
+    ) -> (Plugin, Option<(String, cache::Entry)>) {
         let code = match std::fs::read_to_string(path) {
             Ok(code) => code,
             Err(err) => {
-                return Plugin {
-                    info: PluginInfo {
-                        path: path.to_path_buf(),
-                        error: Some(format!("读取失败: {err}")),
-                        ..Default::default()
+                return (
+                    Plugin {
+                        info: PluginInfo {
+                            path: path.to_path_buf(),
+                            error: Some(format!("读取失败: {err}")),
+                            ..Default::default()
+                        },
+                        code: String::new(),
                     },
-                    code: String::new(),
-                }
+                    None,
+                )
             }
         };
+
+        let key = cache::key(path);
+        if let Some(entry) = cache.get(&key) {
+            return (
+                Plugin {
+                    info: PluginInfo {
+                        path: path.to_path_buf(),
+                        platform: entry.platform.clone(),
+                        version: entry.version.clone(),
+                        author: entry.author.clone(),
+                        methods: entry.methods.clone(),
+                        error: entry.error.clone(),
+                    },
+                    code,
+                },
+                None,
+            );
+        }
 
         let mut info = PluginInfo {
             path: path.to_path_buf(),
             ..Default::default()
         };
-
-        match describe(&code) {
-            Ok(meta) => {
+        match inspect(&code) {
+            Ok(mut meta) => {
+                if meta.platform.is_empty() {
+                    meta.platform = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("插件")
+                        .to_string();
+                }
                 info.platform = meta.platform;
                 info.version = meta.version;
                 info.author = meta.author;
                 info.methods = meta.methods;
             }
-            Err(err) => info.error = Some(err.to_string()),
+            Err(err) => {
+                // 至少让列表里显示文件名叫什么，而不是一个「?」
+                info.platform = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("插件")
+                    .to_string();
+                info.error = Some(friendly_error(&err.to_string()));
+            }
         }
 
-        Plugin { info, code }
+        let entry = cache::Entry {
+            platform: info.platform.clone(),
+            version: info.version.clone(),
+            author: info.author.clone(),
+            methods: info.methods.clone(),
+            error: info.error.clone(),
+        };
+        (Plugin { info, code }, Some((key, entry)))
+    }
+
+    /// 加载失败（超时等）时构造一个只带错误信息的占位插件。
+    pub(crate) fn synthetic(path: &Path, error: String) -> Plugin {
+        Plugin {
+            info: PluginInfo {
+                path: path.to_path_buf(),
+                error: Some(error),
+                ..Default::default()
+            },
+            code: String::new(),
+        }
     }
 
     /// 调用插件方法，参数和返回值都是 JSON（和 MusicFree 的签名一致）。
@@ -157,10 +224,147 @@ struct Meta {
     methods: Vec<String>,
 }
 
+/// 把底层报错翻译成人能看懂的一句话。
+pub(crate) fn friendly_error(raw: &str) -> String {
+    if raw.contains("LoopIteration") || raw.to_ascii_lowercase().contains("loop iteration") {
+        return "插件在加载阶段死循环（常见于混淆过的插件，校验循环在本引擎里跑不通），已跳过".into();
+    }
+    if raw.contains("declared in lexically declared names") {
+        let line = raw
+            .split("at line ")
+            .nth(1)
+            .and_then(|s| s.split([',', ' ']).next())
+            .unwrap_or("?");
+        return format!(
+            "插件源码有语法错误（第 {line} 行）：同名变量在同一作用域里重复声明，该插件在原客户端也会报错"
+        );
+    }
+    if raw.contains("SyntaxError") {
+        let line = raw
+            .split("at line ")
+            .nth(1)
+            .and_then(|s| s.split([',', ' ']).next())
+            .unwrap_or("?");
+        return format!("插件源码有语法错误（第 {line} 行），当前 JS 引擎无法解析");
+    }
+    raw.to_string()
+}
+
+/// 插件标准里约定的导出方法名。
+const KNOWN_METHODS: &[&str] = &[
+    "search",
+    "getMediaSource",
+    "getLyric",
+    "getAlbumInfo",
+    "getArtistWorks",
+    "getTopLists",
+    "getTopListDetail",
+    "getRecommendSheetTags",
+    "getRecommendSheetsByTag",
+    "getMusicSheetInfo",
+    "importMusicSheet",
+    "getMusicComments",
+];
+
+/// 只做语法检查，不执行代码（boa 的解析器，毫秒级）。
+fn syntax_check(code: &str) -> Result<(), String> {
+    use boa_engine::parser::Parser;
+    let mut parser = Parser::new(Source::from_bytes(code));
+    let scope = boa_engine::ast::scope::Scope::new_global();
+    let mut interner = boa_engine::interner::Interner::new();
+    parser
+        .parse_script(&scope, &mut interner)
+        .map(|_| ())
+        .map_err(|e| friendly_error(&format!("{e}")))?;
+    Ok(())
+}
+
+/// 在源码里抓字段的值：优先看 `module.exports` 之后那段（导出对象一般在文件末尾），
+/// 找不到再全文找最后一次出现。
+fn capture(code: &str, pattern: &str) -> Option<String> {
+    let re = regex::Regex::new(pattern).ok()?;
+    let tail = code
+        .rfind("module.exports")
+        .map(|idx| &code[idx..])
+        .unwrap_or(code);
+    if let Some(value) = last_capture(&re, tail) {
+        return Some(value);
+    }
+    last_capture(&re, code)
+}
+
+fn last_capture(re: &regex::Regex, text: &str) -> Option<String> {
+    re.captures_iter(text)
+        .filter_map(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
+        .filter(|s| !s.is_empty() && !s.contains('\n'))
+        .last()
+}
+
+/// 源码里直接读 platform / version / author / 方法名。
+/// 混淆插件顶层有很重的解码循环，执行一遍要好几秒，扫描时没必要跑。
+fn static_meta(code: &str) -> Option<Meta> {
+    let platform = capture(
+        code,
+        r#"(?:^|[^A-Za-z0-9_$])["']?platform["']?\s*:\s*["']([^"'
+]{1,80})["']"#,
+    )?;
+    let version = capture(
+        code,
+        r#"(?:^|[^A-Za-z0-9_$])["']?version["']?\s*:\s*["']([^"'
+]{0,80})["']"#,
+    )
+    .unwrap_or_default();
+    let author = capture(
+        code,
+        r#"(?:^|[^A-Za-z0-9_$])["']?author["']?\s*:\s*["']([^"'
+]{0,80})["']"#,
+    )
+    .unwrap_or_default();
+
+    let methods = KNOWN_METHODS
+        .iter()
+        .filter(|name| {
+            let pattern = format!(
+                r#"(?:^|[^A-Za-z0-9_$])["']?{name}["']?\s*[:(]"#,
+                name = regex::escape(name)
+            );
+            regex::Regex::new(&pattern)
+                .map(|re| re.is_match(code))
+                .unwrap_or(false)
+        })
+        .map(|s| s.to_string())
+        .collect();
+
+    Some(Meta {
+        platform,
+        version,
+        author,
+        methods,
+    })
+}
+
+/// 加载时的元信息：只做语法检查 + 源码静态读取，**不执行插件代码**。
+///
+/// 混淆过的插件把 platform 藏在解码后的字符串里，静态读不到，就先留空、
+/// 按「默认支持搜索/取地址/歌词」处理，等到真的搜索时再执行。
+fn inspect(code: &str) -> anyhow::Result<Meta> {
+    syntax_check(code).map_err(|e| anyhow::anyhow!(e))?;
+    Ok(static_meta(code).unwrap_or_else(|| Meta {
+        platform: String::new(),
+        version: String::new(),
+        author: String::new(),
+        methods: KNOWN_METHODS
+            .iter()
+            .take(3)
+            .map(|s| s.to_string())
+            .collect(),
+    }))
+}
+
 /// 跑一遍插件代码，把导出的元信息和方法名读出来。
 fn describe(code: &str) -> anyhow::Result<Meta> {
-    let mut ctx = new_context();
-    eval_plugin(&mut ctx, code)?;
+    let mut ctx = new_context_with_limit(LOAD_LOOP_LIMIT);
+    eval_plugin(&mut ctx, code).map_err(|e| anyhow::anyhow!(friendly_error(&e.to_string())))?;
 
     let summary = ctx
         .eval(Source::from_bytes(
@@ -290,8 +494,18 @@ fn eval_plugin(ctx: &mut Context, code: &str) -> anyhow::Result<JsValue> {
         .map_err(|e| anyhow::anyhow!("插件代码执行失败: {e}"))
 }
 
+/// 普通调用（搜索/取地址）允许的循环次数上限，防止插件里的死循环卡住界面。
+const RUNTIME_LOOP_LIMIT: u64 = 30_000_000;
+/// 只加载插件读元信息时，循环上限收紧，混淆代码的校验循环会在这里被拦下。
+const LOAD_LOOP_LIMIT: u64 = 2_000_000;
+
 pub(crate) fn new_context() -> Context {
+    new_context_with_limit(RUNTIME_LOOP_LIMIT)
+}
+
+pub(crate) fn new_context_with_limit(loop_limit: u64) -> Context {
     let mut ctx = Context::default();
+    ctx.runtime_limits_mut().set_loop_iteration_limit(loop_limit);
 
     ctx.register_global_property(
         js_string!("__platform"),
@@ -849,6 +1063,28 @@ impl OnlinePlugin {
         }
     }
 
+    pub fn path(&self) -> &Path {
+        match self {
+            OnlinePlugin::MusicFree(p) => &p.info.path,
+            OnlinePlugin::Mygo(p) => &p.info.path,
+        }
+    }
+
+    /// 简短的方法列表，给命令行探针用。
+    pub fn methods_brief(&self) -> Vec<&str> {
+        let mut out = Vec::new();
+        for m in ["search", "getMediaSource", "getLyric"] {
+            if self.supports(m) {
+                out.push(match m {
+                    "getMediaSource" => "media",
+                    "getLyric" => "lyric",
+                    other => other,
+                });
+            }
+        }
+        out
+    }
+
     /// MyGo 插件才有：设置项与读写。
     pub fn as_mygo(&self) -> Option<&MygoPlugin> {
         match self {
@@ -856,6 +1092,97 @@ impl OnlinePlugin {
             _ => None,
         }
     }
+}
+
+/// 扫描候选：根目录的 `.js`、含 `plugin.json` 的子目录。
+fn candidates(dir: &Path) -> Vec<Candidate> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("js") {
+            out.push(Candidate::MusicFree(path));
+        } else if path.is_dir() && path.join("plugin.json").is_file() {
+            out.push(Candidate::Mygo(path));
+        }
+    }
+    out
+}
+
+#[derive(Clone)]
+enum Candidate {
+    MusicFree(PathBuf),
+    Mygo(PathBuf),
+}
+
+impl Candidate {
+    fn path(&self) -> &Path {
+        match self {
+            Candidate::MusicFree(p) | Candidate::Mygo(p) => p,
+        }
+    }
+}
+
+/// 后台扫描插件目录，返回一个 receiver；拿到结果后 UI 再替换列表。
+///
+/// 每个插件在独立线程里加载，超过 4 秒没出来就当作「卡死」跳过 ——
+/// 插件顶层写死循环也不会把整个窗口拖成「无响应」。
+pub fn scan_async(dir: PathBuf) -> Receiver<Vec<OnlinePlugin>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let cache = cache::load_all();
+        let mut updates: HashMap<String, cache::Entry> = HashMap::new();
+        let mut out = Vec::new();
+
+        for cand in candidates(&dir) {
+            let snapshot = cache.clone();
+            let (tx2, rx2) = std::sync::mpsc::channel();
+            let worker = cand.clone();
+            std::thread::spawn(move || {
+                let (plugin, update) = match worker {
+                    Candidate::MusicFree(path) => {
+                        let (plugin, update) = Plugin::load_using(&path, &snapshot);
+                        (OnlinePlugin::MusicFree(plugin), update)
+                    }
+                    Candidate::Mygo(path) => {
+                        let (plugin, update) = MygoPlugin::load_using(&path, &snapshot);
+                        (OnlinePlugin::Mygo(plugin), update)
+                    }
+                };
+                let _ = tx2.send((plugin, update));
+            });
+
+            match rx2.recv_timeout(Duration::from_secs(4)) {
+                Ok((plugin, update)) => {
+                    if let Some((key, entry)) = update {
+                        updates.insert(key, entry);
+                    }
+                    out.push(plugin);
+                }
+                Err(_) => {
+                    let path = cand.path();
+                    log::warn!("插件加载超时: {}", path.display());
+                    let error = "扫描超时：插件顶层代码跑了超过 4 秒（可能死循环），已跳过".to_string();
+                    out.push(match cand {
+                        Candidate::MusicFree(p) => OnlinePlugin::MusicFree(Plugin::synthetic(&p, error)),
+                        Candidate::Mygo(p) => OnlinePlugin::Mygo(MygoPlugin::synthetic(&p, error)),
+                    });
+                }
+            }
+        }
+
+        let mut merged = cache;
+        for (k, v) in updates {
+            merged.insert(k, v);
+        }
+        cache::save(&merged);
+
+        out.sort_by_key(|p| p.name());
+        let _ = tx.send(out);
+    });
+    rx
 }
 
 /// 扫描目录：根目录的 `.js` 当 MusicFree 插件，含 `plugin.json` 的子目录当 MyGo 插件。
@@ -895,6 +1222,41 @@ module.exports = {
   async getLyric() { return { rawLrc: "[00:00]hello" }; },
 };
 "#;
+
+    #[test]
+    fn static_meta_reads_without_executing() {
+        // platform 直接写在源码里，扫描时不应该真的跑插件
+        let meta = inspect(MOCK).unwrap();
+        assert_eq!(meta.platform, "MockFM");
+        assert_eq!(meta.version, "1.2.3");
+        assert!(meta.methods.contains(&"search".to_string()));
+    }
+
+    #[test]
+    fn scan_does_not_execute_plugin_code() {
+        // 顶层写死循环也必须秒回：扫描只做语法检查，不执行
+        let dir = std::env::temp_dir().join(format!("audplugins-scan-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("loop.js"),
+            "while (true) {}\nmodule.exports = { platform: \"Loop\", version: \"1\" };",
+        )
+        .unwrap();
+        let start = std::time::Instant::now();
+        let plugins = scan_async(dir.clone()).recv().unwrap();
+        assert!(start.elapsed() < std::time::Duration::from_secs(3));
+        assert_eq!(plugins.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn broken_syntax_is_reported_in_chinese() {
+        let err = friendly_error(
+            "SyntaxError: formal parameter `z` declared in lexically declared names at line 139, col 12 (native)",
+        );
+        assert!(err.contains("第 139 行"));
+        assert!(err.contains("重复声明"));
+    }
 
     #[test]
     fn describes_plugin() {

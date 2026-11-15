@@ -104,6 +104,14 @@ impl PluginInfo {
 impl MygoPlugin {
     /// 从目录加载：读 `plugin.json`，再跑一遍模块拿到导出的方法。
     pub fn load(dir: &Path) -> MygoPlugin {
+        MygoPlugin::load_using(dir, &std::collections::HashMap::new()).0
+    }
+
+    /// 带缓存加载：`plugin.json` 或主脚本没改过，就直接用上次的结果。
+    pub(crate) fn load_using(
+        dir: &Path,
+        cache: &std::collections::HashMap<String, crate::cache::Entry>,
+    ) -> (MygoPlugin, Option<(String, crate::cache::Entry)>) {
         let manifest_path = dir.join("plugin.json");
         let manifest: MygoManifest = match std::fs::read_to_string(&manifest_path)
             .ok()
@@ -111,16 +119,19 @@ impl MygoPlugin {
         {
             Some(m) => m,
             None => {
-                return MygoPlugin {
-                    info: PluginInfo {
-                        path: dir.to_path_buf(),
-                        error: Some("缺少或无法解析 plugin.json".into()),
-                        ..Default::default()
+                return (
+                    MygoPlugin {
+                        info: PluginInfo {
+                            path: dir.to_path_buf(),
+                            error: Some("缺少或无法解析 plugin.json".into()),
+                            ..Default::default()
+                        },
+                        manifest: MygoManifest::default(),
+                        dir: dir.to_path_buf(),
+                        code: String::new(),
                     },
-                    manifest: MygoManifest::default(),
-                    dir: dir.to_path_buf(),
-                    code: String::new(),
-                }
+                    None,
+                )
             }
         };
 
@@ -129,20 +140,47 @@ impl MygoPlugin {
         let code = match std::fs::read_to_string(&script_path) {
             Ok(code) => code,
             Err(err) => {
-                return MygoPlugin {
+                return (
+                    MygoPlugin {
+                        info: PluginInfo {
+                            path: dir.to_path_buf(),
+                            platform: manifest.name.clone(),
+                            version: manifest.version.clone(),
+                            error: Some(format!("读取 {main} 失败: {err}")),
+                            ..Default::default()
+                        },
+                        manifest,
+                        dir: dir.to_path_buf(),
+                        code: String::new(),
+                    },
+                    None,
+                )
+            }
+        };
+
+        let key = format!(
+            "{}|{}",
+            crate::cache::key(&manifest_path),
+            crate::cache::key(&script_path)
+        );
+        if let Some(entry) = cache.get(&key) {
+            return (
+                MygoPlugin {
                     info: PluginInfo {
                         path: dir.to_path_buf(),
                         platform: manifest.name.clone(),
                         version: manifest.version.clone(),
-                        error: Some(format!("读取 {main} 失败: {err}")),
+                        methods: entry.methods.clone(),
+                        error: entry.error.clone(),
                         ..Default::default()
                     },
                     manifest,
                     dir: dir.to_path_buf(),
-                    code: String::new(),
-                }
-            }
-        };
+                    code,
+                },
+                None,
+            );
+        }
 
         let mut info = PluginInfo {
             path: dir.to_path_buf(),
@@ -150,17 +188,40 @@ impl MygoPlugin {
             version: manifest.version.clone(),
             ..Default::default()
         };
-
-        match describe(dir, &manifest, &code) {
+        match inspect(dir, &manifest, &code) {
             Ok(methods) => info.methods = methods,
-            Err(err) => info.error = Some(err.to_string()),
+            Err(err) => info.error = Some(crate::friendly_error(&err.to_string())),
         }
 
+        let entry = crate::cache::Entry {
+            platform: info.platform.clone(),
+            version: info.version.clone(),
+            methods: info.methods.clone(),
+            error: info.error.clone(),
+            ..Default::default()
+        };
+        (
+            MygoPlugin {
+                info,
+                manifest,
+                dir: dir.to_path_buf(),
+                code,
+            },
+            Some((key, entry)),
+        )
+    }
+
+    /// 加载超时等情况的占位对象。
+    pub(crate) fn synthetic(dir: &Path, error: String) -> MygoPlugin {
         MygoPlugin {
-            info,
-            manifest,
+            info: PluginInfo {
+                path: dir.to_path_buf(),
+                error: Some(error),
+                ..Default::default()
+            },
+            manifest: MygoManifest::default(),
             dir: dir.to_path_buf(),
-            code,
+            code: String::new(),
         }
     }
 
@@ -280,8 +341,46 @@ fn setting_key(id: &str, key: &str) -> String {
     format!("mygo/{id}/setting/{key}")
 }
 
+fn syntax_check(code: &str) -> Result<(), String> {
+    use boa_engine::parser::Parser;
+    let mut parser = Parser::new(boa_engine::Source::from_bytes(code));
+    let scope = boa_engine::ast::scope::Scope::new_global();
+    let mut interner = boa_engine::interner::Interner::new();
+    parser
+        .parse_script(&scope, &mut interner)
+        .map(|_| ())
+        .map_err(|e| crate::friendly_error(&format!("{e}")))
+}
+
+/// 从源码读 `export function` / `export const` 的导出名，不用执行模块。
+fn static_exports(code: &str) -> Vec<String> {
+    let re = regex::Regex::new(
+        r#"export\s+(?:default\s+)?(?:async\s+)?(?:function\*?|const|let|var|class)\s+([A-Za-z_$][A-Za-z0-9_$]*)"#,
+    );
+    let mut out = Vec::new();
+    if let Ok(re) = re {
+        for c in re.captures_iter(code) {
+            if let Some(name) = c.get(1) {
+                out.push(name.as_str().to_string());
+            }
+        }
+    }
+    out
+}
+
+fn inspect(dir: &Path, manifest: &MygoManifest, code: &str) -> anyhow::Result<Vec<String>> {
+    // 语法检查要看改写后的脚本（原文件是 ES 模块，直接按 Script 解析会报 export 错）
+    let (body, _) = transform_module(code);
+    syntax_check(&body).map_err(|e| anyhow::anyhow!(e))?;
+    let names = static_exports(code);
+    if !names.is_empty() {
+        return Ok(names);
+    }
+    describe(dir, manifest, code)
+}
+
 fn describe(dir: &Path, manifest: &MygoManifest, code: &str) -> anyhow::Result<Vec<String>> {
-    let mut ctx = mygo_context_parts(dir, manifest, code);
+    let mut ctx = mygo_context_parts_with_limit(dir, manifest, code, crate::LOAD_LOOP_LIMIT);
     let exports = eval_module(&mut ctx, code)?;
     ctx.register_global_property(
         js_string!("__mygoExports"),
@@ -308,8 +407,17 @@ fn mygo_context(plugin: &MygoPlugin) -> Context {
     mygo_context_parts(&plugin.dir, &plugin.manifest, &plugin.code)
 }
 
-fn mygo_context_parts(dir: &Path, manifest: &MygoManifest, _code: &str) -> Context {
-    let mut ctx = new_context();
+fn mygo_context_parts(dir: &Path, manifest: &MygoManifest, code: &str) -> Context {
+    mygo_context_parts_with_limit(dir, manifest, code, crate::RUNTIME_LOOP_LIMIT)
+}
+
+fn mygo_context_parts_with_limit(
+    dir: &Path,
+    manifest: &MygoManifest,
+    _code: &str,
+    loop_limit: u64,
+) -> Context {
+    let mut ctx = crate::new_context_with_limit(loop_limit);
 
     let data_dir = dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
