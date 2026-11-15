@@ -31,3 +31,8 @@ apk_name = "audacious-rs"
 build_targets = ["aarch64-linux-android"]
 res = "../../android/res"
 manifest = "../../android/AndroidManifest.xml"
+
+# Android 分支：winit 要有 android-native-activity 后端，cpal 走 oboe（不依赖系统 ALSA）
+[target.'cfg(target_os = "android")'.dependencies]
+winit = { version = "0.30", features = ["android-native-activity"] }
+cpal = { version = "0.15", features = ["oboe-shared-stdcxx"] }

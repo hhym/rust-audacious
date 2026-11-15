@@ -156,6 +156,9 @@ MyGo 插件的 ES 模块改写/搜索/取地址/歌词/设置项。共 32 个用
 构建脚本（`scripts/build-android.sh`）和移植计划都就位，详细步骤见
 [`docs/ANDROID.md`](docs/ANDROID.md)。
 
+手机布局已能在桌面预览：窗口拉窄到 700px 以下（或 设置 → 手机布局 打勾）会切成
+顶部导航 + 命令条 + 触屏播放条，截图见 `docs/screenshot-mobile-layout.png`。
+
 ```bash
 git checkout android
 rustup target add aarch64-linux-android

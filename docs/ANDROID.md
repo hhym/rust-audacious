@@ -3,8 +3,18 @@
 `android` 分支的任务：把 `audacious-rs` 搬到安卓手机上跑。桌面主线（`main`）保持不动，
 安卓相关的改动只落在这个分支，成熟后再合回。
 
-当前状态：**脚手架阶段（P0）**。分支里已经有目录解析、APK 清单模板和构建脚本，
-但还没有在真机上跑起来——这台开发机没有 Android SDK/NDK，编译验证要在有 SDK 的机器上做。
+当前状态：**P0 代码就位、P2 布局可在桌面预览**。分支里已有目录解析、Android 启动环境、
+APK 清单模板、构建脚本、手机布局；但还没在真机上跑过——这台开发机没有 Android SDK/NDK，
+APK 编译验证要在有 SDK 的机器上做。
+
+手机布局可以在桌面直接看：
+
+```bash
+AUDACIOUS_RS_DATA_DIR=~/.config cargo +stable run -p audacious-rs
+# 窗口拉到 430×900，或 设置 → 手机布局 打勾
+```
+
+![手机布局预览](screenshot-mobile-layout.png)
 
 ## 一、代码层面已经铺好的东西
 
@@ -14,6 +24,12 @@
 | APK 清单模板 | `android/AndroidManifest.xml` | `NativeActivity` + `android.app.lib_name=audacious_rs`，已声明 INTERNET 与读媒体音频权限 |
 | 名称资源 | `android/res/values/strings.xml` | App 名 |
 | 构建脚本 | `scripts/build-android.sh` | 检查 target / NDK / cargo-apk，再 `cargo apk build --release`，最后打印 APK 路径与 sha256 |
+| Android 启动环境 | `main.rs::init_android_env` | 设置 `AUDACIOUS_RS_DATA_DIR=/data/data/<pkg>/files`，日志改写到 `app.log`；`audtool` 的 TCP 服务在 Android 上不启动 |
+| Android 依赖 | `crates/audacious/Cargo.toml` | 目标级依赖：`winit` 开 `android-native-activity`，`cpal` 开 `oboe-shared-stdcxx` |
+| 手机布局 | `app.rs::mobile_nav_bar / mobile_command_bar / mobile_play_bar` | 侧栏变顶部可横滑导航（40px 高），菜单栏/工具栏/状态栏收成一条命令条，播放条换封面+三键+满宽进度；窄屏列表只留 序号/标题/时长 三列、行高 34px；`config.mobile_layout` 或窗口 <700px 自动生效 |
+
+已实测（桌面 430×900 窗口）：导航切换、命令条按钮、播放条播放/暂停/切歌、进度点按 seek、
+窄屏三列表格都正常；`cargo test` 50 用例全绿。
 
 ## 二、还要做的四步
 

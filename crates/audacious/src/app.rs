@@ -600,6 +600,11 @@ impl eframe::App for App {
 
         if self.config.mini {
             self.mini_ui(ctx, &p);
+        } else if mobile_mode(ctx, &self.config) {
+            // 手机布局：菜单栏/工具栏/状态栏都收起来，换成一条命令条 + 触屏播放条
+            self.mobile_command_bar(ctx, &p);
+            self.mobile_play_bar(ctx, &p);
+            self.main_panel(ctx, &p);
         } else {
             self.menubar_ui(ctx, &p);
             self.toolbar_ui(ctx, &p);
@@ -978,8 +983,15 @@ impl App {
         let entries = self.playlist.entries.clone();
         let total = ui.available_width();
         let widths = column_widths(total);
-        let header_h = 26.0;
-        let row_h = 23.0;
+        let narrow = ui.ctx().screen_rect().width() < 700.0;
+        let header_h = if narrow { 30.0 } else { 26.0 };
+        let row_h = if narrow { 34.0 } else { 23.0 };
+        // 窄屏只留「序号 / 标题 / 时长」三列，艺人和专辑挤不下
+        let widths = if narrow {
+            [40.0, (total - 110.0).max(120.0), 0.0, 0.0, 62.0, 0.0]
+        } else {
+            column_widths(total)
+        };
 
         // 表头
         let (rect, _) = ui.allocate_exact_size(vec2(total, header_h), Sense::hover());
@@ -988,25 +1000,42 @@ impl App {
             [rect.left_bottom(), rect.right_bottom()],
             Stroke::new(1.0_f32, p.accent),
         );
-        let labels = [
-            "#".to_string(),
-            self.t("标题", "Title").to_string(),
-            self.t("艺人", "Artist").to_string(),
-            self.t("专辑", "Album").to_string(),
-            self.t("时长", "Time").to_string(),
-            self.t("格式", "Format").to_string(),
-        ];
+        let labels: Vec<String> = if narrow {
+            vec![
+                "#".into(),
+                self.t("标题", "Title").to_string(),
+                self.t("时长", "Time").to_string(),
+            ]
+        } else {
+            vec![
+                "#".into(),
+                self.t("标题", "Title").to_string(),
+                self.t("艺人", "Artist").to_string(),
+                self.t("专辑", "Album").to_string(),
+                self.t("时长", "Time").to_string(),
+                self.t("格式", "Format").to_string(),
+            ]
+        };
         let painter = ui.painter().with_clip_rect(rect);
         let mut x = rect.left() + 8.0;
         for (i, label) in labels.iter().enumerate() {
+            let w = if narrow {
+                match i {
+                    0 => 40.0,
+                    1 => (total - 110.0).max(120.0),
+                    _ => 62.0,
+                }
+            } else {
+                widths[i]
+            };
             painter.text(
                 egui::pos2(x, rect.center().y),
                 Align2::LEFT_CENTER,
-                theme::fit_text(label, widths[i], 12.0),
+                theme::fit_text(label, w, 12.0),
                 FontId::proportional(12.0),
                 p.dim,
             );
-            x += widths[i];
+            x += w;
         }
 
         if entries.is_empty() {
@@ -1084,22 +1113,24 @@ impl App {
                         title_color,
                     );
                     x += widths[1];
-                    painter.text(
-                        egui::pos2(x, rect.center().y),
-                        Align2::LEFT_CENTER,
-                        theme::fit_text(&entry.display_artist(), widths[2] - 8.0, 12.5),
-                        FontId::proportional(12.5),
-                        p.dim,
-                    );
-                    x += widths[2];
-                    painter.text(
-                        egui::pos2(x, rect.center().y),
-                        Align2::LEFT_CENTER,
-                        theme::fit_text(&entry.display_album(), widths[3] - 8.0, 12.5),
-                        FontId::proportional(12.5),
-                        p.dim,
-                    );
-                    x += widths[3];
+                    if !narrow {
+                        painter.text(
+                            egui::pos2(x, rect.center().y),
+                            Align2::LEFT_CENTER,
+                            theme::fit_text(&entry.display_artist(), widths[2] - 8.0, 12.5),
+                            FontId::proportional(12.5),
+                            p.dim,
+                        );
+                        x += widths[2];
+                        painter.text(
+                            egui::pos2(x, rect.center().y),
+                            Align2::LEFT_CENTER,
+                            theme::fit_text(&entry.display_album(), widths[3] - 8.0, 12.5),
+                            FontId::proportional(12.5),
+                            p.dim,
+                        );
+                        x += widths[3];
+                    }
                     painter.text(
                         egui::pos2(x, rect.center().y),
                         Align2::LEFT_CENTER,
@@ -1108,13 +1139,15 @@ impl App {
                         p.dim,
                     );
                     x += widths[4];
-                    painter.text(
-                        egui::pos2(x, rect.center().y),
-                        Align2::LEFT_CENTER,
-                        theme::fit_text(&entry.format, widths[5], 12.0),
-                        FontId::proportional(12.0),
-                        p.dim,
-                    );
+                    if !narrow {
+                        painter.text(
+                            egui::pos2(x, rect.center().y),
+                            Align2::LEFT_CENTER,
+                                theme::fit_text(&entry.format, widths[5], 12.0),
+                            FontId::proportional(12.0),
+                            p.dim,
+                        );
+                    }
 
                     if resp.clicked() {
                         let mods = ui.input(|i| i.modifiers);
@@ -1830,6 +1863,14 @@ impl App {
                 let mut mini = self.config.mini;
                 if ui.checkbox(&mut mini, self.t("只显示信息带", "Now playing only")).changed() {
                     self.config.mini = mini;
+                    changed = true;
+                }
+                let mut mobile = self.config.mobile_layout;
+                if ui
+                    .checkbox(&mut mobile, self.t("手机布局（侧栏收起）", "Mobile layout"))
+                    .changed()
+                {
+                    self.config.mobile_layout = mobile;
                     changed = true;
                 }
 
@@ -2902,10 +2943,237 @@ fn remote_entry(item: &serde_json::Value, url: &str) -> audcore::Entry {
     }
 }
 
+/// 是否走手机布局：手动打开，或窗口窄到手机尺寸。
+fn mobile_mode(ctx: &egui::Context, cfg: &audcore::Config) -> bool {
+    cfg.mobile_layout || ctx.screen_rect().width() < 700.0
+}
+
 impl App {
+    /// 手机布局的命令条：加文件 / 加目录 / 设置 / 插件，替掉桌面版菜单栏和工具栏。
+    fn mobile_command_bar(&mut self, ctx: &egui::Context, p: &Palette) {
+        egui::TopBottomPanel::top("mobile_cmd")
+            .exact_height(44.0)
+            .frame(egui::Frame::NONE.fill(p.panel_alt))
+            .show(ctx, |ui| {
+                egui::ScrollArea::horizontal()
+                    .id_salt("mobile-cmd-scroll")
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.add_space(8.0);
+                            for (zh, en) in [
+                                ("＋文件", "+File"),
+                                ("＋目录", "+Folder"),
+                                ("保存列表", "Save list"),
+                                ("设置", "Settings"),
+                                ("插件", "Plugins"),
+                                ("主题", "Theme"),
+                            ] {
+                                if self.mobile_chip(ui, p, self.t(zh, en), true).clicked() {
+                                    match zh {
+                                        "＋文件" => {
+                                            self.browser = Some(Browser::new(
+                                                self.config.last_dir.clone().unwrap_or_else(|| {
+                                                    PathBuf::from(".")
+                                                }),
+                                            ))
+                                        }
+                                        "＋目录" => {
+                                            let dir = self
+                                                .config
+                                                .last_dir
+                                                .clone()
+                                                .unwrap_or_else(|| dirs::home_dir().unwrap_or_default());
+                                            self.add_paths(&[dir]);
+                                        }
+                                        "保存列表" => self.save_playlist(),
+                                        "设置" => self.show_settings = true,
+                                        "插件" => self.show_plugins = true,
+                                        "主题" => self.theme_menu_open = !self.theme_menu_open,
+                                        _ => {}
+                                    }
+                                    if zh == "主题" {
+                                        self.theme_button_rect = Some(ui.min_rect());
+                                    }
+                                }
+                                ui.add_space(6.0);
+                            }
+                        });
+                    });
+            });
+    }
+
+    /// 手机播放条：封面 + 歌名 + 三个按钮，进度条铺满底部。
+    fn mobile_play_bar(&mut self, ctx: &egui::Context, p: &Palette) {
+        egui::TopBottomPanel::bottom("mobile_play")
+            .exact_height(100.0)
+            .frame(egui::Frame::NONE.fill(p.panel_alt))
+            .show(ctx, |ui| {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(10.0);
+                    let (rect, _) = ui.allocate_exact_size(vec2(46.0, 46.0), Sense::hover());
+                    match self.current_cover(ui.ctx()) {
+                        Some(tex) => {
+                            ui.painter().image(
+                                tex.id(),
+                                rect,
+                                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                Color32::WHITE,
+                            );
+                        }
+                        None => {
+                            ui.painter()
+                                .rect_filled(rect, CornerRadius::same(6), p.accent_soft);
+                        }
+                    }
+                    ui.add_space(8.0);
+                    ui.vertical(|ui| {
+                        let title = if self.state.title.is_empty() {
+                            self.t("未在播放", "Nothing playing").to_string()
+                        } else {
+                            self.state.title.clone()
+                        };
+                        ui.label(RichText::new(elide(&title, 20)).size(13.5).color(p.text));
+                        ui.label(
+                            RichText::new(elide(&self.state.artist, 18))
+                                .size(11.0)
+                                .color(p.dim),
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(10.0);
+                        if ui.button("▶|").clicked() {
+                            self.shared.send(Cmd::Next);
+                        }
+                        let label = if self.state.status == Status::Playing { "⏸" } else { "▶" };
+                        if ui
+                            .add(egui::Button::new(RichText::new(label).size(16.0)).min_size(vec2(44.0, 36.0)))
+                            .clicked()
+                        {
+                            self.shared.send(Cmd::Toggle);
+                        }
+                        if ui.button("|◀").clicked() {
+                            self.shared.send(Cmd::Prev);
+                        }
+                    });
+                });
+                // 自己画一条进度：细轨 + 已播部分，点/拖都能 seek
+                let len = self.state.length.max(1.0);
+                let ratio = (self.state.position / len).clamp(0.0, 1.0) as f32;
+                ui.add_space(6.0);
+                let (rect, resp) = ui.allocate_exact_size(
+                    vec2((ui.available_width() - 20.0).max(60.0), 20.0),
+                    Sense::click_and_drag(),
+                );
+                if let Some(pos) = resp.interact_pointer_pos() {
+                    let frac = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+                    self.shared.send(Cmd::Seek(frac as f64 * len));
+                }
+                let track = egui::Rect::from_min_max(
+                    egui::pos2(rect.left(), rect.center().y - 2.0),
+                    egui::pos2(rect.right(), rect.center().y + 2.0),
+                );
+                ui.painter().rect_filled(track, CornerRadius::same(2), p.panel);
+                let mut done = track;
+                done.set_width(track.width() * ratio);
+                ui.painter().rect_filled(done, CornerRadius::same(2), p.accent);
+            });
+    }
+
+    /// 手机布局用的圆角小按钮。
+    fn mobile_chip(&mut self, ui: &mut egui::Ui, p: &Palette, label: &str, _on: bool) -> egui::Response {
+        let text_w = ui.fonts(|f| {
+            f.layout_no_wrap(label.to_string(), FontId::proportional(13.0), p.text)
+                .size()
+                .x
+        });
+        let (rect, resp) =
+            ui.allocate_exact_size(vec2(text_w + 20.0, 32.0), Sense::click());
+        let bg = if resp.hovered() { p.accent_soft } else { p.panel };
+        ui.painter().rect_filled(rect, CornerRadius::same(8), bg);
+        ui.painter().text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            label,
+            FontId::proportional(13.0),
+            p.text,
+        );
+        resp
+    }
+
+    /// 手机布局的顶部导航：原来侧栏那几项摊成一条可横向滑动的标签，点按高度 40px。
+    fn mobile_nav_bar(&mut self, ctx: &egui::Context, p: &Palette) {
+        egui::TopBottomPanel::top("mobile_nav")
+            .exact_height(56.0)
+            .frame(egui::Frame::NONE.fill(p.panel))
+            .show(ctx, |ui| {
+                egui::ScrollArea::horizontal()
+                    .id_salt("mobile-nav-scroll")
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.add_space(8.0);
+                            for tab in [
+                                MainTab::Home,
+                                MainTab::Search,
+                                MainTab::Liked,
+                                MainTab::Songs,
+                                MainTab::Lyrics,
+                            ] {
+                                let label = match tab {
+                                    MainTab::Home => self.t("首页", "Home"),
+                                    MainTab::Search => self.t("搜索", "Search"),
+                                    MainTab::Liked => self.t("喜欢", "Liked"),
+                                    MainTab::Songs => self.t("歌曲", "Songs"),
+                                    MainTab::Lyrics => self.t("歌词", "Lyrics"),
+                                    MainTab::Playlists => self.t("待播", "Queue"),
+                                    MainTab::Album => self.t("专辑", "Album"),
+                                };
+                                let selected = self.tab == tab;
+                                let text_w = ui.fonts(|f| {
+                                    f.layout_no_wrap(
+                                        label.to_string(),
+                                        FontId::proportional(14.0),
+                                        p.text,
+                                    )
+                                    .size()
+                                    .x
+                                });
+                                let (rect, resp) = ui.allocate_exact_size(
+                                    vec2(text_w + 26.0, 40.0),
+                                    Sense::click(),
+                                );
+                                let bg = if selected {
+                                    p.accent_soft
+                                } else if resp.hovered() {
+                                    p.panel_alt
+                                } else {
+                                    Color32::TRANSPARENT
+                                };
+                                ui.painter().rect_filled(rect, CornerRadius::same(10), bg);
+                                ui.painter().text(
+                                    rect.center(),
+                                    Align2::CENTER_CENTER,
+                                    label,
+                                    FontId::proportional(14.0),
+                                    if selected { p.accent } else { p.text },
+                                );
+                                if resp.clicked() {
+                                    self.tab = tab;
+                                }
+                                ui.add_space(6.0);
+                            }
+                        });
+                    });
+            });
+    }
+
     /// 主面板：左侧导航栏 + 顶部搜索条 + 内容区。
     fn main_panel(&mut self, ctx: &egui::Context, p: &Palette) {
-        self.sidebar_ui(ctx, p);
+        if mobile_mode(ctx, &self.config) {
+            self.mobile_nav_bar(ctx, p);
+        } else {
+            self.sidebar_ui(ctx, p);
+        }
         self.top_search_bar(ctx, p);
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(p.bg))

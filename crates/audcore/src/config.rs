@@ -105,6 +105,9 @@ pub struct Config {
     pub theme: Theme,
     /// 迷你模式
     pub mini: bool,
+    /// 手机布局：侧栏收成一条顶部导航，行距加大（窄窗口会自动打开）
+    #[serde(default)]
+    pub mobile_layout: bool,
     /// 上次浏览目录
     #[serde(default)]
     pub last_dir: Option<PathBuf>,
@@ -128,6 +131,7 @@ impl Default for Config {
             cover_accent: false,
             theme: Theme::default(),
             mini: false,
+            mobile_layout: false,
             last_dir: dirs::audio_dir().or_else(dirs::home_dir),
             lyric_align: 0,
             lyric_karaoke: false,

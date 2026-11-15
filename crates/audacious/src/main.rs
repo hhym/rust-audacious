@@ -15,6 +15,8 @@ use audcore::Config;
 use engine::{Cmd, Shared};
 
 fn main() -> eframe::Result<()> {
+    #[cfg(target_os = "android")]
+    init_android_env();
     init_logging();
 
     let config = Config::load();
@@ -31,7 +33,11 @@ fn main() -> eframe::Result<()> {
         shared.send(Cmd::Refresh);
     }
 
+    // audtool 的 TCP 控制在手机上没意义，直接不启动
+    #[cfg(not(target_os = "android"))]
     let port = ipc_server::serve(shared.clone()).unwrap_or(0);
+    #[cfg(target_os = "android")]
+    let port = 0u16;
 
     // 无界面模式：只跑引擎 + 控制服务，方便脚本/CI 验证 audtool 协议
     if args.iter().any(|a| a == "--headless") {
@@ -98,11 +104,23 @@ impl AppIcon {
 }
 
 /// 日志：平时打到 stderr；Windows 发布版没有控制台，改写到配置目录下的 app.log。
+#[cfg(target_os = "android")]
+fn init_android_env() {
+    // android-activity 起来时拿不到 `dirs::config_dir()`，这里把 App 私有目录塞进环境变量，
+    // `audcore::config::data_dir()` 会优先用它。真机上由 NativeActivity 的 Context 决定，
+    // 当前按包名拼默认路径，JNI 版本接上后替换。
+    if std::env::var("AUDACIOUS_RS_DATA_DIR").is_err() {
+        let dir = "/data/data/io.github.hhym.audaciousrs/files".to_string();
+        let _ = std::fs::create_dir_all(&dir);
+        std::env::set_var("AUDACIOUS_RS_DATA_DIR", dir);
+    }
+}
+
 fn init_logging() {
     let mut builder =
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
 
-    #[cfg(all(windows, not(debug_assertions)))]
+    #[cfg(any(all(windows, not(debug_assertions)), target_os = "android"))]
     {
         let dir = audcore::config::data_dir();
         let _ = std::fs::create_dir_all(&dir);
