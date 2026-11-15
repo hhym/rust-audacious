@@ -64,6 +64,18 @@ pub fn palette(cfg: &audcore::Config) -> Palette {
             dim: Color32::from_rgb(106, 112, 121),
             dark: false,
         },
+        // 深青：墨青底 + 青绿强调，字色偏冷白
+        audcore::Theme::Teal => Palette {
+            bg: Color32::from_rgb(13, 27, 29),
+            panel: Color32::from_rgb(18, 36, 39),
+            panel_alt: Color32::from_rgb(24, 45, 49),
+            field: Color32::from_rgb(9, 20, 22),
+            accent: Color32::from_rgb(45, 189, 175),
+            accent_soft: tint(Color32::from_rgb(45, 189, 175), 52),
+            text: Color32::from_rgb(222, 238, 236),
+            dim: Color32::from_rgb(126, 158, 156),
+            dark: true,
+        },
         // 橘黄：暖米底 + 橙色面板，强调色压暗一点保证对比度
         audcore::Theme::Amber => Palette {
             bg: Color32::from_rgb(253, 242, 227),

@@ -1533,16 +1533,26 @@ impl App {
                         for (t, label, bg, selected) in &items {
                             ui.horizontal(|ui| {
                                 let (rect, _) = ui
-                                    .allocate_exact_size(vec2(12.0, 12.0), egui::Sense::hover());
+                                    .allocate_exact_size(vec2(14.0, 14.0), egui::Sense::hover());
                                 ui.painter().rect_filled(
                                     rect,
                                     egui::CornerRadius::same(3),
                                     *bg,
                                 );
+                                // 底色块里再点一颗强调色，深色主题的小方块才不至于糊成一片
+                                let dot = egui::Rect::from_center_size(
+                                    rect.center(),
+                                    vec2(6.0, 6.0),
+                                );
+                                ui.painter().rect_filled(
+                                    dot,
+                                    egui::CornerRadius::same(3),
+                                    theme::palette_for(*t, self.config.accent).accent,
+                                );
                                 ui.painter().rect_stroke(
                                     rect,
                                     egui::CornerRadius::same(3),
-                                    Stroke::new(1.0_f32, p.dim),
+                                    Stroke::new(1.0_f32, if *selected { p.accent } else { p.dim }),
                                     egui::StrokeKind::Inside,
                                 );
                                 let text_color = if *selected { p.accent } else { p.text };
