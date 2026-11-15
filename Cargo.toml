@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/audcore", "crates/audplugins", "crates/audacious", "crates/audtool"]
 
 [workspace.package]
-version = "5.10.0"
+version = "5.11.0"
 edition = "2021"
 license = "BSD-2-Clause"
 

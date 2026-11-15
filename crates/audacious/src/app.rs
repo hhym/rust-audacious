@@ -23,6 +23,61 @@ pub struct Browser {
     selected: Option<usize>,
 }
 
+/// 「选 zip / 选文件夹」用的小浏览窗口。
+pub struct PluginPick {
+    dir: PathBuf,
+    entries: Vec<(PathBuf, bool)>,
+    selected: Option<usize>,
+    /// true：只列目录和 .zip；false：只列目录（装文件夹用）
+    want_zip: bool,
+}
+
+impl PluginPick {
+    fn new(dir: PathBuf, want_zip: bool) -> Self {
+        let mut pick = PluginPick {
+            dir,
+            entries: Vec::new(),
+            selected: None,
+            want_zip,
+        };
+        pick.refresh();
+        pick
+    }
+
+    fn refresh(&mut self) {
+        self.entries.clear();
+        self.selected = None;
+        let Ok(read_dir) = std::fs::read_dir(&self.dir) else {
+            return;
+        };
+        let mut dirs = Vec::new();
+        let mut files = Vec::new();
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if !self.want_zip || path.join("plugin.json").is_file() || true {
+                    dirs.push((path, true));
+                }
+            } else if self.want_zip
+                && path.extension().map(|e| e.eq_ignore_ascii_case("zip")).unwrap_or(false)
+            {
+                files.push((path, false));
+            }
+        }
+        dirs.sort();
+        files.sort();
+        self.entries.extend(dirs);
+        self.entries.extend(files);
+    }
+
+    fn go_up(&mut self) {
+        if let Some(parent) = self.dir.parent() {
+            self.dir = parent.to_path_buf();
+            self.refresh();
+        }
+    }
+}
+
 impl Browser {
     fn new(dir: PathBuf) -> Self {
         let mut b = Browser {
@@ -106,8 +161,16 @@ pub struct App {
     plugin_picker_open: bool,
     /// 弹层是从哪个选择器打开的（nav / search），避免两处同帧都画
     plugin_picker_source: &'static str,
-    /// 插件选择弹层的页码（每页 8 个）
+    /// 插件选择弹层的页码（每页 16 个）
     plugin_page: usize,
+    /// 安装插件的下载地址输入框
+    plugin_url_input: String,
+    /// 「选 zip / 选文件夹」的浏览窗口
+    plugin_pick: Option<PluginPick>,
+    /// 安装结果提示：成功与否 + 文案
+    plugin_install_msg: Option<(bool, String)>,
+    /// 后台下载安装
+    install_rx: Option<Receiver<Result<audplugins::install::InstalledPlugin, String>>>,
     /// MyGo 插件设置项的编辑缓冲：`插件id/key` → 当前文本
     mygo_setting_inputs: std::collections::HashMap<String, String>,
     search_query: String,
@@ -212,6 +275,10 @@ impl App {
             plugin_picker_open: false,
             plugin_picker_source: "nav",
             plugin_page: 0,
+            plugin_url_input: String::new(),
+            plugin_pick: None,
+            plugin_install_msg: None,
+            install_rx: None,
             mygo_setting_inputs: std::collections::HashMap::new(),
             search_query: String::new(),
             search_results: Vec::new(),
@@ -475,7 +542,34 @@ impl eframe::App for App {
                 .collect()
         });
         if !dropped.is_empty() {
-            self.add_paths(&dropped);
+            let mut audio_paths: Vec<PathBuf> = Vec::new();
+            for path in dropped {
+                let installable = path
+                    .extension()
+                    .map(|e| e.eq_ignore_ascii_case("zip"))
+                    .unwrap_or(false)
+                    || (path.is_dir() && path.join("plugin.json").is_file());
+                if installable {
+                    match audplugins::install::install_from_path(&path) {
+                        Ok(plugin) => {
+                            self.plugin_install_msg = Some((
+                                true,
+                                format!("已安装《{}》", plugin.name),
+                            ));
+                            self.reload_media_plugins();
+                        }
+                        Err(err) => {
+                            self.plugin_install_msg =
+                                Some((false, format!("安装失败：{err}")));
+                        }
+                    }
+                } else {
+                    audio_paths.push(path);
+                }
+            }
+            if !audio_paths.is_empty() {
+                self.add_paths(&audio_paths);
+            }
         }
 
         // 快捷键：空格播放/暂停，左右切歌
@@ -511,6 +605,7 @@ impl eframe::App for App {
             self.toast(msg);
         }
 
+        self.plugin_pick_ui(ctx, &p);
         let pending = self.browser_ui(ctx, &p);
         if !pending.is_empty() {
             self.add_paths(&pending);
@@ -1938,8 +2033,145 @@ impl App {
         let mut open = self.show_plugins;
         egui::Window::new(self.t("插件", "Plugins"))
             .open(&mut open)
-            .default_width(460.0)
+            .default_width(520.0)
             .show(ctx, |ui| {
+                // 后台下载安装的结果
+                let installed = self.install_rx.as_ref().and_then(|rx| rx.try_recv().ok());
+                if let Some(result) = installed {
+                    self.install_rx = None;
+                    match result {
+                        Ok(plugin) => {
+                            self.plugin_install_msg = Some((
+                                true,
+                                format!(
+                                    "已安装《{}》，插件目录 {}",
+                                    plugin.name,
+                                    plugin.dir.display()
+                                ),
+                            ));
+                            self.reload_media_plugins();
+                        }
+                        Err(err) => {
+                            self.plugin_install_msg = Some((false, format!("安装失败：{err}")));
+                        }
+                    }
+                }
+
+                let title = self.t("安装插件", "Install plugin");
+                let desc = self.t(
+                    "只支持 MyGo Music 规范：一个插件目录，里面有 plugin.json 和 index.js（ESM 导出 search / stream / lyrics，可用全局 host 和 fetch）。「选 zip」直接挑打包好的插件压缩包，「选文件夹」直接挑插件目录；也可以在下面填 .zip 的下载地址，或者干脆把 .zip / 插件文件夹直接拖进窗口，拖进来就装好了。",
+                    "MyGo Music layout only: one folder containing plugin.json and index.js (ESM exporting search / stream / lyrics, with global host and fetch). You can choose a zip, choose a folder, paste a download URL, or simply drag a zip / plugin folder into the window.",
+                );
+                let install_label = self.t("安装", "Install");
+                let zip_label = self.t("选 zip", "Choose zip");
+                let folder_label = self.t("选文件夹", "Choose folder");
+
+                let mut url_buf = self.plugin_url_input.clone();
+                let mut do_install = false;
+                let mut open_zip = false;
+                let mut open_folder = false;
+                let mut open_dir = false;
+                let mut rescan = false;
+                let message = self.plugin_install_msg.clone();
+
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(RichText::new(title.clone()).strong().color(p.accent));
+                    ui.label(RichText::new(desc.clone()).small().color(p.dim));
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        let button_width = 210.0;
+                        let width = (ui.available_width() - button_width).max(140.0);
+                        ui.add_sized(
+                            vec2(width, 26.0),
+                            egui::TextEdit::singleline(&mut url_buf)
+                                .hint_text("https://example.com/plugin.zip"),
+                        );
+                        if ui
+                            .add(egui::Button::new(RichText::new(install_label.clone()).color(
+                                egui::Color32::WHITE,
+                            ))
+                            .fill(p.accent))
+                            .clicked()
+                        {
+                            do_install = true;
+                        }
+                        if ui.button(zip_label.clone()).clicked() {
+                            open_zip = true;
+                        }
+                        if ui.button(folder_label.clone()).clicked() {
+                            open_folder = true;
+                        }
+                    });
+                    if let Some((ok, text)) = &message {
+                        ui.label(
+                            RichText::new(text)
+                                .small()
+                                .color(if *ok {
+                                    p.accent
+                                } else {
+                                    egui::Color32::from_rgb(200, 80, 80)
+                                }),
+                        );
+                    }
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .small_button(self.t("打开插件目录", "Open plugins folder"))
+                            .clicked()
+                        {
+                            open_dir = true;
+                        }
+                        if ui.small_button(self.t("重新扫描", "Rescan")).clicked() {
+                            rescan = true;
+                        }
+                        if self.install_rx.is_some() {
+                            ui.spinner();
+                            ui.label(
+                                RichText::new(self.t("正在下载安装…", "Downloading…"))
+                                    .small()
+                                    .color(p.dim),
+                            );
+                        }
+                    });
+                });
+                self.plugin_url_input = url_buf;
+                ui.add_space(6.0);
+
+                if open_dir {
+                    open_in_file_manager(&audplugins::plugins_dir());
+                }
+                if rescan {
+                    self.reload_media_plugins();
+                }
+                if open_zip || open_folder {
+                    let base = self
+                        .config
+                        .last_dir
+                        .clone()
+                        .or_else(dirs::home_dir)
+                        .unwrap_or_else(|| PathBuf::from("."));
+                    self.plugin_pick = Some(PluginPick::new(base, open_zip));
+                }
+                if do_install {
+                    let url = self.plugin_url_input.trim().to_string();
+                    if url.is_empty() {
+                        self.plugin_install_msg = Some((
+                            false,
+                            self.t("先填一个插件下载地址", "Enter a download URL first").to_string(),
+                        ));
+                    } else {
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        std::thread::spawn(move || {
+                            let result = audplugins::install::install_from_url(&url)
+                                .map_err(|e| e.to_string());
+                            let _ = tx.send(result);
+                        });
+                        self.install_rx = Some(rx);
+                    }
+                }
+
+                ui.separator();
                 let mut last_kind: Option<audcore::plugin::PluginKind> = None;
                 for info in &self.plugins {
                     if last_kind != Some(info.kind) {
@@ -2157,6 +2389,139 @@ impl App {
                 );
             });
         self.show_about = open;
+    }
+
+    /// 「选 zip / 选文件夹」的小浏览窗口：选中后直接安装。
+    fn plugin_pick_ui(&mut self, ctx: &egui::Context, p: &Palette) {
+        let Some(want_zip) = self.plugin_pick.as_ref().map(|p| p.want_zip) else {
+            return;
+        };
+        let title = if want_zip {
+            self.t("选择插件压缩包", "Choose plugin zip").to_string()
+        } else {
+            self.t("选择插件目录", "Choose plugin folder").to_string()
+        };
+        let up_label = self.t("上级", "Up").to_string();
+        let install_label = self.t("导入这个", "Install this").to_string();
+        let close_label = self.t("关闭", "Close").to_string();
+        let hint = if want_zip {
+            self.t(
+                "选一个 .zip 压缩包（里面要有 plugin.json 或 index.js）",
+                "Pick a .zip containing plugin.json or index.js",
+            )
+            .to_string()
+        } else {
+            self.t(
+                "选一个里面有 plugin.json 的插件目录",
+                "Pick a folder containing plugin.json",
+            )
+            .to_string()
+        };
+        let Some(pick) = self.plugin_pick.as_mut() else {
+            return;
+        };
+
+        let mut open = true;
+        let mut enter: Option<usize> = None;
+        let mut chosen: Option<PathBuf> = None;
+        let mut close = false;
+        let dir_text = pick.dir.to_string_lossy().to_string();
+        let entries = pick.entries.clone();
+        let selected = pick.selected;
+
+        egui::Window::new(title)
+            .open(&mut open)
+            .default_width(560.0)
+            .default_height(430.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button(up_label.clone()).clicked() {
+                        if let Some(parent) = pick.dir.parent() {
+                            pick.dir = parent.to_path_buf();
+                            pick.refresh();
+                        }
+                    }
+                    ui.label(RichText::new(dir_text.clone()).monospace().small().color(p.dim));
+                });
+                ui.label(RichText::new(hint.clone()).small().color(p.dim));
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .max_height(300.0)
+                    .show(ui, |ui| {
+                        for (i, (path, is_dir)) in entries.iter().enumerate() {
+                            let name = path
+                                .file_name()
+                                .map(|s| s.to_string_lossy().to_string())
+                                .unwrap_or_default();
+                            let label = if *is_dir {
+                                format!("/ {name}")
+                            } else {
+                                format!("  {name}")
+                            };
+                            let is_selected = selected == Some(i);
+                            let resp = ui.selectable_label(is_selected, label);
+                            if resp.clicked() {
+                                pick.selected = Some(i);
+                                if *is_dir {
+                                    enter = Some(i);
+                                }
+                            }
+                            if resp.double_clicked() && !*is_dir {
+                                chosen = Some(path.clone());
+                            }
+                        }
+                    });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let can_install = pick
+                        .selected
+                        .and_then(|i| pick.entries.get(i))
+                        .map(|(path, is_dir)| {
+                            if *is_dir {
+                                path.join("plugin.json").is_file()
+                            } else {
+                                true
+                            }
+                        })
+                        .unwrap_or(false);
+                    if ui
+                        .add_enabled(can_install, egui::Button::new(install_label.clone()).fill(p.accent))
+                        .clicked()
+                    {
+                        if let Some((path, _)) = pick.selected.and_then(|i| pick.entries.get(i)) {
+                            chosen = Some(path.clone());
+                        }
+                    }
+                    if ui.button(close_label.clone()).clicked() {
+                        close = true;
+                    }
+                });
+            });
+
+        if let Some(index) = enter {
+            if let Some((path, _)) = pick.entries.get(index).cloned() {
+                pick.dir = path;
+                pick.refresh();
+            }
+        }
+
+        if let Some(path) = chosen {
+            match audplugins::install::install_from_path(&path) {
+                Ok(plugin) => {
+                    self.plugin_install_msg =
+                        Some((true, format!("已安装《{}》到 {}", plugin.name, plugin.dir.display())));
+                    self.reload_media_plugins();
+                }
+                Err(err) => {
+                    self.plugin_install_msg = Some((false, format!("安装失败：{err}")));
+                }
+            }
+            close = true;
+        }
+
+        if close || !open {
+            self.plugin_pick = None;
+        }
     }
 
     fn browser_ui(&mut self, ctx: &egui::Context, p: &Palette) -> Vec<PathBuf> {
