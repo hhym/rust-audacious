@@ -1,0 +1,8 @@
+{
+  "id": "home-demo",
+  "name": "首页示例",
+  "version": "1.0.0",
+  "author": "examples",
+  "description": "演示 MyGo 的 home() 接口（Browse / Sections），不联网",
+  "main": "index.js"
+}

@@ -196,6 +196,46 @@ export function lyrics({ id }) {
   这类错误来自插件自己的接口，不是宿主问题。
 - 插件异常会在「在线搜索」窗口里显示错误文本（含调用栈），便于定位。
 
+## 主面板怎么用这两套插件
+
+主面板五个标签对两套插件是同一套界面，插件在右上角「来源」里切换：
+
+| 标签 | 数据来源 | 说明 |
+|---|---|---|
+| 搜索 | `search`（MusicFree）/ `search`（MyGo） | 结果统一成 `{title, artist, album, duration}`，▶ 取播放地址、＋ 加入列表、☆ 加入喜欢 |
+| 首页 | `home`（MyGo）/ `getTopLists`（MusicFree） | 插件没有对应导出时显示「没有首页接口」，不再退回本地介绍页 |
+| 歌曲 | 本地 `Playlist` | 顶部「全选 / 取消选择 / 删除所选」，Ctrl 点行多选、Shift 点行连选 |
+| 喜欢 | `liked.json`，每条记 `{plugin, item}` | 两套插件的条目都能回放；页面底部同样显示当前插件的主页 |
+| 播放列表 | 本地 `playlists/*.m3u` | 与插件无关 |
+
+### 首页数据约定
+
+MyGo 的 `home()` 返回一个 Browse：
+
+```js
+export async function home() {
+  return {
+    title: "首页标题",
+    subtitle: "一行说明",
+    sections: [
+      {
+        title: "编辑推荐",                 // 段落标题
+        tracks: [                          // 渲染成可播放的行
+          { id, name, artists: [{ name }], album: { name }, duration },
+        ],
+        playlists: [{ id, name, imageUrl }],  // 渲染成卡片
+        albums: [{ id, name, imageUrl }],
+      },
+    ],
+  };
+}
+```
+
+MusicFree 的 `getTopLists()` 返回 `[{ title, data: [{ id, title, coverImg }] }]`，
+宿主把每个 list 当一段、`data` 里的条目渲染成卡片。
+
+卡片目前只展示标题，点开进歌单（`getTopListDetail` / `show`）还没接，属于下一步。
+
 ### 扫码登录（MyGo 扩展，可选导出）
 
 除了标准的 `search` / `stream` / `lyrics`，插件还可以导出两个方法，宿主会显示「扫码登录」按钮：
@@ -234,5 +274,5 @@ export async function loginPoll({ key }) {
   这版都还没实现，调用会抛错；`permissions.process` 因此不生效。扫码登录改走下面的 `loginQr` / `loginPoll` 扩展。
 - `fetch` 只能拿到文本 / JSON（没有 `arrayBuffer`），也没有流式响应。
 - `stream` 返回的 `headers` 目前没有透传到下载请求（和 MusicFree 的 `headers` 一样，是下一步的事）。
-- 只映射了 `search` / `stream` / `lyrics` 三个方法；`home`、`browse`、`playlists`、`show`、`comments` 等
-  mygo 的其它导出，宿主能识别但界面还没有对应的页面。
+- 首页接了 `home`（MyGo）与 `getTopLists`（MusicFree）；`browse`、`playlists`、`show`、`comments`
+  这些更深的页面还没接到界面上，卡片点开也还没做。

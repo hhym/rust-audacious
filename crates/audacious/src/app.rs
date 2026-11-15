@@ -116,6 +116,17 @@ pub struct App {
     liked: Liked,
     /// 扫码登录窗口
     login: crate::login::LoginState,
+    /// 当前插件的主页内容
+    home: Option<audplugins::HomePage>,
+    /// 这份主页属于哪个插件
+    home_for: Option<String>,
+    /// 后台加载主页
+    home_rx: Option<std::sync::mpsc::Receiver<Result<audplugins::HomePage, String>>>,
+    home_error: Option<String>,
+    /// 歌曲页多选
+    song_select: std::collections::BTreeSet<usize>,
+    /// Shift 连选的起点
+    song_anchor: Option<usize>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -177,6 +188,12 @@ impl App {
             tab: MainTab::Songs,
             liked: Liked::load(),
             login: crate::login::LoginState::default(),
+            home: None,
+            home_for: None,
+            home_rx: None,
+            home_error: None,
+            song_select: std::collections::BTreeSet::new(),
+            song_anchor: None,
         };
         app.plugins = app.collect_plugins();
         app.reload_media_plugins();
@@ -252,6 +269,54 @@ impl App {
         } else {
             en
         }
+    }
+
+    /// 后台加载当前插件的主页，加载完更新 `home`。
+    fn poll_home(&mut self) {
+        let Some(rx) = &self.home_rx else { return };
+        match rx.try_recv() {
+            Ok(result) => {
+                self.home_rx = None;
+                match result {
+                    Ok(page) => {
+                        self.home = Some(page);
+                        self.home_error = None;
+                    }
+                    Err(err) => {
+                        self.home = None;
+                        self.home_error = Some(err);
+                    }
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.home_rx = None;
+            }
+        }
+    }
+
+    /// 真正去跑插件 `home()`（可能在网络里卡住，所以放后台）。
+    fn load_home(&mut self) {
+        let Some(plugin) = self.media_plugins.get(self.search_plugin).cloned() else {
+            self.home = None;
+            self.home_for = None;
+            return;
+        };
+        let name = plugin.name().to_string();
+        self.home_for = Some(name.clone());
+        self.home = None;
+        self.home_error = None;
+        if !plugin.supports_home() {
+            self.home_rx = None;
+            self.home_error = Some(format!("{} 没有首页接口", name));
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = plugin.home().map_err(|e| audplugins::friendly_error(&e.to_string()));
+            let _ = tx.send(result);
+        });
+        self.home_rx = Some(rx);
     }
 
     /// 按插件 id 找 MyGo 插件并打开扫码登录窗口。
@@ -342,6 +407,7 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.sync();
         self.poll_media_channels();
+        self.poll_home();
         self.login.tick(ctx);
 
         if self.config.mini != self.mini_applied {
@@ -702,6 +768,64 @@ impl App {
             });
     }
 
+    /// 歌曲页顶部：全选 / 取消选择 / 删除所选。
+    fn songs_toolbar(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        let total = self.playlist.len();
+        let selected = self.song_select.len();
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.add_space(12.0);
+            ui.label(
+                RichText::new(format!("{} {}", total, self.t("首", "songs")))
+                    .small()
+                    .color(p.dim),
+            );
+            ui.separator();
+            if ui
+                .add_enabled(total > 0, egui::Button::new(self.t("全选", "Select all")))
+                .clicked()
+            {
+                self.song_select = (0..total).collect();
+                self.song_anchor = Some(0);
+            }
+            if ui
+                .add_enabled(selected > 0, egui::Button::new(self.t("取消选择", "Clear")))
+                .clicked()
+            {
+                self.song_select.clear();
+            }
+            let delete_text = if selected == 0 {
+                self.t("删除所选", "Delete selected").to_string()
+            } else {
+                format!("{} ({selected})", self.t("删除所选", "Delete selected"))
+            };
+            if ui
+                .add_enabled(selected > 0, egui::Button::new(delete_text))
+                .clicked()
+            {
+                let indexes: Vec<usize> = self.song_select.iter().rev().copied().collect();
+                if let Ok(mut pl) = self.shared.playlist.lock() {
+                    for index in indexes {
+                        pl.remove(index);
+                    }
+                }
+                self.song_select.clear();
+                self.shared.send(Cmd::Refresh);
+            }
+            if selected > 0 {
+                ui.label(
+                    RichText::new(self.t(
+                        "Ctrl / Shift 点行可多选，Shift 连选",
+                        "Ctrl/Shift-click rows to multi-select",
+                    ))
+                    .small()
+                    .color(p.dim),
+                );
+            }
+        });
+        ui.add_space(4.0);
+    }
+
     fn playlist_table(&mut self, ui: &mut egui::Ui, p: &Palette) {
         let entries = self.playlist.entries.clone();
         let total = ui.available_width();
@@ -753,8 +877,11 @@ impl App {
 
         let selected = self.playlist.selected;
         let playing = self.playlist.playing;
+        let multi = self.song_select.clone();
+        let anchor = self.song_anchor;
         let mut play_request = None;
         let mut selection = None;
+        let mut extend_select: Option<(usize, bool, bool)> = None;
         let mut menu_action: Option<(usize, MenuAction)> = None;
 
         egui::ScrollArea::vertical()
@@ -771,7 +898,7 @@ impl App {
                         p.bg
                     };
                     painter.rect_filled(rect, CornerRadius::ZERO, zebra);
-                    if selected == Some(index) {
+                    if selected == Some(index) || multi.contains(&index) {
                         painter.rect_filled(rect, CornerRadius::ZERO, p.accent_soft);
                     }
                     if resp.hovered() {
@@ -842,7 +969,12 @@ impl App {
                     );
 
                     if resp.clicked() {
-                        selection = Some(index);
+                        let mods = ui.input(|i| i.modifiers);
+                        if mods.shift || mods.ctrl || mods.command {
+                            extend_select = Some((index, mods.shift, mods.ctrl || mods.command));
+                        } else {
+                            selection = Some(index);
+                        }
                     }
                     if resp.double_clicked() {
                         play_request = Some(index);
@@ -872,7 +1004,24 @@ impl App {
                 }
             });
 
+        if let Some((index, range, toggle)) = extend_select {
+            if range {
+                let from = anchor.unwrap_or(index);
+                let (lo, hi) = if from <= index { (from, index) } else { (index, from) };
+                for i in lo..=hi {
+                    self.song_select.insert(i);
+                }
+                self.song_anchor = Some(index);
+            } else if toggle {
+                if !self.song_select.remove(&index) {
+                    self.song_select.insert(index);
+                }
+                self.song_anchor = Some(index);
+            }
+        }
         if let Some(i) = selection {
+            self.song_select.clear();
+            self.song_anchor = Some(i);
             if let Ok(mut pl) = self.shared.playlist.lock() {
                 pl.selected = Some(i);
             }
@@ -2051,7 +2200,10 @@ impl App {
             .show(ctx, |ui| match self.tab {
                 MainTab::Home => self.home_tab(ui, p),
                 MainTab::Search => self.search_tab(ui, p),
-                MainTab::Songs => self.playlist_table(ui, p),
+                MainTab::Songs => {
+                    self.songs_toolbar(ui, p);
+                    self.playlist_table(ui, p);
+                }
                 MainTab::Liked => self.liked_tab(ui, p),
                 MainTab::Playlists => self.playlists_tab(ui, p),
             });
@@ -2127,27 +2279,38 @@ impl App {
     }
 
     fn home_tab(&mut self, ui: &mut egui::Ui, p: &Palette) {
-        ui.add_space(14.0);
-        ui.horizontal(|ui| {
-            ui.add_space(16.0);
-            ui.vertical(|ui| {
-                ui.label(
-                    RichText::new("AUDACIOUS · RUST")
-                        .size(22.0)
-                        .strong()
-                        .color(p.accent),
-                );
-                ui.label(
-                    RichText::new(self.t(
-                        "本地播放 + 插件音源，一套界面搜歌、喜欢、攒歌单",
-                        "Local playback with plugin sources: search, like and build playlists in one place",
-                    ))
-                    .small()
-                    .color(p.dim),
-                );
-            });
-        });
+        egui::ScrollArea::vertical()
+            .id_salt("home-scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(16.0);
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new("AUDACIOUS · RUST")
+                                .size(22.0)
+                                .strong()
+                                .color(p.accent),
+                        );
+                        ui.label(
+                            RichText::new(self.t(
+                                "本地播放 + 插件音源，一套界面搜歌、喜欢、攒歌单",
+                                "Local playback with plugin sources: search, like and build playlists in one place",
+                            ))
+                            .small()
+                            .color(p.dim),
+                        );
+                    });
+                });
 
+                // 首页主体：当前插件提供的内容
+                self.plugin_home_ui(ui, p);
+
+                ui.add_space(10.0);
+                ui.separator();
+
+                // 本地状态与快捷入口放下面，不挡插件内容
         ui.add_space(12.0);
         ui.horizontal(|ui| {
             ui.add_space(16.0);
@@ -2240,6 +2403,139 @@ impl App {
                 });
             });
         });
+
+        });
+    }
+
+    /// 首页下半部分：当前插件的 `home()`（MyGo）或 `getTopLists()`（MusicFree）。
+    fn plugin_home_ui(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        let current = self
+            .media_plugins
+            .get(self.search_plugin)
+            .map(|plugin| plugin.name().to_string());
+        let Some(current) = current else {
+            return;
+        };
+        // 换插件、或第一次进首页时自动拉一次
+        if self.home_for.as_deref() != Some(current.as_str()) && self.home_rx.is_none() {
+            self.load_home();
+        }
+
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            ui.label(
+                RichText::new(self.t("插件主页", "Plugin home"))
+                    .strong()
+                    .color(p.accent),
+            );
+            ui.label(RichText::new(current.clone()).small().color(p.dim));
+            if ui.button(self.t("刷新", "Refresh")).clicked() {
+                self.load_home();
+            }
+            if self.home_rx.is_some() {
+                ui.spinner();
+                ui.label(
+                    RichText::new(self.t("正在加载…", "Loading…"))
+                        .small()
+                        .color(p.dim),
+                );
+            }
+        });
+        ui.add_space(4.0);
+
+        if let Some(err) = self.home_error.clone() {
+            ui.horizontal_wrapped(|ui| {
+                ui.add_space(16.0);
+                ui.label(
+                    RichText::new(err)
+                        .small()
+                        .color(egui::Color32::from_rgb(200, 80, 80)),
+                );
+            });
+            return;
+        }
+        let Some(page) = self.home.clone() else {
+            return;
+        };
+
+        {
+            let ui = &mut *ui;
+            {
+                if !page.title.is_empty() {
+                    ui.horizontal(|ui| {
+                        ui.add_space(16.0);
+                        ui.label(RichText::new(page.title).size(16.0).color(p.text));
+                        if !page.subtitle.is_empty() {
+                            ui.label(RichText::new(page.subtitle).small().color(p.dim));
+                        }
+                    });
+                }
+                if page.sections.is_empty() {
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(16.0);
+                        ui.label(
+                            RichText::new(self.t(
+                                "这个插件的首页没有内容",
+                                "This plugin returned an empty home page",
+                            ))
+                            .small()
+                            .color(p.dim),
+                        );
+                    });
+                    return;
+                }
+                for (si, section) in page.sections.iter().enumerate() {
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(16.0);
+                        ui.label(RichText::new(&section.title).strong().color(p.accent));
+                    });
+                    for (ti, track) in section.tracks.iter().enumerate() {
+                        let title = track["title"].as_str().unwrap_or("未命名").to_string();
+                        let artist = track["artist"].as_str().unwrap_or("—").to_string();
+                        let mut play = false;
+                        let mut add = false;
+                        ui.horizontal(|ui| {
+                            ui.add_space(16.0);
+                            ui.label(
+                                RichText::new(format!("{}. {}", ti + 1, elide(&title, 40)))
+                                    .color(p.text),
+                            );
+                            ui.label(RichText::new(elide(&artist, 24)).small().color(p.dim));
+                            play = ui.small_button("▶").on_hover_text("播放").clicked();
+                            add = ui.small_button("＋").on_hover_text("加入列表").clicked();
+                        });
+                        if play {
+                            self.resolve_media(track, true);
+                        } else if add {
+                            self.resolve_media(track, false);
+                        }
+                    }
+                    if !section.cards.is_empty() {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.add_space(16.0);
+                            for card in &section.cards {
+                                let title = card["title"].as_str().unwrap_or("歌单");
+                                egui::Frame::NONE
+                                    .fill(p.panel)
+                                    .inner_margin(egui::Margin::symmetric(10, 6))
+                                    .corner_radius(egui::CornerRadius::same(6))
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            RichText::new(elide(title, 22)).small().color(p.text),
+                                        );
+                                    });
+                            }
+                        });
+                    }
+                    let _ = si;
+                }
+            }
+        }
     }
 
     fn stat_card(&self, ui: &mut egui::Ui, p: &Palette, value: &str, label: &str) {
@@ -2410,46 +2706,45 @@ impl App {
     }
 
     fn liked_tab(&mut self, ui: &mut egui::Ui, p: &Palette) {
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.add_space(12.0);
-            ui.label(
-                RichText::new(format!(
-                    "{}（{}）",
-                    self.t("喜欢", "Liked"),
-                    self.liked.len()
-                ))
-                .strong()
-                .color(p.accent),
-            );
-            ui.label(
-                RichText::new(self.t(
-                    "搜索结果里的 ☆、歌曲右键「加入喜欢」都会到这里",
-                    "Stars from search and the right-click menu land here",
-                ))
-                .small()
-                .color(p.dim),
-            );
-        });
-        ui.separator();
-
-        if self.liked.is_empty() {
-            ui.add_space(30.0);
-            ui.vertical_centered(|ui| {
-                ui.label(
-                    RichText::new(self.t("还没有喜欢的歌", "Nothing liked yet"))
-                        .color(p.dim),
-                );
-            });
-            return;
-        }
-
         let items = self.liked.items().to_vec();
         let mut play: Option<usize> = None;
         let mut remove: Option<usize> = None;
         egui::ScrollArea::vertical()
+            .id_salt("liked-scroll")
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(12.0);
+                    ui.label(
+                        RichText::new(format!(
+                            "{}（{}）",
+                            self.t("喜欢", "Liked"),
+                            self.liked.len()
+                        ))
+                        .strong()
+                        .color(p.accent),
+                    );
+                    ui.label(
+                        RichText::new(self.t(
+                            "搜索结果里的 ☆、歌曲右键「加入喜欢」都会到这里",
+                            "Stars from search and the right-click menu land here",
+                        ))
+                        .small()
+                        .color(p.dim),
+                    );
+                });
+                ui.separator();
+
+                if items.is_empty() {
+                    ui.add_space(20.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            RichText::new(self.t("还没有喜欢的歌", "Nothing liked yet"))
+                                .color(p.dim),
+                        );
+                    });
+                }
                 for (i, item) in items.iter().enumerate() {
                     ui.horizontal(|ui| {
                         ui.add_space(8.0);
@@ -2461,7 +2756,11 @@ impl App {
                             RichText::new(elide(&item.title, 34))
                                 .color(if online { p.accent } else { p.text }),
                         );
-                        ui.label(RichText::new(elide(&item.subtitle(), 22)).small().color(p.dim));
+                        ui.label(
+                            RichText::new(elide(&item.subtitle(), 22))
+                                .small()
+                                .color(p.dim),
+                        );
                         if online {
                             ui.label(
                                 RichText::new(item.plugin.clone().unwrap_or_default())
@@ -2475,7 +2774,11 @@ impl App {
                         }
                     });
                 }
+
+                // 喜欢页同样显示当前插件的主页
+                self.plugin_home_ui(ui, p);
             });
+
         if let Some(i) = play {
             if let Some(item) = items.get(i).cloned() {
                 self.play_liked(item);

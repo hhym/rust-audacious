@@ -225,7 +225,7 @@ struct Meta {
 }
 
 /// 把底层报错翻译成人能看懂的一句话。
-pub(crate) fn friendly_error(raw: &str) -> String {
+pub fn friendly_error(raw: &str) -> String {
     if raw.contains("LoopIteration") || raw.to_ascii_lowercase().contains("loop iteration") {
         return "插件在加载阶段死循环（常见于混淆过的插件，校验循环在本引擎里跑不通），已跳过".into();
     }
@@ -985,6 +985,24 @@ pub(crate) fn storage_access(key: &str, value: Option<&str>) -> String {
 
 // ------------------------------------------------------------------ 统一门面
 
+/// 首页里的一段（一个横排）。两种插件标准都归一到这里。
+#[derive(Clone, Debug, Default)]
+pub struct HomeSection {
+    pub title: String,
+    /// 可以直接播放的歌曲（已归一成 MusicFree 的字段）
+    pub tracks: Vec<Value>,
+    /// 歌单 / 专辑 / 艺人这类卡片，暂只展示标题
+    pub cards: Vec<Value>,
+}
+
+/// 首页头部信息（MyGo 的 Browse 带标题与简介，MusicFree 只有若干段）
+#[derive(Clone, Debug, Default)]
+pub struct HomePage {
+    pub title: String,
+    pub subtitle: String,
+    pub sections: Vec<HomeSection>,
+}
+
 /// 两种插件标准，界面上统一成一份列表。
 #[derive(Clone)]
 pub enum OnlinePlugin {
@@ -1080,6 +1098,34 @@ impl OnlinePlugin {
         }
     }
 
+    /// 这个插件有没有首页接口。
+    pub fn supports_home(&self) -> bool {
+        match self {
+            OnlinePlugin::Mygo(plugin) => plugin.info.supports("home"),
+            OnlinePlugin::MusicFree(plugin) => plugin.info.supports("getTopLists"),
+        }
+    }
+
+    /// 首页：MyGo 调 `home()` 拿 Browse；MusicFree 用 `getTopLists()` 当「推荐歌单」。
+    pub fn home(&self) -> anyhow::Result<HomePage> {
+        match self {
+            OnlinePlugin::Mygo(plugin) => {
+                if !plugin.info.supports("home") {
+                    return Ok(HomePage::default());
+                }
+                let value = plugin.call("home", Value::Null)?;
+                Ok(mygo_home_page(&value))
+            }
+            OnlinePlugin::MusicFree(plugin) => {
+                if !plugin.info.supports("getTopLists") {
+                    return Ok(HomePage::default());
+                }
+                let value = plugin.call("getTopLists", &[])?;
+                Ok(musicfree_home_page(&value))
+            }
+        }
+    }
+
     pub fn path(&self) -> &Path {
         match self {
             OnlinePlugin::MusicFree(p) => &p.info.path,
@@ -1109,6 +1155,79 @@ impl OnlinePlugin {
             _ => None,
         }
     }
+}
+
+/// MyGo 的 `home()` 返回 Browse：`{ title, subtitle, sections: [{ title, tracks, playlists, albums }] }`
+fn mygo_home_page(value: &Value) -> HomePage {
+    let mut page = HomePage {
+        title: value["title"].as_str().unwrap_or("").to_string(),
+        subtitle: value["subtitle"].as_str().unwrap_or("").to_string(),
+        sections: Vec::new(),
+    };
+    let Some(sections) = value["sections"].as_array() else {
+        return page;
+    };
+    for section in sections {
+        let title = section["title"].as_str().unwrap_or("").to_string();
+        let tracks = section["tracks"]
+            .as_array()
+            .map(|tracks| tracks.iter().map(mygo::track_item).collect())
+            .unwrap_or_default();
+        let mut cards = Vec::new();
+        if let Some(playlists) = section["playlists"].as_array() {
+            for playlist in playlists {
+                cards.push(serde_json::json!({
+                    "title": playlist["name"].as_str().or(playlist["title"].as_str()).unwrap_or("歌单"),
+                    "cover": playlist["imageUrl"].as_str().or(playlist["coverUrl"].as_str()).unwrap_or(""),
+                    "id": playlist["id"].clone(),
+                }));
+            }
+        }
+        if let Some(albums) = section["albums"].as_array() {
+            for album in albums {
+                cards.push(serde_json::json!({
+                    "title": album["name"].as_str().unwrap_or("专辑"),
+                    "cover": album["imageUrl"].as_str().unwrap_or(""),
+                    "id": album["id"].clone(),
+                }));
+            }
+        }
+        page.sections.push(HomeSection { title, tracks, cards });
+    }
+    page
+}
+
+/// MusicFree 的 `getTopLists()`：`[{ title, data: [{ id, title, coverImg }] }]`
+fn musicfree_home_page(value: &Value) -> HomePage {
+    let lists = value
+        .as_array()
+        .cloned()
+        .or_else(|| value["data"].as_array().cloned())
+        .unwrap_or_default();
+    let mut page = HomePage::default();
+    for list in lists {
+        let title = list["title"].as_str().unwrap_or("推荐").to_string();
+        let cards: Vec<Value> = list["data"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|item| {
+                        serde_json::json!({
+                            "title": item["title"].as_str().unwrap_or("歌单"),
+                            "cover": item["coverImg"].as_str().or(item["artwork"].as_str()).unwrap_or(""),
+                            "id": item["id"].clone(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if cards.is_empty() {
+            continue;
+        }
+        page.sections.push(HomeSection { title, tracks: Vec::new(), cards });
+    }
+    page
 }
 
 /// 扫描候选：根目录的 `.js`、含 `plugin.json` 的子目录。
@@ -1239,6 +1358,38 @@ module.exports = {
   async getLyric() { return { rawLrc: "[00:00]hello" }; },
 };
 "#;
+
+    #[test]
+    fn home_page_normalizes_mygo() {
+        let browse = serde_json::json!({
+            "title": "首页",
+            "subtitle": "插件提供的",
+            "sections": [{
+                "title": "推荐",
+                "tracks": [{ "id": "1", "name": "歌", "artists": [{ "name": "人" }], "duration": 200 }],
+                "playlists": [{ "id": "p1", "name": "歌单", "imageUrl": "" }]
+            }]
+        });
+        let page = mygo_home_page(&browse);
+        assert_eq!(page.title, "首页");
+        assert_eq!(page.sections.len(), 1);
+        assert_eq!(page.sections[0].title, "推荐");
+        assert_eq!(page.sections[0].tracks[0]["title"], "歌");
+        assert_eq!(page.sections[0].tracks[0]["artist"], "人");
+        assert_eq!(page.sections[0].cards[0]["title"], "歌单");
+    }
+
+    #[test]
+    fn home_page_normalizes_musicfree() {
+        let lists = serde_json::json!([{
+            "title": "榜单",
+            "data": [{ "id": "t1", "title": "热歌榜", "coverImg": "" }]
+        }]);
+        let page = musicfree_home_page(&lists);
+        assert_eq!(page.sections.len(), 1);
+        assert_eq!(page.sections[0].title, "榜单");
+        assert_eq!(page.sections[0].cards[0]["title"], "热歌榜");
+    }
 
     #[test]
     fn static_meta_reads_without_executing() {
@@ -1376,5 +1527,25 @@ module.exports = {
 
         let lrc = call_method(MOCK, "getLyric", &[serde_json::json!({"id": 7})]).unwrap();
         assert_eq!(lrc["rawLrc"], Value::from("[00:00]hello"));
+    }
+}
+
+#[cfg(test)]
+mod meta_tests {
+    use super::*;
+
+    #[test]
+    fn static_meta_reads_top_lists() {
+        let code = r#"
+module.exports = {
+  platform: "X",
+  version: "1.0",
+  async getTopLists() { return []; },
+  async search(q) { return { data: [] }; },
+};
+"#;
+        let meta = static_meta(code).unwrap();
+        assert!(meta.methods.contains(&"getTopLists".to_string()), "{:?}", meta.methods);
+        assert!(meta.methods.contains(&"search".to_string()));
     }
 }
