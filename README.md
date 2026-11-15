@@ -151,11 +151,12 @@ MyGo 插件的 ES 模块改写/搜索/取地址/歌词/设置项。共 30 个用
 
 ## 版本
 
-版本号统一在 `Cargo.toml` 的 `workspace.package.version` 维护，按习惯从 **5.0** 起标，当前 **5.6.1**：
+版本号统一在 `Cargo.toml` 的 `workspace.package.version` 维护，按习惯从 **5.0** 起标，当前 **5.6.2**：
 
 - 5.0.0 首个可运行版本
 - 5.0.1 修掉 Windows 发布版弹出控制台窗口的问题，日志改写到 `%APPDATA%\audacious-rs\app.log`
 - 5.1.0 三套主题（橘黄 / 浅色 / 深色）与工具栏换肤按钮，默认橘黄
+- 5.6.2 插件选择改成翻页弹层（每页 8 个、上一页/下一页、点外部收起），插件多了不用再滚一长条；主面板与搜索页共用同一份页码
 - 5.6.1 插件返回的 `headers`（Referer / User-Agent / Cookie）随取流请求一起发，修 B 站等需要防盗链的插件「解析成功但播放出错」；在线音源缓存按 url + headers 取指纹，`.m4s` 按 m4a 缓存
 - 5.6.0 主面板四个页面打通两套插件：搜索（统一结果表）、首页（MyGo `home` / MusicFree `getTopLists`）、喜欢（两套插件的条目都能回放，页面底部同样显示插件主页）、歌曲页新增「全选 / 取消选择 / 删除所选」批量操作（Ctrl 多选、Shift 连选）
 - 5.5.0 MyGo 插件支持扫码登录：导出 `loginQr` / `loginPoll` 的插件会多出「扫码登录」按钮，宿主渲染二维码（PNG/JPEG，支持 data URL 与 http 图片地址）、每 2 秒轮询状态，登录态由插件自己用 `host.storage` 保存

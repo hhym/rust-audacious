@@ -102,6 +102,12 @@ pub struct App {
     scan_rx: Option<std::sync::mpsc::Receiver<Vec<audplugins::OnlinePlugin>>>,
     show_search: bool,
     search_plugin: usize,
+    /// 插件选择弹层是否打开
+    plugin_picker_open: bool,
+    /// 弹层是从哪个选择器打开的（nav / search），避免两处同帧都画
+    plugin_picker_source: &'static str,
+    /// 插件选择弹层的页码（每页 8 个）
+    plugin_page: usize,
     /// MyGo 插件设置项的编辑缓冲：`插件id/key` → 当前文本
     mygo_setting_inputs: std::collections::HashMap<String, String>,
     search_query: String,
@@ -181,6 +187,9 @@ impl App {
             scan_rx: None,
             show_search: false,
             search_plugin: 0,
+            plugin_picker_open: false,
+            plugin_picker_source: "nav",
+            plugin_page: 0,
             mygo_setting_inputs: std::collections::HashMap::new(),
             search_query: String::new(),
             search_results: Vec::new(),
@@ -2243,7 +2252,7 @@ impl App {
                         egui::Layout::right_to_left(egui::Align::Center),
                         |ui| {
                             ui.add_space(8.0);
-                            self.plugin_selector(ui, p);
+                            self.plugin_selector(ui, p, "nav");
                             ui.label(RichText::new(self.t("来源", "Source")).small().color(p.dim));
                         },
                     );
@@ -2252,7 +2261,7 @@ impl App {
     }
 
     /// 在线插件选择器：显示插件名，点开可以换插件。
-    fn plugin_selector(&mut self, ui: &mut egui::Ui, p: &Palette) {
+    fn plugin_selector(&mut self, ui: &mut egui::Ui, p: &Palette, key: &'static str) {
         if self.media_plugins.is_empty() {
             ui.label(
                 RichText::new(self.t("未安装在线插件", "No online plugin"))
@@ -2266,20 +2275,152 @@ impl App {
             .get(self.search_plugin)
             .cloned()
             .unwrap_or_else(|| "—".into());
-        egui::ComboBox::from_id_salt("main-plugin")
-            .selected_text(RichText::new(elide(&current, 26)).color(p.accent))
-            .width(200.0)
-            .show_ui(ui, |ui| {
-                for (i, name) in names.iter().enumerate() {
-                    if ui
-                        .selectable_label(self.search_plugin == i, elide(name, 34))
-                        .clicked()
-                    {
-                        self.search_plugin = i;
-                    }
-                }
-            });
+        let resp = ui.add(
+            egui::Button::new(RichText::new(elide(&current, 24)).color(p.accent)),
+        );
+        let was_open = self.plugin_picker_open && self.plugin_picker_source == key;
+        if resp.clicked() {
+            self.plugin_picker_open = !was_open;
+            self.plugin_picker_source = key;
+            if self.plugin_picker_open {
+                self.plugin_page = self.search_plugin / Self::PLUGIN_PAGE_SIZE;
+            }
+        }
+        if self.plugin_picker_open && self.plugin_picker_source == key {
+            let pos = resp.rect.left_bottom() + vec2(0.0, 4.0);
+            let area_id = egui::Id::new(("main-plugin-picker", key));
+            self.plugin_picker_ui(ui.ctx(), pos, &names, p, was_open, area_id);
+        }
     }
+
+    const PLUGIN_PAGE_SIZE: usize = 8;
+
+    /// 插件选择弹层：每页 8 个，底部翻页。
+    fn plugin_picker_ui(
+        &mut self,
+        ctx: &egui::Context,
+        pos: egui::Pos2,
+        names: &[String],
+        p: &Palette,
+        was_open: bool,
+        area_id: egui::Id,
+    ) {
+        let total = names.len();
+        let pages = total.div_ceil(Self::PLUGIN_PAGE_SIZE).max(1);
+        self.plugin_page = self.plugin_page.min(pages - 1);
+        let start = self.plugin_page * Self::PLUGIN_PAGE_SIZE;
+        let end = (start + Self::PLUGIN_PAGE_SIZE).min(total);
+
+        let mut choice: Option<usize> = None;
+        let mut page_delta: i32 = 0;
+        let mut close = false;
+        // 弹层贴右边缘时往左挪，别被窗口裁掉
+        let screen = ctx.screen_rect();
+        let pos = egui::pos2(pos.x.min(screen.right() - 350.0).max(screen.left() + 4.0), pos.y);
+        let area = egui::Area::new(area_id)
+            .order(egui::Order::Foreground)
+            .fixed_pos(pos)
+            .show(ctx, |ui| {
+                egui::Frame::NONE
+                    .fill(p.panel)
+                    .stroke(egui::Stroke::new(1.0, p.accent))
+                    .inner_margin(egui::Margin::same(8))
+                    .corner_radius(egui::CornerRadius::same(6))
+                    .show(ui, |ui| {
+                        ui.set_min_width(330.0);
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} {}/{} · {} {}/{}",
+                                    self.t("插件", "Plugins"),
+                                    self.search_plugin + 1,
+                                    total,
+                                    self.t("第", "page"),
+                                    self.plugin_page + 1,
+                                    pages
+                                ))
+                                .small()
+                                .color(p.dim),
+                            );
+                        });
+                        ui.add_space(4.0);
+                        egui::Grid::new(area_id.with("grid"))
+                            .num_columns(2)
+                            .spacing(vec2(6.0, 4.0))
+                            .show(ui, |ui| {
+                                for i in start..end {
+                                    let selected = self.search_plugin == i;
+                                    let name = names.get(i).map(|s| elide(s, 26)).unwrap_or_default();
+                                    if ui
+                                        .add_sized(
+                                            vec2(155.0, 24.0),
+                                            egui::Button::new(
+                                                RichText::new(name)
+                                                    .color(if selected { p.accent } else { p.text }),
+                                            )
+                                            .selected(selected),
+                                        )
+                                        .clicked()
+                                    {
+                                        choice = Some(i);
+                                    }
+                                    if (i - start) % 2 == 1 {
+                                        ui.end_row();
+                                    }
+                                }
+                                if (end - start) % 2 == 1 {
+                                    ui.end_row();
+                                }
+                            });
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_enabled(
+                                    self.plugin_page > 0,
+                                    egui::Button::new(self.t("‹ 上一页", "‹ Prev")),
+                                )
+                                .clicked()
+                            {
+                                page_delta = -1;
+                            }
+                            if ui
+                                .add_enabled(
+                                    self.plugin_page + 1 < pages,
+                                    egui::Button::new(self.t("下一页 ›", "Next ›")),
+                                )
+                                .clicked()
+                            {
+                                page_delta = 1;
+                            }
+                            ui.add_space(6.0);
+                            if ui.button(self.t("关闭", "Close")).clicked() {
+                                close = true;
+                            }
+                        });
+                    });
+            });
+
+        if let Some(i) = choice {
+            self.search_plugin = i;
+            self.plugin_picker_open = false;
+        }
+        if page_delta != 0 {
+            self.plugin_page = (self.plugin_page as i32 + page_delta).clamp(0, pages as i32 - 1) as usize;
+        }
+        if close {
+            self.plugin_picker_open = false;
+        }
+        // 点到弹层外面就收起
+        if was_open
+            && self.plugin_picker_open
+            && ctx.input(|i| i.pointer.any_click())
+            && !area.response.contains_pointer()
+            && choice.is_none()
+        {
+            self.plugin_picker_open = false;
+        }
+    }
+
 
     fn home_tab(&mut self, ui: &mut egui::Ui, p: &Palette) {
         egui::ScrollArea::vertical()
@@ -2559,7 +2700,7 @@ impl App {
         ui.horizontal(|ui| {
             ui.add_space(12.0);
             ui.label(RichText::new(self.t("来源", "Source")).small().color(p.dim));
-            self.plugin_selector(ui, p);
+            self.plugin_selector(ui, p, "search");
         });
         ui.add_space(4.0);
         ui.horizontal(|ui| {
