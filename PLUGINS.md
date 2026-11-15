@@ -273,6 +273,7 @@ export async function loginPoll({ key }) {
 - `host.spawn`（启动外部程序）、`host.signInPrompt` / `waitForRedirect` / `webSignIn`（浏览器回跳登录）
   这版都还没实现，调用会抛错；`permissions.process` 因此不生效。扫码登录改走下面的 `loginQr` / `loginPoll` 扩展。
 - `fetch` 只能拿到文本 / JSON（没有 `arrayBuffer`），也没有流式响应。
-- `stream` 返回的 `headers` 目前没有透传到下载请求（和 MusicFree 的 `headers` 一样，是下一步的事）。
+- `stream` / `getMediaSource` 返回的 `headers`（Referer、User-Agent、Cookie…）会随下载请求一起发；
+  缓存文件按「url + headers」取指纹，同一地址换了 Referer 不会错误命中旧文件。
 - 首页接了 `home`（MyGo）与 `getTopLists`（MusicFree）；`browse`、`playlists`、`show`、`comments`
   这些更深的页面还没接到界面上，卡片点开也还没做。

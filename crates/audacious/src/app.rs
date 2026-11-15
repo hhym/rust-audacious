@@ -109,7 +109,9 @@ pub struct App {
     search_status: SearchStatus,
     search_rx: Option<Receiver<Result<Vec<serde_json::Value>, String>>>,
     /// 在线歌曲解析结果：item + 播放地址
-    resolve_rx: Option<Receiver<Result<(serde_json::Value, String, bool), String>>>,
+    resolve_rx: Option<
+        Receiver<Result<(serde_json::Value, audplugins::MediaSource, bool), String>>,
+    >,
     /// 主面板当前标签页
     tab: MainTab,
     /// 「喜欢」列表
@@ -1571,9 +1573,10 @@ impl App {
 
         if let Some(rx) = &self.resolve_rx {
             match rx.try_recv() {
-                Ok(Ok((item, url, play_now))) => {
+                Ok(Ok((item, source, play_now))) => {
                     self.resolve_rx = None;
-                    let entry = remote_entry(&item, &url);
+                    audplugins::remember_headers(&source.url, &source.headers);
+                    let entry = remote_entry(&item, &source.url);
                     let title = entry.display_title();
                     let index = {
                         let Ok(mut pl) = self.shared.playlist.lock() else {
@@ -1653,7 +1656,7 @@ impl App {
         std::thread::spawn(move || {
             log::info!("resolving media for {:?}", item["title"]);
             let result = plugin
-                .media_url(&item, "standard")
+                .media(&item, "standard")
                 .map_err(|e| e.to_string());
             log::info!("resolve result: {:?}", result);
             let _ = tx.send(result.map(|url| (item, url, play_now)));

@@ -578,6 +578,37 @@ pub(crate) fn platform_name() -> &'static str {
 ///
 /// 播放器（rodio）需要一个可随机访问的文件，这里先下载到 `<cache>/audacious-rs/streams`。
 pub fn fetch_to_cache(url: &str) -> anyhow::Result<PathBuf> {
+    let headers = remembered_headers(url);
+    fetch_to_cache_with(url, &headers)
+}
+
+/// 记住某个播放地址该带的 headers，下载时自动用上。
+pub fn remember_headers(url: &str, headers: &[(String, String)]) {
+    if headers.is_empty() {
+        return;
+    }
+    let map = header_registry();
+    if let Ok(mut map) = map.lock() {
+        map.insert(url.to_string(), headers.to_vec());
+    }
+}
+
+fn remembered_headers(url: &str) -> Vec<(String, String)> {
+    header_registry()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(url).cloned())
+        .unwrap_or_default()
+}
+
+fn header_registry() -> &'static std::sync::Mutex<HashMap<String, Vec<(String, String)>>> {
+    static REGISTRY: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Vec<(String, String)>>>> =
+        std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// 带 headers 下载到缓存；同样的 url + headers 命中同一个文件。
+pub fn fetch_to_cache_with(url: &str, headers: &[(String, String)]) -> anyhow::Result<PathBuf> {
     use std::io::Write;
 
     let dir = dirs::cache_dir()
@@ -588,7 +619,14 @@ pub fn fetch_to_cache(url: &str) -> anyhow::Result<PathBuf> {
 
     let hash = format!("{:x}", {
         use md5::{Digest, Md5};
-        Md5::digest(url.as_bytes())
+        let mut key = url.to_string();
+        for (name, value) in headers {
+            key.push('\n');
+            key.push_str(name);
+            key.push(':');
+            key.push_str(value);
+        }
+        Md5::digest(key.as_bytes())
     });
     let ext = url_extension(url);
     let path = dir.join(format!("{hash}.{ext}"));
@@ -596,7 +634,11 @@ pub fn fetch_to_cache(url: &str) -> anyhow::Result<PathBuf> {
         return Ok(path);
     }
 
-    let resp = client().get(url).send()?.error_for_status()?;
+    let mut request = client().get(url);
+    for (name, value) in headers {
+        request = request.header(name, value);
+    }
+    let resp = request.send()?.error_for_status()?;
     let tmp = path.with_extension("part");
     {
         let mut file = std::fs::File::create(&tmp)?;
@@ -611,6 +653,9 @@ pub fn fetch_to_cache(url: &str) -> anyhow::Result<PathBuf> {
 
 fn url_extension(url: &str) -> &'static str {
     let lower = url.to_lowercase();
+    if lower.contains(".m4s") {
+        return "m4a";
+    }
     for ext in ["mp3", "flac", "m4a", "aac", "ogg", "opus", "wav", "webm", "mkv", "mp4"] {
         if lower.contains(&format!(".{ext}")) {
             return ext;
@@ -985,6 +1030,41 @@ pub(crate) fn storage_access(key: &str, value: Option<&str>) -> String {
 
 // ------------------------------------------------------------------ 统一门面
 
+/// 插件给的一条播放地址：`url` + 随请求带的 headers。
+#[derive(Clone, Debug, Default)]
+pub struct MediaSource {
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+}
+
+/// 插件返回的 headers 可能是对象（`{"Referer": "..."}`），也可能是数组
+/// （`[{name, value}]`），两种都收。
+fn collect_headers(value: &Value) -> Vec<(String, String)> {
+    let Some(headers) = value.get("headers") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if let Some(map) = headers.as_object() {
+        for (key, value) in map {
+            if let Some(text) = value.as_str() {
+                out.push((key.clone(), text.to_string()));
+            }
+        }
+    } else if let Some(list) = headers.as_array() {
+        for item in list {
+            let key = item["name"]
+                .as_str()
+                .or(item["key"].as_str())
+                .unwrap_or_default();
+            let value = item["value"].as_str().unwrap_or_default();
+            if !key.is_empty() {
+                out.push((key.to_string(), value.to_string()));
+            }
+        }
+    }
+    out
+}
+
 /// 首页里的一段（一个横排）。两种插件标准都归一到这里。
 #[derive(Clone, Debug, Default)]
 pub struct HomeSection {
@@ -1061,6 +1141,11 @@ impl OnlinePlugin {
 
     /// 取播放地址。
     pub fn media_url(&self, item: &Value, quality: &str) -> anyhow::Result<String> {
+        Ok(self.media(item, quality)?.url)
+    }
+
+    /// 取播放地址 + 插件要求随请求带的 headers（Referer / User-Agent / Cookie 等）。
+    pub fn media(&self, item: &Value, quality: &str) -> anyhow::Result<MediaSource> {
         match self {
             OnlinePlugin::MusicFree(p) => {
                 let v = p.media_source(item, quality)?;
@@ -1075,17 +1160,42 @@ impl OnlinePlugin {
                                 .map(|s| s.to_string())
                         })
                 };
-                pick(&v)
+                let url = pick(&v)
                     .or_else(|| pick(&v["data"]))
-                    .ok_or_else(|| anyhow::anyhow!("插件没有返回可播放的地址"))
+                    .ok_or_else(|| anyhow::anyhow!("插件没有返回可播放的地址"))?;
+                let mut headers: Vec<(String, String)> = collect_headers(&v)
+                    .into_iter()
+                    .chain(collect_headers(&v["data"]))
+                    .collect();
+                if !headers
+                    .iter()
+                    .any(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
+                {
+                    headers.push((
+                        "User-Agent".into(),
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36".into(),
+                    ));
+                }
+                Ok(MediaSource { url, headers })
             }
             OnlinePlugin::Mygo(p) => {
                 let v = p.stream(item, quality)?;
-                v["url"]
+                let url = v["url"]
                     .as_str()
                     .filter(|s| s.starts_with("http"))
                     .map(|s| s.to_string())
-                    .ok_or_else(|| anyhow::anyhow!("stream 没有返回 url"))
+                    .ok_or_else(|| anyhow::anyhow!("stream 没有返回 url"))?;
+                let mut headers: Vec<(String, String)> = collect_headers(&v);
+                if !headers
+                    .iter()
+                    .any(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
+                {
+                    headers.push((
+                        "User-Agent".into(),
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36".into(),
+                    ));
+                }
+                Ok(MediaSource { url, headers })
             }
         }
     }
@@ -1548,4 +1658,55 @@ module.exports = {
         assert!(meta.methods.contains(&"getTopLists".to_string()), "{:?}", meta.methods);
         assert!(meta.methods.contains(&"search".to_string()));
     }
+
+#[cfg(test)]
+mod header_tests {
+    use super::*;
+
+    #[test]
+    fn headers_are_collected_from_map_and_array() {
+        let map = serde_json::json!({ "url": "https://x/y.mp3", "headers": { "Referer": "https://b23.tv", "User-Agent": "ua" } });
+        let list = collect_headers(&map);
+        assert_eq!(list.len(), 2);
+        assert!(list.iter().any(|(k, v)| k == "Referer" && v == "https://b23.tv"));
+
+        let array = serde_json::json!({ "headers": [{ "name": "X-Test", "value": "1" }] });
+        let list = collect_headers(&array);
+        assert_eq!(list[0].0, "X-Test");
+    }
+
+    #[test]
+    fn fetch_sends_plugin_headers() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        // 本地起一个服务：只有带 Referer 的请求才返回 200
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(2) {
+                let Ok(mut stream) = stream else { continue };
+                let mut buf = vec![0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let text = String::from_utf8_lossy(&buf).to_lowercase();
+                let ok = text.contains("referer: https://b23.tv");
+                let response = if ok {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nDATA"
+                } else {
+                    "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n"
+                };
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+
+        let url = format!("http://127.0.0.1:{port}/stream.mp3");
+        let without = fetch_to_cache_with(&url, &[]);
+        assert!(without.is_err(), "没有 Referer 应该被拒绝");
+
+        let headers = vec![("Referer".to_string(), "https://b23.tv".to_string())];
+        let with = fetch_to_cache_with(&url, &headers).expect("带 Referer 应该成功");
+        assert!(with.metadata().map(|m| m.len() > 0).unwrap_or(false));
+        let _ = std::fs::remove_file(with);
+    }
+}
 }
