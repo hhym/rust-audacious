@@ -1,4 +1,4 @@
-rust-audacious 5.8.0 · Windows x64 免安装版
+rust-audacious 5.9.0 · Windows x64 免安装版
 =========================================
 
 Audacious 内核的 Rust 重写，单文件可执行，无需安装运行库。
@@ -55,3 +55,5 @@ BSD-2-Clause，与原版 Audacious 一致。界面布局参考 Audacious 的 GTK
 插件接口标准参考 MusicFreePlugins（https://github.com/hhym/MusicFreePlugins）。
 
 仓库：https://github.com/hhym/rust-audacious
+
+图标：icon.png / icon.ico（windows 快捷方式可右键「属性 → 更改图标」选用）

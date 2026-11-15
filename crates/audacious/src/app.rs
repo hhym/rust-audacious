@@ -144,6 +144,8 @@ pub struct App {
     lyric_state: LyricState,
     lyric_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     lyric_active: usize,
+    /// 侧栏 / 关于页用的应用图标纹理
+    logo_texture: Option<egui::TextureHandle>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -231,6 +233,7 @@ impl App {
             lyric_state: LyricState::Idle,
             lyric_rx: None,
             lyric_active: 0,
+            logo_texture: None,
         };
         app.plugins = app.collect_plugins();
         app.reload_media_plugins();
@@ -1127,6 +1130,30 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.add_space(12.0);
                     let (rect, _) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::hover());
+                    if self.state.title.is_empty() {
+                        // 没在播放时用应用图标当占位封面
+                        if self.logo_texture.is_none() {
+                            self.logo_texture = Some(load_logo_texture(ui.ctx()));
+                        }
+                        if let Some(tex) = &self.logo_texture {
+                            ui.painter().image(
+                                tex.id(),
+                                rect,
+                                egui::Rect::from_min_max(
+                                    egui::pos2(0.0, 0.0),
+                                    egui::pos2(1.0, 1.0),
+                                ),
+                                Color32::WHITE,
+                            );
+                        }
+                        let painter = ui.painter();
+                        painter.rect_stroke(
+                            rect,
+                            CornerRadius::same(6),
+                            Stroke::new(1.0_f32, p.accent),
+                            StrokeKind::Inside,
+                        );
+                    }
                     let painter = ui.painter();
                     painter.rect_filled(rect, CornerRadius::same(6), p.accent_soft);
                     painter.rect_stroke(
@@ -1135,20 +1162,15 @@ impl App {
                         Stroke::new(1.0_f32, p.accent),
                         StrokeKind::Inside,
                     );
-                    let initial = self
-                        .state
-                        .title
-                        .chars()
-                        .next()
-                        .map(|c| c.to_string())
-                        .unwrap_or_else(|| "♪".into());
-                    painter.text(
-                        rect.center(),
-                        Align2::CENTER_CENTER,
-                        initial,
-                        FontId::proportional(18.0),
-                        p.accent,
-                    );
+                    if let Some(ch) = self.state.title.chars().next() {
+                        painter.text(
+                            rect.center(),
+                            Align2::CENTER_CENTER,
+                            ch.to_string(),
+                            FontId::proportional(18.0),
+                            p.accent,
+                        );
+                    }
 
                     ui.add_space(8.0);
                     ui.vertical(|ui| {
@@ -2352,16 +2374,18 @@ impl App {
             )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    let (rect, _) = ui.allocate_exact_size(vec2(30.0, 30.0), Sense::hover());
-                    ui.painter()
-                        .rect_filled(rect, CornerRadius::same(15), p.accent_soft);
-                    ui.painter().text(
-                        rect.center(),
-                        Align2::CENTER_CENTER,
-                        "A",
-                        FontId::proportional(17.0),
-                        p.accent,
-                    );
+                    let (rect, _) = ui.allocate_exact_size(vec2(34.0, 34.0), Sense::hover());
+                    if self.logo_texture.is_none() {
+                        self.logo_texture = Some(load_logo_texture(ui.ctx()));
+                    }
+                    if let Some(tex) = &self.logo_texture {
+                        ui.painter().image(
+                            tex.id(),
+                            rect,
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            Color32::WHITE,
+                        );
+                    }
                     ui.vertical(|ui| {
                         ui.label(
                             RichText::new("Audacious RS")
@@ -3784,4 +3808,16 @@ mod lyric_parse_tests {
         let text = extract_lyric_text(&value).unwrap();
         assert!(text.contains("第二句"));
     }
+}
+
+/// 把嵌进二进制的 `assets/icon.png` 变成 egui 纹理。
+fn load_logo_texture(ctx: &egui::Context) -> egui::TextureHandle {
+    let bytes = include_bytes!("../assets/icon.png");
+    let image = image::load_from_memory(bytes)
+        .map(|img| img.to_rgba8())
+        .unwrap_or_else(|_| image::RgbaImage::from_pixel(32, 32, image::Rgba([210, 120, 34, 255])));
+    let size = [image.width() as usize, image.height() as usize];
+    let pixels = image.into_raw();
+    let color = egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
+    ctx.load_texture("app-logo", color, egui::TextureOptions::LINEAR)
 }
