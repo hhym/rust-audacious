@@ -651,7 +651,7 @@ impl App {
                     );
                     ui.add_space(6.0);
                     ui.separator();
-                    if ui.button(self.t("添加文件", "Add files")).clicked() {
+                    if icon_button(ui, self.t("添加文件", "Add files"), p, icon_file_add) {
                         self.browser = Some(Browser::new(
                             self.config
                                 .last_dir
@@ -659,7 +659,7 @@ impl App {
                                 .unwrap_or_else(|| PathBuf::from(".")),
                         ));
                     }
-                    if ui.button(self.t("添加目录", "Add folder")).clicked() {
+                    if icon_button(ui, self.t("添加目录", "Add folder"), p, icon_folder_add) {
                         let dir = self
                             .config
                             .last_dir
@@ -667,25 +667,25 @@ impl App {
                             .unwrap_or_else(|| dirs::home_dir().unwrap_or_default());
                         self.add_paths(&[dir]);
                     }
-                    if ui.button(self.t("保存列表", "Save list")).clicked() {
+                    if icon_button(ui, self.t("保存列表", "Save list"), p, icon_save_list) {
                         self.save_playlist();
                     }
                     ui.separator();
-                    if ui.button(self.t("均衡器", "Equalizer")).clicked() {
+                    if icon_button(ui, self.t("均衡器", "Equalizer"), p, icon_eq) {
                         self.show_eq = true;
                     }
-                    if ui.button(self.t("插件", "Plugins")).clicked() {
+                    if icon_button(ui, self.t("插件", "Plugins"), p, icon_plugins) {
                         self.show_plugins = true;
                     }
-                    if ui.button(self.t("设置", "Settings")).clicked() {
+                    if icon_button(ui, self.t("设置", "Settings"), p, icon_settings) {
                         self.show_settings = true;
                     }
                     ui.separator();
-                    if ui.button(self.t("迷你", "Mini")).clicked() {
+                    if icon_button(ui, self.t("迷你", "Mini"), p, icon_mini) {
                         self.config.mini = true;
                         let _ = self.config.save();
                     }
-                    if ui.button(self.t("关于", "About")).clicked() {
+                    if icon_button(ui, self.t("关于", "About"), p, icon_info) {
                         self.show_about = true;
                     }
 
@@ -710,28 +710,25 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.add_space(8.0);
                     let playing = self.state.status == Status::Playing;
-                    if ui.button(self.t("上一首", "Prev")).clicked() {
+                    if icon_button(ui, self.t("上一首", "Prev"), p, mini_prev_icon) {
                         self.shared.send(Cmd::Prev);
                     }
-                    let main_label = if playing {
-                        self.t("暂停", "Pause")
-                    } else {
-                        self.t("播放", "Play")
-                    };
-                    if ui
-                        .add(
-                            egui::Button::new(RichText::new(main_label).strong())
-                                .fill(p.accent_soft)
-                                .stroke(Stroke::new(1.0_f32, p.accent)),
-                        )
-                        .clicked()
-                    {
+                    if transport_button(
+                        ui,
+                        p,
+                        if playing {
+                            self.t("暂停", "Pause")
+                        } else {
+                            self.t("播放", "Play")
+                        },
+                        playing,
+                    ) {
                         self.shared.send(Cmd::Toggle);
                     }
-                    if ui.button(self.t("停止", "Stop")).clicked() {
+                    if icon_button(ui, self.t("停止", "Stop"), p, icon_stop) {
                         self.shared.send(Cmd::Stop);
                     }
-                    if ui.button(self.t("下一首", "Next")).clicked() {
+                    if icon_button(ui, self.t("下一首", "Next"), p, mini_next_icon) {
                         self.shared.send(Cmd::Next);
                     }
 
@@ -5335,4 +5332,177 @@ fn heart_icon(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
         color,
         Stroke::NONE,
     ));
+}
+
+/// 工具栏上的图标按钮：30×30，悬停变亮 + 淡淡底色，带 tooltip。
+fn icon_button(
+    ui: &mut egui::Ui,
+    tip: &str,
+    p: &crate::theme::Palette,
+    draw: fn(&egui::Painter, egui::Rect, Color32),
+) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(vec2(30.0, 30.0), Sense::click());
+    if resp.hovered() {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(6), p.accent_soft);
+    }
+    let color = if resp.hovered() { p.accent } else { p.text };
+    draw(ui.painter(), rect, color);
+    resp.on_hover_text(tip).clicked()
+}
+
+/// 工具栏中间的播放键：强调色圆底，播放中双竖条、暂停白三角。
+fn transport_button(ui: &mut egui::Ui, p: &crate::theme::Palette, tip: &str, playing: bool) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(vec2(38.0, 32.0), Sense::click());
+    let center = rect.center();
+    ui.painter().circle_filled(center, 16.0, p.accent);
+    if playing {
+        mini_pause_icon(ui.painter(), rect);
+    } else {
+        mini_play_icon(ui.painter(), rect, Color32::WHITE);
+    }
+    resp.on_hover_text(tip).clicked()
+}
+
+/// 文件：圆角文档轮廓 + 右下角加号。
+fn icon_file_add(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    let doc = egui::Rect::from_center_size(rect.center() + vec2(-1.0, 0.0), vec2(13.0, 17.0));
+    painter.rect_stroke(
+        doc,
+        CornerRadius::same(2),
+        Stroke::new(1.4_f32, color),
+        egui::StrokeKind::Inside,
+    );
+    let c = rect.center() + vec2(7.0, 6.0);
+    painter.line_segment([c + vec2(-4.0, 0.0), c + vec2(4.0, 0.0)], Stroke::new(1.8_f32, color));
+    painter.line_segment([c + vec2(0.0, -4.0), c + vec2(0.0, 4.0)], Stroke::new(1.8_f32, color));
+}
+
+/// 目录：文件夹轮廓 + 加号。
+fn icon_folder_add(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    let body = egui::Rect::from_center_size(rect.center() + vec2(-1.0, 1.0), vec2(16.0, 11.0));
+    painter.rect_stroke(
+        body,
+        CornerRadius::same(2),
+        Stroke::new(1.4_f32, color),
+        egui::StrokeKind::Inside,
+    );
+    let tab = egui::Rect::from_min_size(body.left_top() + vec2(1.0, -3.0), vec2(7.0, 4.0));
+    painter.rect_stroke(
+        tab,
+        CornerRadius::same(1),
+        Stroke::new(1.4_f32, color),
+        egui::StrokeKind::Inside,
+    );
+    let c = rect.center() + vec2(7.0, 7.0);
+    painter.line_segment([c + vec2(-3.5, 0.0), c + vec2(3.5, 0.0)], Stroke::new(1.8_f32, color));
+    painter.line_segment([c + vec2(0.0, -3.5), c + vec2(0.0, 3.5)], Stroke::new(1.8_f32, color));
+}
+
+/// 保存列表：三条横线 + 底下一个向下箭头。
+fn icon_save_list(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    let c = rect.center();
+    for i in 0..3 {
+        let y = c.y - 8.0 + i as f32 * 5.0;
+        let w = if i == 2 { 5.0 } else { 7.0 };
+        painter.line_segment(
+            [egui::pos2(c.x - 7.0, y), egui::pos2(c.x - 7.0 + w * 2.0, y)],
+            Stroke::new(1.4_f32, color),
+        );
+    }
+    painter.line_segment(
+        [egui::pos2(c.x, c.y + 2.0), egui::pos2(c.x, c.y + 11.0)],
+        Stroke::new(1.6_f32, color),
+    );
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(c.x - 4.0, c.y + 7.0),
+            egui::pos2(c.x + 4.0, c.y + 7.0),
+            egui::pos2(c.x, c.y + 12.5),
+        ],
+        color,
+        Stroke::NONE,
+    ));
+}
+
+/// 均衡器：三根竖线 + 三个滑块点。
+fn icon_eq(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    let c = rect.center();
+    for (dx, dy) in [(-7.0_f32, -4.0_f32), (0.0, 3.0), (7.0, -1.0)] {
+        painter.line_segment(
+            [
+                egui::pos2(c.x + dx, c.y - 9.0),
+                egui::pos2(c.x + dx, c.y + 9.0),
+            ],
+            Stroke::new(1.3_f32, color),
+        );
+        painter.circle_filled(egui::pos2(c.x + dx, c.y + dy), 2.6, color);
+    }
+}
+
+/// 插件：2×2 的小方块。
+fn icon_plugins(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    let c = rect.center();
+    for (dx, dy) in [(-4.5_f32, -4.5_f32), (4.5, -4.5), (-4.5, 4.5), (4.5, 4.5)] {
+        painter.rect_filled(
+            egui::Rect::from_center_size(egui::pos2(c.x + dx, c.y + dy), vec2(6.0, 6.0)),
+            CornerRadius::same(2),
+            color,
+        );
+    }
+}
+
+/// 设置：齿轮（圆 + 外侧四个短齿）。
+fn icon_settings(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    let c = rect.center();
+    painter.circle_stroke(c, 5.6, Stroke::new(1.4_f32, color));
+    painter.circle_filled(c, 2.0, color);
+    for (dx, dy) in [(0.0_f32, -9.0_f32), (0.0, 9.0), (-9.0, 0.0), (9.0, 0.0)] {
+        painter.line_segment(
+            [
+                egui::pos2(c.x + dx * 0.72, c.y + dy * 0.72),
+                egui::pos2(c.x + dx, c.y + dy),
+            ],
+            Stroke::new(2.0_f32, color),
+        );
+    }
+}
+
+/// 迷你：一个小圆角窗口 + 里面一条细进度。
+fn icon_mini(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    let c = rect.center();
+    let win = egui::Rect::from_center_size(c, vec2(17.0, 11.0));
+    painter.rect_stroke(
+        win,
+        CornerRadius::same(3),
+        Stroke::new(1.3_f32, color),
+        egui::StrokeKind::Inside,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(win.left() + 4.0, win.bottom() - 3.0),
+            egui::pos2(win.right() - 4.0, win.bottom() - 3.0),
+        ],
+        Stroke::new(1.3_f32, color),
+    );
+}
+
+/// 关于：圆圈里一个 i。
+fn icon_info(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    let c = rect.center();
+    painter.circle_stroke(c, 8.0, Stroke::new(1.3_f32, color));
+    painter.circle_filled(egui::pos2(c.x, c.y - 4.0), 1.3, color);
+    painter.line_segment(
+        [egui::pos2(c.x, c.y - 0.5), egui::pos2(c.x, c.y + 4.5)],
+        Stroke::new(1.6_f32, color),
+    );
+}
+
+/// 停止：一个小方块。
+fn icon_stop(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    painter.rect_filled(
+        egui::Rect::from_center_size(rect.center(), vec2(10.0, 10.0)),
+        CornerRadius::same(2),
+        color,
+    );
 }
