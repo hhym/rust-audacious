@@ -3,18 +3,38 @@
 //! 监听 127.0.0.1 随机端口，端口号写入 `control.port`，
 //! 与 Audacious 里 audtool ↔ GUI 的关系一致。
 
+#[cfg(not(target_os = "android"))]
 use std::io::{BufRead, BufReader, Write};
+#[cfg(not(target_os = "android"))]
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 
-use audcore::ipc::{Response, Request, port_file, DEFAULT_PORT};
+use audcore::ipc::{Response, Request};
+#[cfg(not(target_os = "android"))]
+use audcore::ipc::{DEFAULT_PORT, port_file};
 use audcore::plugin;
 use serde_json::json;
 
 use crate::engine::{Cmd, Shared};
 
 /// 启动控制服务，返回实际监听端口。
+///
+/// Android 上没有 `audtool`，也不该占一个本地端口，直接返回 0。
 pub fn serve(shared: Shared) -> anyhow::Result<u16> {
+    #[cfg(target_os = "android")]
+    {
+        let _ = shared;
+        return Ok(0);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        serve_desktop(shared)
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn serve_desktop(shared: Shared) -> anyhow::Result<u16> {
     let listener = match TcpListener::bind(("127.0.0.1", DEFAULT_PORT)) {
         Ok(l) => l,
         Err(_) => TcpListener::bind(("127.0.0.1", 0))?,
@@ -46,6 +66,7 @@ pub fn serve(shared: Shared) -> anyhow::Result<u16> {
     Ok(port)
 }
 
+#[cfg(not(target_os = "android"))]
 fn handle_client(mut stream: TcpStream, shared: Shared) -> anyhow::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();

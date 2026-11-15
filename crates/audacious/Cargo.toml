@@ -8,12 +8,18 @@ license.workspace = true
 name = "audacious-rs"
 path = "src/main.rs"
 
+# Android 的 NativeActivity 需要 cdylib（导出 android_main）；桌面顺便编一份 rlib。
+[lib]
+name = "audacious_rs"
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 audcore = { path = "../audcore" }
 audplugins = { path = "../audplugins" }
-eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 egui = "0.31"
-rodio = { version = "0.20", features = ["symphonia-all"] }
+# cpal 在 Android 上走 oboe 后端；cpal-shared-stdcxx 让 oboe 用共享 C++ 运行库，
+# 否则 cargo-apk 打出的 APK 会缺 libc++_shared.so。桌面目标不受影响。
+rodio = { version = "0.20", features = ["symphonia-all", "cpal-shared-stdcxx"] }
 symphonia = { version = "0.5", features = ["all"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -25,14 +31,23 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 base64 = "0.22"
 qrcode = "0.14"
 
+# 桌面：x11 + wayland 后端
+[target.'cfg(not(target_os = "android"))'.dependencies]
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+
+# Android：winit 的 native-activity 后端（GLES + NativeActivity）
+[target.'cfg(target_os = "android")'.dependencies]
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "android-native-activity"] }
+android-activity = { version = "0.6", features = ["native-activity"] }
+android_logger = "0.14"
+# 显式打开 winit 的 native-activity 后端与 cpal 的 oboe 后端（eframe/rodio 已间接带，
+# 这里写明确保特性不会被上游改动悄悄关掉）
+winit = { version = "0.30", features = ["android-native-activity"] }
+cpal = { version = "0.15", features = ["oboe-shared-stdcxx"] }
+
 [package.metadata.android]
 package = "io.github.hhym.audaciousrs"
 apk_name = "audacious-rs"
 build_targets = ["aarch64-linux-android"]
 res = "../../android/res"
 manifest = "../../android/AndroidManifest.xml"
-
-# Android 分支：winit 要有 android-native-activity 后端，cpal 走 oboe（不依赖系统 ALSA）
-[target.'cfg(target_os = "android")'.dependencies]
-winit = { version = "0.30", features = ["android-native-activity"] }
-cpal = { version = "0.15", features = ["oboe-shared-stdcxx"] }

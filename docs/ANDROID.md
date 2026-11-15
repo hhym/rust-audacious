@@ -3,9 +3,10 @@
 `android` 分支的任务：把 `audacious-rs` 搬到安卓手机上跑。桌面主线（`main`）保持不动，
 安卓相关的改动只落在这个分支，成熟后再合回。
 
-当前状态：**P0 代码就位、P2 布局可在桌面预览**。分支里已有目录解析、Android 启动环境、
-APK 清单模板、构建脚本、手机布局；但还没在真机上跑过——这台开发机没有 Android SDK/NDK，
-APK 编译验证要在有 SDK 的机器上做。
+当前状态：**P0 完成 + 手机布局可在桌面预览**。arm64 的可安装 APK 已经能编出来
+（`dist/rust-audacious-5.18.0-android-arm64.apk`，debug 证书签名），
+`android_main` / `ANativeActivity_onCreate` 导出符号、清单、资源、native 库都校验过；
+还差真机跑一遍（开发机没有设备/模拟器，adb 装包和首启验证要在手机上做）。
 
 手机布局可以在桌面直接看：
 
@@ -16,84 +17,77 @@ AUDACIOUS_RS_DATA_DIR=~/.config cargo +stable run -p audacious-rs
 
 ![手机布局预览](screenshot-mobile-layout.png)
 
-## 一、代码层面已经铺好的东西
+## 一、构建链路（已可用）
+
+```bash
+export ANDROID_HOME=$HOME/android-sdk          # platform-34 + build-tools 34 + ndk 26
+export JAVA_HOME=/path/to/jdk17                # keytool / apksigner 需要 JDK 17
+./scripts/build-android.sh                     # release，产出 dist/rust-audacious-<ver>-android-arm64.apk
+./scripts/build-android.sh --debug             # 调试包
+```
+
+脚本的做法是**不用 cargo-apk**：`cargo build` → `aapt2 compile/link` →
+`zip` 塞 `lib/arm64-v8a/*.so` → `zipalign -p 4` → `apksigner` 签 debug 证书。
+原因是 `cargo-apk`（0.10）在 workspace 根清单上会报
+`virtual manifests must be configured with [workspace]`，绕不过去。
+
+几点避免踩坑：
+
+- **JDK 17**：`sdkmanager`、`apksigner` 都是 class 61，Java 11 起不来。
+- **代理变量**：`HTTP_PROXY` 为空串会让 `sdkmanager` 直接抛 `MalformedURLException`，先 `unset`。
+- **NDK 26 默认 4KB 页**：脚本给链接器加了 `-Wl,-z,max-page-size=16384`，兼容 Android 15 的 16KB 页设备。
+- **oboe 的 C++ 运行库**：开了 `cpal-shared-stdcxx` 并把 `libc++_shared.so` 一起打进 APK，
+  否则 cpal 的 Android 后端一初始化就找不到符号。
+
+## 二、代码层面做了什么
 
 | 项 | 位置 | 说明 |
 |---|---|---|
-| 数据目录统一 | `audcore::config::data_dir()` | 原来 9 处各写一份 `dirs::config_dir().unwrap_or(".").join(APP_NAME)`；现在统一走这个函数。它先看环境变量 `AUDACIOUS_RS_DATA_DIR`，再看 `dirs::config_dir()`，最后退回当前目录。Android 上 `dirs` 拿不到路径，启动时把 App 私有目录塞进这个环境变量即可 |
-| APK 清单模板 | `android/AndroidManifest.xml` | `NativeActivity` + `android.app.lib_name=audacious_rs`，已声明 INTERNET 与读媒体音频权限 |
-| 名称资源 | `android/res/values/strings.xml` | App 名 |
-| 构建脚本 | `scripts/build-android.sh` | 检查 target / NDK / cargo-apk，再 `cargo apk build --release`，最后打印 APK 路径与 sha256 |
-| Android 启动环境 | `main.rs::init_android_env` | 设置 `AUDACIOUS_RS_DATA_DIR=/data/data/<pkg>/files`，日志改写到 `app.log`；`audtool` 的 TCP 服务在 Android 上不启动 |
-| Android 依赖 | `crates/audacious/Cargo.toml` | 目标级依赖：`winit` 开 `android-native-activity`，`cpal` 开 `oboe-shared-stdcxx` |
-| 手机布局 | `app.rs::mobile_nav_bar / mobile_command_bar / mobile_play_bar` | 侧栏变顶部可横滑导航（40px 高），菜单栏/工具栏/状态栏收成一条命令条，播放条换封面+三键+满宽进度；窄屏列表只留 序号/标题/时长 三列、行高 34px；`config.mobile_layout` 或窗口 <700px 自动生效 |
+| 共用入口 | `crates/audacious/src/lib.rs` | 桌面 `run()` 与 Android `android_main()` 共用同一套 app/engine；`main.rs` 只剩一行转调 |
+| 数据目录 | `audcore::config::data_dir()` | 认 `AUDACIOUS_RS_DATA_DIR`；`android_main` 先把 `Context` 私有目录（`internal_data_path()`）塞进去再 `Config::load()`，拿不到才退回 `/data/data/<pkg>/files` |
+| 日志 | `lib.rs::init_logging()` | Android 走 `android_logger`（`adb logcat -s audacious`）+ 私有目录 `app.log` |
+| 控制端口 | `ipc_server::serve()` | Android 直接返回 0，不监听 TCP；`handle_client` 等 TCP 代码全部 `cfg(not(android))` |
+| 音频后端 | `rodio` 特性 | `cpal-shared-stdcxx` → cpal 走 oboe（AAudio/OpenSL），没有设备时引擎仍退回静音解码 |
+| 网络 | `audplugins/Cargo.toml` | 桌面 `native-tls`，Android `rustls-tls`（Android 没有系统 OpenSSL） |
+| 依赖特性 | `crates/audacious/Cargo.toml` | 按目标拆 eframe 特性：桌面 `x11/wayland`，Android `android-native-activity` |
+| APK 清单 | `android/AndroidManifest.xml` | `NativeActivity` + `android.app.lib_name=audacious_rs`、`uses-sdk 26/34`、媒体权限 |
+| 图标 | `android/res/mipmap-*` | 由 `crates/audacious/assets/icon.png` 缩放出的 5 档 launcher 图标 |
+| CJK 字体 | `theme::cjk_candidates()` | 已带 `/system/fonts/NotoSansCJK-Regular.ttc` 等 Android 路径 |
+| 手机布局 | `app.rs::mobile_mode / mobile_command_bar / mobile_play_bar` | 侧栏变顶部可横滑导航（40px 高），菜单栏/工具栏/状态栏收成一条命令条，播放条换封面+三键+满宽进度；窄屏列表只留 序号/标题/时长 三列、行高 34px；`config.mobile_layout` 或窗口 <700px 自动生效 |
 
 已实测（桌面 430×900 窗口）：导航切换、命令条按钮、播放条播放/暂停/切歌、进度点按 seek、
-窄屏三列表格都正常；`cargo test` 50 用例全绿。
+窄屏三列表格都正常；`cargo test --workspace` 全绿。APK 侧只做了静态校验，真机首启还没跑。
 
-## 二、还要做的四步
+## 三、真机上还要验的（P1）
 
-### P0 能编译、能起窗口
+1. `adb install -r dist/rust-audacious-<ver>-android-arm64.apk`，首启看 `adb logcat -s audacious`
+   有没有启动日志与 eframe 报错。
+2. 本地文件选择：桌面用的目录浏览器（`Browser`）在 Android 上读不到 `/storage`，
+   要接 SAF（`ACTION_OPEN_DOCUMENT`）+ `ContentResolver` 取 fd，再交给 symphonia。
+3. 音频焦点：来电/其他 App 抢占时暂停，接 `AAudio` 的焦点回调。
+4. 插件：`boa` + `reqwest(rustls)` 在 arm64 上重跑一遍 `audplugins` 的用例。
 
-1. `crates/audacious/Cargo.toml` 里给 Android 加依赖：
-   ```toml
-   [target.'cfg(target_os = "android")'.dependencies]
-   android-activity = { version = "0.6", features = ["native-activity"] }
-   ```
-   `eframe` 在 Android 上要走 `android-activity` 后端（winit 的 `android-native-activity` feature）。
-2. `main.rs` 在 Android 上先设置数据目录再启动 UI：
-   ```rust
-   #[cfg(target_os = "android")]
-   std::env::set_var("AUDACIOUS_RS_DATA_DIR", android_data_dir());
-   ```
-   `android_data_dir()` 用 JNI 调 `Context.getFilesDir()`；拿不到就退回 `/data/data/io.github.hhym.audaciousrs/files`。
-3. `Cargo.toml` 加 `[package.metadata.android]`（包名 `io.github.hhym.audaciousrs`、`apk_name`、
-   `build_targets = ["aarch64-linux-android"]`、清单/资源路径指向 `android/`）。
-4. 首次构建后在真机上确认：窗口起来、日志能看到「控制端口」那行。
+## 四、界面（P2）
 
-### P1 音频能出声
+主结构已完成（见上表「手机布局」）。剩下的是真机细节：
 
-- 现在输出走 `cpal`（Linux 是 ALSA）。Android 上 `cpal` 要用 oboe 后端：
-  ```toml
-  cpal = { version = "0.15", features = ["oboe-shared-stdcxx"] }
-  ```
-- 关掉 `audtool` 的 TCP 控制端口（Android 上没意义，还白白占端口）；`ipc.rs` 加 `cfg(not(target_os = "android"))`。
-- 音频焦点：电话进来要暂停，接 `AAudioStream` 的焦点回调（后续做）。
-- 文件选择：桌面用的 `rfd` 在 Android 上走 SAF（`ACTION_OPEN_DOCUMENT`），要换成 JNI 调 Intent，再用 `ContentResolver` 打开 fd 交给 symphonia 的 `MediaSourceStream` 读。
+- 底部播放条避开手势条（读 `WindowInsets`），现在是固定高度
+- 顶部导航在刘海屏上的安全区内边距
+- 按钮最小可点面积统一到 44×44（目前命令条个别按钮偏小）
 
-### P2 触屏界面
+## 五、打包发布（P3）
 
-桌面的 1180×720 布局直接塞进手机不行，需要一套 `mobile` 布局分支：
+- `./scripts/build-android.sh` 出 arm64 单架构包；正式包换自己的 keystore（`ANDROID_DEBUG_KEYSTORE` 可指向别的密钥库）
+- GitHub Release 资产：`rust-audacious-<ver>-android-arm64.apk`，与桌面三件套并列
 
-- 侧栏改成抽屉（顶部一条汉堡按钮，点开覆盖 80% 宽）
-- 列表行高从 30px 提到 44px，按钮最小可点面积 44×44
-- 播放条固定在底部安全区（避开手势条，读 `WindowInsets`）
-- 迷你卡片（5.15.0 那套深色圆角卡片）改成底部常驻条，宽度铺满
-- 歌词页字号按屏幕宽度算，不用固定 28px
-
-### P3 打包发布
-
-- 用 `cargo apk` 出 `arm64-v8a` 单架构 APK，再用 `apksigner` 签一个自签证书
-- GitHub Release 加一个 `rust-audacious-<ver>-android-arm64.apk`，跟桌面三件套并列
-- 先在真机（Android 10+）验证：本地 MP3 播放、内嵌封面、歌词、网络音源插件（`boa` 那套 JS 宿主在 arm64 上要重跑一遍用例）
-
-## 三、已知坑（先记下来）
-
-1. **字体**：桌面版是运行时从系统找 CJK 字体，Android 上字体路径不同（`/system/fonts/NotoSansCJK-Regular.ttc`），找不到就会满屏方块——要在 `theme::cjk_candidates()` 里补 Android 路径。
-2. **插件线程栈**：`scan_async` 用 16MB 栈跑插件扫描，Android 主线程栈小，必须在后台线程里跑，别顺手挪到主线程。
-3. **boa 引擎**：纯 Rust，能编到 arm64；但 `reqwest` 在 Android 上要带 rustls（不能依赖系统 OpenSSL）。
-4. **HTTP 白名单**：插件 fetch 的域名白名单逻辑不变，但 Android 上要先声明 INTERNET 权限（清单里已加）。
-5. **存储权限**：Android 13 起读本地音乐要 `READ_MEDIA_AUDIO`，别再用老的 `READ_EXTERNAL_STORAGE`。
-
-## 四、分支工作流
+## 六、分支工作流
 
 ```bash
 git checkout android
 # 改代码 → 桌面 cargo test 仍然要绿（不破坏 main 的功能）
-cargo +stable test
-./scripts/build-android.sh          # 需要 NDK + cargo-apk
+cargo test --workspace
+./scripts/build-android.sh          # 需要 ANDROID_HOME + JDK 17
 git push origin android
 ```
 
 桌面发布照旧走 `main`：`./scripts/package-windows.sh` + `git archive` + `gh release create`。
-安卓包等 P3 再加进 Release 资产。

@@ -6,6 +6,9 @@
     android:versionCode="1"
     android:versionName="5.18.0">
 
+    <!-- minSdk 26：Android 8.0 起才有稳定的 AAudio/oboe 输出与 SAF 行为 -->
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34" />
+
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- 读本地音乐：Android 13 起细分 -->
