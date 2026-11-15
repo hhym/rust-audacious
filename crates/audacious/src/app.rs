@@ -2790,6 +2790,10 @@ impl App {
 
     /// 左侧栏：应用名、在线音源、导航、我的歌单、按专辑。
     fn sidebar_ui(&mut self, ctx: &egui::Context, p: &Palette) {
+        // 弹层要画在侧栏面板外面，否则会被 236px 宽的侧栏裁掉
+        let mut picker_pos: Option<egui::Pos2> = None;
+        // 刚点开的那一帧别走「点外面收起」，否则同一次点击立刻关掉
+        let mut sidebar_just_opened = false;
         egui::SidePanel::left("sidebar")
             .exact_width(236.0)
             .resizable(false)
@@ -2807,7 +2811,6 @@ impl App {
                     .map(|pl| pl.name())
                     .unwrap_or_else(|| self.t("本地音频", "Local audio").to_string());
                 let source_count = self.media_plugins.len();
-                let mut picker_pos: Option<egui::Pos2> = None;
                 ui.horizontal(|ui| {
                     let (rect, _) = ui.allocate_exact_size(vec2(30.0, 30.0), Sense::hover());
                     ui.painter()
@@ -2854,18 +2857,10 @@ impl App {
                             if self.plugin_picker_open {
                                 self.plugin_page = self.search_plugin / Self::PLUGIN_PAGE_SIZE;
                             }
+                            sidebar_just_opened = self.plugin_picker_open;
                         }
                     });
                 });
-                if self.plugin_picker_open && self.plugin_picker_source == "sidebar" {
-                    if let Some(pos) = picker_pos {
-                        let names: Vec<String> =
-                            self.media_plugins.iter().map(|pl| pl.name()).collect();
-                        let area_id = egui::Id::new(("main-plugin-picker", "sidebar"));
-                        self.plugin_picker_ui(ui.ctx(), pos, &names, p, true, area_id);
-                    }
-                }
-
                 // 播放封面 + 「＋」添加文件
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -3089,6 +3084,12 @@ impl App {
                     }
                 }
             });
+        if self.plugin_picker_open && self.plugin_picker_source == "sidebar" {
+            let names: Vec<String> = self.media_plugins.iter().map(|pl| pl.name()).collect();
+            let pos = picker_pos.unwrap_or_else(|| egui::pos2(16.0, 120.0));
+            let area_id = egui::Id::new(("main-plugin-picker", "sidebar"));
+            self.plugin_picker_ui(ctx, pos, &names, p, !sidebar_just_opened, area_id);
+        }
     }
 
     /// 侧栏里的一行导航（左对齐，选中时铺底色）。
