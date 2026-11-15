@@ -28,6 +28,17 @@ pub enum Status {
 pub enum Event {
     Qr(Result<QrData, String>),
     Poll(Result<(String, String), String>),
+    /// `signIn()` 跑完（成功返回账号信息，失败带错误）
+    SignInDone(Result<serde_json::Value, String>),
+}
+
+/// 登录窗口的两种工作方式。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mode {
+    /// 宿主拉 `loginQr` + 轮询 `loginPoll`
+    Qr,
+    /// 插件自己跑 `signIn()`，宿主只负责显示它推上来的二维码
+    SignIn,
 }
 
 pub struct QrData {
@@ -39,6 +50,7 @@ pub struct QrData {
 
 pub struct LoginState {
     pub open: bool,
+    pub mode: Mode,
     pub plugin_name: String,
     plugin: Option<MygoPlugin>,
     key: String,
@@ -48,6 +60,8 @@ pub struct LoginState {
     pub message: String,
     texture: Option<egui::TextureHandle>,
     rx: Option<Receiver<Event>>,
+    /// signIn 模式下插件推上来的提示队列
+    prompt_rx: Option<Receiver<serde_json::Value>>,
     next_poll: Option<Instant>,
     image_bytes: Option<Vec<u8>>,
 }
@@ -56,6 +70,7 @@ impl Default for LoginState {
     fn default() -> Self {
         Self {
             open: false,
+            mode: Mode::Qr,
             plugin_name: String::new(),
             plugin: None,
             key: String::new(),
@@ -65,6 +80,7 @@ impl Default for LoginState {
             message: String::new(),
             texture: None,
             rx: None,
+            prompt_rx: None,
             next_poll: None,
             image_bytes: None,
         }
@@ -79,14 +95,34 @@ impl LoginState {
     /// 打开窗口并立刻向插件要一张新二维码。
     pub fn open(&mut self, plugin: MygoPlugin) {
         self.open = true;
+        self.mode = Mode::Qr;
         self.plugin_name = plugin.display_name();
         self.plugin = Some(plugin);
         self.reset_qr();
     }
 
+    /// 插件自己实现 `signIn()` 时走这条路径：开线程跑登录，宿主把提示显示出来。
+    pub fn open_sign_in(&mut self, plugin: MygoPlugin) {
+        self.close();
+        self.open = true;
+        self.mode = Mode::SignIn;
+        self.plugin_name = plugin.display_name();
+        self.status = Status::Loading;
+        let (prompt_tx, prompt_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        self.prompt_rx = Some(prompt_rx);
+        self.rx = Some(done_rx);
+        std::thread::spawn(move || {
+            let result = plugin.sign_in_with(prompt_tx).map_err(|e| e.to_string());
+            let _ = done_tx.send(Event::SignInDone(result));
+        });
+    }
+
     pub fn close(&mut self) {
         self.open = false;
         self.plugin = None;
+        self.mode = Mode::Qr;
+        self.prompt_rx = None;
         self.texture = None;
         self.image_bytes = None;
         self.key.clear();
@@ -131,8 +167,50 @@ impl LoginState {
             return;
         }
 
+        if let Some(rx) = &self.prompt_rx {
+            loop {
+                match rx.try_recv() {
+                    Ok(value) => {
+                        let tip = value["text"]
+                            .as_str()
+                            .or_else(|| value["tip"].as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let qr = value["qr"]
+                            .as_str()
+                            .or_else(|| value["qrUrl"].as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if !tip.is_empty() {
+                            self.tip = tip;
+                        }
+                        if !qr.is_empty() {
+                            self.link = qr.clone();
+                            if let Some(tex) = qr_texture(ctx, &qr) {
+                                self.texture = Some(tex);
+                            }
+                            self.status = Status::Waiting;
+                        }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.prompt_rx = None;
+                        break;
+                    }
+                }
+            }
+        }
+
         if let Some(rx) = &self.rx {
             match rx.try_recv() {
+                Ok(Event::SignInDone(Ok(_))) => {
+                    self.rx = None;
+                    self.status = Status::Done;
+                }
+                Ok(Event::SignInDone(Err(err))) => {
+                    self.rx = None;
+                    self.status = Status::Failed(err);
+                }
                 Ok(Event::Qr(Ok(qr))) => {
                     self.rx = None;
                     self.key = qr.key;
@@ -322,8 +400,21 @@ impl LoginState {
 
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.button(if zh { "刷新二维码" } else { "Refresh QR" }).clicked() {
+                if self.mode == Mode::Qr
+                    && ui.button(if zh { "刷新二维码" } else { "Refresh QR" }).clicked()
+                {
                     want_refresh = true;
+                }
+                if self.mode == Mode::SignIn {
+                    ui.label(
+                        egui::RichText::new(if zh {
+                            "登录流程由插件自己驱动（host.signInPrompt）"
+                        } else {
+                            "Login is driven by the plugin itself (host.signInPrompt)"
+                        })
+                        .small()
+                        .color(p.dim),
+                    );
                 }
                 if self.status == Status::Done
                     && ui.button(if zh { "完成" } else { "Done" }).clicked()
@@ -415,6 +506,30 @@ fn parse_qr(value: serde_json::Value) -> Result<QrData, String> {
         link,
         image,
     })
+}
+
+/// 把二维码内容编成纹理（插件只给字符串时用）。
+fn qr_texture(ctx: &egui::Context, content: &str) -> Option<egui::TextureHandle> {
+    let code = qrcode::QrCode::new(content.as_bytes()).ok()?;
+    let width = code.width();
+    let colors = code.to_colors();
+    let mut pixels = vec![egui::Color32::WHITE; width * width];
+    for (i, color) in colors.iter().enumerate() {
+        if *color == qrcode::Color::Dark {
+            if let Some(pixel) = pixels.get_mut(i) {
+                *pixel = egui::Color32::BLACK;
+            }
+        }
+    }
+    let image = egui::ColorImage {
+        size: [width, width],
+        pixels,
+    };
+    Some(ctx.load_texture(
+        "sign-in-qr",
+        image,
+        egui::TextureOptions::NEAREST,
+    ))
 }
 
 fn decode_texture(ctx: &egui::Context, bytes: &[u8]) -> Option<egui::TextureHandle> {

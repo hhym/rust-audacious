@@ -145,6 +145,8 @@ export function lyrics({ id }) {
 | `host.crypto.md5(text)` | 十六进制摘要 |
 | `host.crypto.aesEcbEncrypt(key, text)` | AES-ECB + PKCS#7，输出十六进制 |
 | `host.openURL(url)` | 用系统浏览器打开 |
+| `host.signInPrompt({ qr, text })` | 把二维码内容推给宿主的扫码登录窗（宿主本地编码成二维码并显示），立即返回 |
+| `host.spawn(command, args)` | 拉起插件自带的 helper，返回 `{ write, readLine, kill, closeStdin, wait }`；命令必须在 `permissions.process` 白名单里（支持 `bin/qishui-helper-*` 这种通配） |
 | `URL` / `URLSearchParams` / `setTimeout` / `setInterval` / `console` | 常规 JS 环境 |
 | `AbortController` / `AbortSignal` | 插件做请求超时/取消时用；宿主是同步 HTTP，`abort()` 只能拦住「还没发起」的请求，但 `signal.aborted` / `reason` / `addEventListener` / `AbortSignal.abort()` / `AbortSignal.timeout()` 都可用 |
 
@@ -263,15 +265,21 @@ export async function loginPoll({ key }) {
 - 登录态由插件自己保存（`host.storage.set("session", ...)` 或 `settings`），宿主不接触账号密码，也不存 cookie 容器；
 - 宿主只负责：拉二维码 → 解码 PNG/JPEG（也接受 http 图片地址，会走宿主网络）→ 显示 → 每 2 秒轮询 → 成功时提示；
 - `status` 为 `done` 后窗口出现「完成」按钮，`expired` 提示刷新二维码；
-- 详细的「登录窗口 + 浏览器回跳」还没做，需要这类登录的插件可以先走这个扫码流程。
+- 如果插件自己就能跑完整个登录（例如 QQ Music 0.3.0 的 `signIn()`：自己拉二维码 → 轮询 ptqrlogin → 换 cookie），
+  直接 `export async function signIn()` 即可，登录过程中调用 `host.signInPrompt({ qr, text })` 把二维码交给宿主显示，
+  宿主会开一个「登录流程由插件自己驱动」的窗口，方法返回后窗口显示「登录成功」。
 
 `examples/mygo-plugins/qr-demo/` 是一个不联网的演示插件（点「刷新二维码」会重新生成，4 次轮询后进入 `done`）。
 
 ### MyGo 标准的限制
 
 - 没有真正的 ESM 语义：`import` 被改写成 `require`，动态 `import()`、顶层 `await` 不支持。
-- `host.spawn`（启动外部程序）、`host.signInPrompt` / `waitForRedirect` / `webSignIn`（浏览器回跳登录）
-  这版都还没实现，调用会抛错；`permissions.process` 因此不生效。扫码登录改走下面的 `loginQr` / `loginPoll` 扩展。
+- `host.waitForRedirect` / `host.webSignIn`（浏览器回跳登录）还没实现，调用会抛错。
+- `host.spawn` 只允许 `permissions.process` 里声明过的程序：相对路径会被限制在插件目录内，
+  没声明的命令直接拒绝；子进程的 stdin/stdout 走 JSON 行协议，helper 由插件包自己带（汽水音乐 1.0.12 的
+  `bin/qishui-helper-windows-amd64.exe` 属于这种情况，Linux 包缺该二进制时会得到「请允许插件启动程序」提示）。
+- `host.signInPrompt` 只是把二维码显示出来并立即返回，轮询仍由插件自己做；宿主不碰账号密码。
+  二维码是本地编码的（`qrcode` crate），不依赖外部图片服务。
 - `fetch` 只能拿到文本 / JSON（没有 `arrayBuffer`），也没有流式响应。
 - `stream` / `getMediaSource` 返回的 `headers`（Referer、User-Agent、Cookie…）会随下载请求一起发；
   缓存文件按「url + headers」取指纹，同一地址换了 Referer 不会错误命中旧文件。

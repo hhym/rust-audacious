@@ -56,6 +56,23 @@
       .map(function (e) { return encodeURIComponent(e[0]) + "=" + encodeURIComponent(e[1]); })
       .join("&");
   };
+  UrlSearchParams.prototype.sort = function () {
+    this.__entries.sort(function (a, b) {
+      return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0;
+    });
+  };
+  UrlSearchParams.prototype.entries = function () {
+    return this.__entries[Symbol.iterator]();
+  };
+  UrlSearchParams.prototype.keys = function () {
+    return this.__entries.map(function (e) { return e[0]; })[Symbol.iterator]();
+  };
+  UrlSearchParams.prototype.values = function () {
+    return this.__entries.map(function (e) { return e[1]; })[Symbol.iterator]();
+  };
+  Object.defineProperty(UrlSearchParams.prototype, "size", {
+    get: function () { return this.__entries.length; },
+  });
   UrlSearchParams.prototype.forEach = function (fn) {
     this.__entries.forEach(function (e) { fn(e[1], e[0], this); }, this);
   };
@@ -154,6 +171,40 @@
   };
   Headers.prototype.set = function (k, v) { this.__map[String(k).toLowerCase()] = String(v); };
   Headers.prototype.has = function (k) { return this.__map[String(k).toLowerCase()] !== undefined; };
+  // 原生层把同名头用换行拼接，这里拆回数组（fetch 规范里 Set-Cookie 单独给）
+  Headers.prototype.getSetCookie = function () {
+    var raw = this.__map["set-cookie"];
+    if (!raw) return [];
+    return String(raw).split("\n").filter(function (v) { return v !== ""; });
+  };
+  Headers.prototype.append = function (k, v) {
+    var key = String(k).toLowerCase();
+    this.__map[key] = this.__map[key] === undefined ? String(v) : this.__map[key] + "\n" + String(v);
+  };
+  Headers.prototype.entries = function () {
+    var self = this;
+    var keys = Object.keys(this.__map);
+    var i = 0;
+    return {
+      next: function () {
+        if (i >= keys.length) return { done: true, value: undefined };
+        var k = keys[i++];
+        return { done: false, value: [k, self.__map[k]] };
+      },
+    };
+  };
+  Headers.prototype.keys = function () { return this.entries(); };
+  Headers.prototype.values = function () {
+    var self = this;
+    var keys = Object.keys(this.__map);
+    var i = 0;
+    return {
+      next: function () {
+        if (i >= keys.length) return { done: true, value: undefined };
+        return { done: false, value: self.__map[keys[i++]] };
+      },
+    };
+  };
   Headers.prototype.forEach = function (fn) {
     Object.keys(this.__map).forEach(function (k) { fn(this.__map[k], k, this); }, this);
   };
@@ -346,8 +397,10 @@
     removeDataDir: function (name) {
       __log("host.removeDataDir 这版未实现: " + name);
     },
-    signInPrompt: function () {
-      throw new Error("这版宿主不支持 host.signInPrompt（登录窗口）");
+    signInPrompt: function (value) {
+      // 插件把二维码内容和提示语推给宿主窗口；宿主立即返回，轮询由插件自己继续
+      __signInPrompt(JSON.stringify(value === undefined ? null : value));
+      return Promise.resolve(value);
     },
     waitForRedirect: function () {
       throw new Error("这版宿主不支持 host.waitForRedirect（浏览器回跳）");
@@ -355,8 +408,29 @@
     webSignIn: function () {
       throw new Error("这版宿主不支持 host.webSignIn（网页登录）");
     },
-    spawn: function () {
-      throw new Error("这版宿主不支持 host.spawn（启动外部程序）");
+    spawn: function (command, args) {
+      // 只允许启动 plugin.json 里 permissions.process 声明的程序（或插件目录内的文件）
+      var id = __spawn(JSON.stringify({
+        command: String(command),
+        args: (args || []).map(function (a) { return String(a); }),
+      }));
+      return {
+        write: function (text) {
+          __spawnWrite(id, String(text));
+        },
+        readLine: function () {
+          return Promise.resolve().then(function () { return __spawnReadLine(id, 0); });
+        },
+        kill: function () {
+          __spawnKill(id);
+        },
+        closeStdin: function () {
+          __spawnCloseStdin(id);
+        },
+        wait: function () {
+          return Promise.resolve(__spawnWait(id));
+        },
+      };
     },
   };
 

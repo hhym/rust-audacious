@@ -27,12 +27,29 @@ fn main() {
             "home",
             "loginQr",
             "loginPoll",
+            "signIn",
         ] {
             if plugin.supports(m) {
                 methods.push(m);
             }
         }
         println!("methods : {}", methods.join(", "));
+
+        if std::env::var("TRY_SIGNIN").is_ok() && plugin.supports("signIn") {
+            let (tx, rx) = std::sync::mpsc::channel::<serde_json::Value>();
+            let hook = std::thread::spawn(move || {
+                while let Ok(value) = rx.recv() {
+                    println!("prompt  : qr={} text={}", value["qr"], value["text"]);
+                }
+            });
+            if let Some(mygo) = plugin.as_mygo() {
+                match mygo.sign_in_with(tx) {
+                    Ok(value) => println!("signIn  : OK {}", value),
+                    Err(err) => println!("signIn  : FAIL {err:#}"),
+                }
+            }
+            let _ = hook;
+        }
 
         let query = std::env::var("TRY_QUERY").unwrap_or_else(|_| "晴天".to_string());
         match plugin.search_tracks(&query, 1) {

@@ -151,11 +151,12 @@ MyGo 插件的 ES 模块改写/搜索/取地址/歌词/设置项。共 32 个用
 
 ## 版本
 
-版本号统一在 `Cargo.toml` 的 `workspace.package.version` 维护，按习惯从 **5.0** 起标，当前 **5.11.1**：
+版本号统一在 `Cargo.toml` 的 `workspace.package.version` 维护，按习惯从 **5.0** 起标，当前 **5.12.0**：
 
 - 5.0.0 首个可运行版本
 - 5.0.1 修掉 Windows 发布版弹出控制台窗口的问题，日志改写到 `%APPDATA%\audacious-rs\app.log`
 - 5.1.0 三套主题（橘黄 / 浅色 / 深色）与工具栏换肤按钮，默认橘黄
+- 5.12.0 宿主补齐 MyGo 登录与子进程协议：`host.signInPrompt()` 把插件推来的二维码显示成扫码窗（QQ Music 0.3.0 可直接扫码登录），`host.spawn()` 按 `permissions.process` 白名单拉起插件自带 helper（`write/readLine/kill/closeStdin/wait` 全套）；顺带补 `URLSearchParams.sort()` 与 `Headers.getSetCookie()`，修掉汽水音乐 1.0.12 登录即报「not a callable function」；扫描线程栈加大到 16MB，QQ Music 0.3.0 的混淆 dist 不再把宿主扫崩（45 用例）
 - 5.11.1 修复 MyGo 模块改写：跨多行的 `export { a,\n b as c };` 现在能正确拆开（汽水音乐 1.0.12、QQ Music 0.3.0 之前因残留 `export` 报语法错）；新增 `examples/try_plugins` 插件体检工具
 - 5.11.0 插件窗口重写安装区：网址 / zip / 文件夹 / 拖拽四种装法统一走 `audplugins::install`，装完自动重扫并提示装到了哪个目录
 - 5.10.0 歌词页三种对齐（居左/居中/居右）+ 两种模式（滚动歌词 / 卡拉OK）；卡拉OK 按行时长做扫色高亮，上一行/下一行淡显；选择写进 config.json（老配置缺字段自动补默认值）

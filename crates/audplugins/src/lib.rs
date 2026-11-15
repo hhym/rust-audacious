@@ -253,6 +253,9 @@ pub fn friendly_error(raw: &str) -> String {
 /// 插件标准里约定的导出方法名。
 const KNOWN_METHODS: &[&str] = &[
     "search",
+    "signIn",
+    "loginQr",
+    "loginPoll",
     "getMediaSource",
     "getLyric",
     "getAlbumInfo",
@@ -557,11 +560,332 @@ pub(crate) fn new_context_with_limit(loop_limit: u64) -> Context {
         NativeFunction::from_fn_ptr(native_log),
     )
     .ok();
+    ctx.register_global_callable(
+        js_string!("__signInPrompt"),
+        1,
+        NativeFunction::from_fn_ptr(native_sign_in_prompt),
+    )
+    .ok();
+    ctx.register_global_callable(
+        js_string!("__spawn"),
+        2,
+        NativeFunction::from_fn_ptr(native_spawn),
+    )
+    .ok();
+    ctx.register_global_callable(
+        js_string!("__spawnWrite"),
+        2,
+        NativeFunction::from_fn_ptr(native_spawn_write),
+    )
+    .ok();
+    ctx.register_global_callable(
+        js_string!("__spawnReadLine"),
+        2,
+        NativeFunction::from_fn_ptr(native_spawn_read_line),
+    )
+    .ok();
+    ctx.register_global_callable(
+        js_string!("__spawnKill"),
+        1,
+        NativeFunction::from_fn_ptr(native_spawn_kill),
+    )
+    .ok();
+    ctx.register_global_callable(
+        js_string!("__spawnCloseStdin"),
+        1,
+        NativeFunction::from_fn_ptr(native_spawn_close_stdin),
+    )
+    .ok();
+    ctx.register_global_callable(
+        js_string!("__spawnWait"),
+        1,
+        NativeFunction::from_fn_ptr(native_spawn_wait),
+    )
+    .ok();
 
     if let Err(err) = ctx.eval(Source::from_bytes(include_str!("polyfill.js"))) {
         log::error!("插件运行时初始化失败: {err}");
     }
     ctx
+}
+
+thread_local! {
+    /// 当前线程里插件允许启动的程序（插件目录 + permissions.process 里的模式）。
+    static PROCESS_POLICY: std::cell::RefCell<(std::path::PathBuf, Vec<String>)> =
+        std::cell::RefCell::new((std::path::PathBuf::new(), Vec::new()));
+    /// 登录提示的接收端（插件调 host.signInPrompt 时把二维码推给界面）。
+    static SIGN_IN_SINK: std::cell::RefCell<Option<std::sync::mpsc::Sender<serde_json::Value>>> =
+        std::cell::RefCell::new(None);
+}
+
+/// 设置本线程执行插件代码时允许启动的程序。
+pub fn set_process_policy(dir: std::path::PathBuf, patterns: Vec<String>) {
+    PROCESS_POLICY.with(|slot| *slot.borrow_mut() = (dir, patterns));
+}
+
+/// 设置本线程登录提示的接收端（`None` 表示丢弃）。
+pub fn set_sign_in_sink(sink: Option<std::sync::mpsc::Sender<serde_json::Value>>) {
+    SIGN_IN_SINK.with(|slot| *slot.borrow_mut() = sink);
+}
+
+/// 简单通配符匹配（`*` 匹配任意字符）。
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let pattern = pattern.replace('\\', "/").to_lowercase();
+    let text = text.replace('\\', "/").to_lowercase();
+    let pb: Vec<char> = pattern.chars().collect();
+    let tb: Vec<char> = text.chars().collect();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let mut star: Option<usize> = None;
+    let mut resume = 0usize;
+    while ti < tb.len() {
+        if pi < pb.len() && (pb[pi] == tb[ti] || pb[pi] == '?') {
+            pi += 1;
+            ti += 1;
+        } else if pi < pb.len() && pb[pi] == '*' {
+            star = Some(pi);
+            resume = ti;
+            pi += 1;
+        } else if let Some(star_pos) = star {
+            pi = star_pos + 1;
+            resume += 1;
+            ti = resume;
+        } else {
+            return false;
+        }
+    }
+    while pi < pb.len() && pb[pi] == '*' {
+        pi += 1;
+    }
+    pi == pb.len()
+}
+
+/// 把一段文字包成 JS 异常（boa 的 JsError 只从 JsNativeError 转换）。
+fn js_err(msg: impl Into<String>) -> boa_engine::JsError {
+    let text = msg.into();
+    boa_engine::JsNativeError::typ()
+        .with_message(text)
+        .into()
+}
+
+fn js_arg_string(args: &[boa_engine::JsValue], index: usize) -> String {
+    args.get(index)
+        .and_then(|v| v.as_string())
+        .map(|s| s.to_std_string_escaped())
+        .unwrap_or_default()
+}
+
+fn native_sign_in_prompt(
+    _this: &boa_engine::JsValue,
+    args: &[boa_engine::JsValue],
+    _ctx: &mut boa_engine::Context,
+) -> boa_engine::JsResult<boa_engine::JsValue> {
+    let raw = js_arg_string(args, 0);
+    let value: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+    SIGN_IN_SINK.with(|slot| {
+        if let Some(tx) = slot.borrow().as_ref() {
+            let _ = tx.send(value);
+        }
+    });
+    Ok(boa_engine::JsValue::undefined())
+}
+
+struct ProcHandle {
+    child: std::process::Child,
+    stdin: Option<std::process::ChildStdin>,
+    reader: std::io::BufReader<std::process::ChildStdout>,
+}
+
+fn process_registry() -> &'static std::sync::Mutex<std::collections::HashMap<u32, ProcHandle>> {
+    static REGISTRY: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<u32, ProcHandle>>,
+    > = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn static_counter() -> u32 {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+}
+
+fn resolve_program(dir: &std::path::Path, patterns: &[String], command: &str) -> Option<std::path::PathBuf> {
+    let looks_like_path = command.contains('/') || command.contains('\\') || command.contains('.');
+    if looks_like_path {
+        let candidate = if std::path::Path::new(command).is_absolute() {
+            std::path::PathBuf::from(command)
+        } else {
+            dir.join(command)
+        };
+        let canonical = candidate.canonicalize().ok()?;
+        if !canonical.starts_with(dir.canonicalize().ok()?) {
+            return None;
+        }
+        let rel = canonical.strip_prefix(dir.canonicalize().ok()?).ok()?;
+        let rel_text = rel.to_string_lossy().to_string();
+        let allowed = patterns.iter().any(|p| {
+            glob_match(p, &rel_text)
+                || glob_match(p, &format!("./{rel_text}"))
+                || glob_match(p, &canonical.to_string_lossy())
+        });
+        if allowed && canonical.is_file() {
+            return Some(canonical);
+        }
+        return None;
+    }
+    let allowed = patterns
+        .iter()
+        .any(|p| glob_match(p, command) || p == command);
+    if allowed {
+        Some(std::path::PathBuf::from(command))
+    } else {
+        None
+    }
+}
+
+fn native_spawn(
+    _this: &boa_engine::JsValue,
+    args: &[boa_engine::JsValue],
+    _ctx: &mut boa_engine::Context,
+) -> boa_engine::JsResult<boa_engine::JsValue> {
+    use std::process::{Command, Stdio};
+    let raw = js_arg_string(args, 0);
+    let value: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+    let command = value.get("command").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let list = value
+        .get("args")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let (dir, patterns) = PROCESS_POLICY.with(|slot| slot.borrow().clone());
+    if dir.as_os_str().is_empty() {
+        return Err(js_err("host.spawn: 没有插件上下文"));
+    }
+    let Some(program) = resolve_program(&dir, &patterns, &command) else {
+        return Err(js_err(format!("host.spawn: 插件没有启动 {command} 的权限")));
+    };
+    let mut cmd = Command::new(program);
+    for arg in list {
+        cmd.arg(arg.as_str().unwrap_or_default());
+    }
+    let child = cmd
+        .current_dir(&dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| js_err(format!("host.spawn: {e}")))?;
+    let mut child = child;
+    let stdin = child.stdin.take();
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let id = static_counter();
+    // stderr 单独抽干，避免管道写满把子进程卡住
+    if let Some(mut err) = stderr {
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let _ = err.read_to_end(&mut buf);
+            if !buf.is_empty() {
+                let text = String::from_utf8_lossy(&buf).to_string();
+                for line in text.lines().take(8) {
+                    log::warn!("插件子进程 stderr: {line}");
+                }
+            }
+        });
+    }
+    let handle = ProcHandle {
+        child,
+        stdin,
+        reader: std::io::BufReader::new(stdout.expect("stdout piped")),
+    };
+    process_registry().lock().unwrap().insert(id, handle);
+    Ok(boa_engine::JsValue::from(id as f64))
+}
+
+fn native_spawn_write(
+    _this: &boa_engine::JsValue,
+    args: &[boa_engine::JsValue],
+    _ctx: &mut boa_engine::Context,
+) -> boa_engine::JsResult<boa_engine::JsValue> {
+    use std::io::Write;
+    let id = args.first().and_then(|v| v.as_number()).unwrap_or(0.0) as u32;
+    let text = js_arg_string(args, 1);
+    let mut map = process_registry().lock().unwrap();
+    if let Some(handle) = map.get_mut(&id) {
+        if let Some(stdin) = handle.stdin.as_mut() {
+            stdin
+                .write_all(text.as_bytes())
+                .and_then(|_| stdin.flush())
+                .map_err(|e| js_err(format!("host.spawn.write: {e}")))?;
+        }
+    }
+    Ok(boa_engine::JsValue::undefined())
+}
+
+fn native_spawn_read_line(
+    _this: &boa_engine::JsValue,
+    args: &[boa_engine::JsValue],
+    _ctx: &mut boa_engine::Context,
+) -> boa_engine::JsResult<boa_engine::JsValue> {
+    use std::io::BufRead;
+    let id = args.first().and_then(|v| v.as_number()).unwrap_or(0.0) as u32;
+    let mut line = String::new();
+    let read = {
+        let mut map = process_registry().lock().unwrap();
+        match map.get_mut(&id) {
+            Some(handle) => handle.reader.read_line(&mut line),
+            None => {
+                return Err(js_err("host.spawn.readLine: 进程不存在"))
+            }
+        }
+    };
+    match read {
+        Ok(0) => Err(js_err("host.spawn.readLine: 进程已退出")),
+        Ok(_) => Ok(boa_engine::JsValue::from(boa_engine::JsString::from(
+            line.trim_end_matches(['\n', '\r']).to_string(),
+        ))),
+        Err(e) => Err(js_err(format!("host.spawn.readLine: {e}"))),
+    }
+}
+
+fn native_spawn_kill(
+    _this: &boa_engine::JsValue,
+    args: &[boa_engine::JsValue],
+    _ctx: &mut boa_engine::Context,
+) -> boa_engine::JsResult<boa_engine::JsValue> {
+    let id = args.first().and_then(|v| v.as_number()).unwrap_or(0.0) as u32;
+    if let Some(mut handle) = process_registry().lock().unwrap().remove(&id) {
+        let _ = handle.child.kill();
+    }
+    Ok(boa_engine::JsValue::undefined())
+}
+
+fn native_spawn_close_stdin(
+    _this: &boa_engine::JsValue,
+    args: &[boa_engine::JsValue],
+    _ctx: &mut boa_engine::Context,
+) -> boa_engine::JsResult<boa_engine::JsValue> {
+    let id = args.first().and_then(|v| v.as_number()).unwrap_or(0.0) as u32;
+    if let Some(handle) = process_registry().lock().unwrap().get_mut(&id) {
+        handle.stdin.take();
+    }
+    Ok(boa_engine::JsValue::undefined())
+}
+
+fn native_spawn_wait(
+    _this: &boa_engine::JsValue,
+    args: &[boa_engine::JsValue],
+    _ctx: &mut boa_engine::Context,
+) -> boa_engine::JsResult<boa_engine::JsValue> {
+    let id = args.first().and_then(|v| v.as_number()).unwrap_or(0.0) as u32;
+    let mut map = process_registry().lock().unwrap();
+    if let Some(handle) = map.get_mut(&id) {
+        match handle.child.wait() {
+            Ok(status) => Ok(boa_engine::JsValue::from(status.code().unwrap_or(-1) as f64)),
+            Err(_) => Ok(boa_engine::JsValue::from(-1.0)),
+        }
+    } else {
+        Ok(boa_engine::JsValue::from(-1.0))
+    }
 }
 
 pub(crate) fn platform_name() -> &'static str {
@@ -812,16 +1136,21 @@ fn http_request(config_json: &str) -> String {
         Ok(resp) => {
             let status = resp.status().as_u16();
             let final_url = resp.url().to_string();
-            let headers: serde_json::Map<String, Value> = resp
-                .headers()
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        k.as_str().to_string(),
-                        Value::String(v.to_str().unwrap_or_default().to_string()),
-                    )
-                })
-                .collect();
+            // 同名头（尤其 Set-Cookie）可能有多条，用换行拼起来，JS 侧 getSetCookie() 再拆开
+            let mut headers = serde_json::Map::new();
+            for (k, v) in resp.headers().iter() {
+                let key = k.as_str().to_string();
+                let text = v.to_str().unwrap_or_default().to_string();
+                let entry = headers
+                    .entry(key)
+                    .or_insert_with(|| Value::String(String::new()));
+                if let Value::String(existing) = entry {
+                    if !existing.is_empty() {
+                        existing.push('\n');
+                    }
+                    existing.push_str(&text);
+                }
+            }
             let body = resp.text().unwrap_or_default();
             serde_json::json!({
                 "status": status,
@@ -1377,7 +1706,9 @@ impl Candidate {
 /// 插件顶层写死循环也不会把整个窗口拖成「无响应」。
 pub fn scan_async(dir: PathBuf) -> Receiver<Vec<OnlinePlugin>> {
     let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
         let cache = cache::load_all();
         let mut updates: HashMap<String, cache::Entry> = HashMap::new();
         let mut out = Vec::new();
@@ -1386,7 +1717,11 @@ pub fn scan_async(dir: PathBuf) -> Receiver<Vec<OnlinePlugin>> {
             let snapshot = cache.clone();
             let (tx2, rx2) = std::sync::mpsc::channel();
             let worker = cand.clone();
-            std::thread::spawn(move || {
+            // 混淆过的大插件（如 QQ Music 0.3.0 的 dist）解析时递归很深，
+            // 默认 2MB 线程栈会直接 overflow，这里给足 16MB。
+            std::thread::Builder::new()
+                .stack_size(16 * 1024 * 1024)
+                .spawn(move || {
                 let (plugin, update) = match worker {
                     Candidate::MusicFree(path) => {
                         let (plugin, update) = Plugin::load_using(&path, &snapshot);
@@ -1398,7 +1733,8 @@ pub fn scan_async(dir: PathBuf) -> Receiver<Vec<OnlinePlugin>> {
                     }
                 };
                 let _ = tx2.send((plugin, update));
-            });
+            })
+            .expect("spawn plugin scan worker");
 
             match rx2.recv_timeout(Duration::from_secs(4)) {
                 Ok((plugin, update)) => {
@@ -1427,7 +1763,8 @@ pub fn scan_async(dir: PathBuf) -> Receiver<Vec<OnlinePlugin>> {
 
         out.sort_by_key(|p| p.name());
         let _ = tx.send(out);
-    });
+    })
+        .expect("spawn plugin scanner");
     rx
 }
 
@@ -1711,3 +2048,64 @@ mod header_tests {
 }
 }
 pub mod install;
+
+#[cfg(test)]
+mod spawn_tests {
+    use super::*;
+    use boa_engine::Source;
+
+    #[test]
+    fn glob_match_patterns() {
+        assert!(glob_match("bin/qishui-helper-*", "bin/qishui-helper-windows-amd64.exe"));
+        assert!(glob_match("ffmpeg", "ffmpeg"));
+        assert!(!glob_match("ffmpeg", "ffprobe"));
+        assert!(glob_match("*helper*", "qishui-helper"));
+    }
+
+    #[test]
+    fn spawn_requires_declared_program() {
+        let dir = std::env::temp_dir().join(format!("audplugins-spawn-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        set_process_policy(dir.clone(), vec!["helper.sh".to_string()]);
+        let mut ctx = new_context();
+        let deny = ctx.eval(Source::from_bytes(
+            r#"__spawn(JSON.stringify({command: "rm", args: []}))"#,
+        ));
+        assert!(deny.is_err(), "没声明的程序必须被拒绝");
+        set_process_policy(std::path::PathBuf::new(), Vec::new());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn spawn_pipes_roundtrip() {
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::os::unix::fs::PermissionsExt;
+            let dir = std::env::temp_dir().join(format!("audplugins-pipe-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&dir);
+            let helper = dir.join("helper.sh");
+            std::fs::write(&helper, "#!/bin/sh\nread line\necho \"{\\\"ok\\\":true,\\\"echo\\\":$line}\"\n").unwrap();
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+            set_process_policy(dir.clone(), vec!["helper.sh".to_string()]);
+            let mut ctx = new_context();
+            let reply = ctx
+                .eval(Source::from_bytes(
+                    r#"
+                    var id = __spawn(JSON.stringify({command: "helper.sh", args: []}));
+                    __spawnWrite(id, "ping\n");
+                    var line = __spawnReadLine(id, 0);
+                    __spawnKill(id);
+                    line;
+                    "#,
+                ))
+                .expect("spawn pipeline")
+                .to_string(&mut ctx)
+                .unwrap()
+                .to_std_string_escaped();
+            assert!(reply.contains("ping"), "reply = {reply}");
+            set_process_policy(std::path::PathBuf::new(), Vec::new());
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}

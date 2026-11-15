@@ -437,8 +437,10 @@ impl App {
             Some(mygo) => {
                 if mygo.supports_login() {
                     self.login.open(mygo.clone());
+                } else if mygo.supports_sign_in() {
+                    self.login.open_sign_in(mygo.clone());
                 } else {
-                    self.toast("这个插件没有实现扫码登录（loginQr / loginPoll）");
+                    self.toast("这个插件没有实现扫码登录（loginQr / loginPoll / signIn）");
                 }
             }
             None => self.toast("找不到该插件，先点「重新扫描」"),
@@ -2276,13 +2278,13 @@ impl App {
 
                         // MyGo 插件声明的设置项，直接在这里填
                         if let Some(mygo) = pl.as_mygo() {
-                            if mygo.supports_login() {
+                            if mygo.supports_login() || mygo.supports_sign_in() {
                                 let id = mygo.manifest.id.clone();
                                 if ui
                                     .button(self.t("扫码登录", "Scan to sign in"))
                                     .on_hover_text(self.t(
-                                        "插件支持扫码登录（导出 loginQr / loginPoll）",
-                                        "This plugin supports QR sign-in (loginQr / loginPoll)",
+                                        "插件支持扫码登录（导出了 loginQr / loginPoll 或 signIn）",
+                                        "This plugin supports QR sign-in (loginQr / loginPoll or signIn)",
                                     ))
                                     .clicked()
                                 {
@@ -3728,7 +3730,7 @@ impl App {
             .media_plugins
             .get(self.search_plugin)
             .and_then(|pl| pl.as_mygo())
-            .filter(|mygo| mygo.supports_login())
+            .filter(|mygo| mygo.supports_login() || mygo.supports_sign_in())
             .map(|mygo| (mygo.manifest.id.clone(), mygo.manifest.name.clone()));
         let mut open_login_for: Option<String> = None;
         ui.horizontal(|ui| {
@@ -3746,7 +3748,7 @@ impl App {
                 if ui
                     .button(self.t("扫码登录", "Scan to sign in"))
                     .on_hover_text(format!(
-                        "{}{} 支持扫码登录（loginQr / loginPoll）",
+                        "{}{} 支持扫码登录（loginQr / loginPoll / signIn）",
                         self.t("这个插件", "This plugin"),
                         self.t("：", ": ")
                     ))

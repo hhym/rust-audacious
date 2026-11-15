@@ -253,6 +253,7 @@ impl MygoPlugin {
         if let Some(err) = &self.info.error {
             anyhow::bail!("插件不可用: {err}");
         }
+        crate::set_process_policy(self.dir.clone(), self.process_patterns());
         let mut ctx = mygo_context(self);
         let exports = eval_module(&mut ctx, &self.code)
             .map_err(|e| anyhow::anyhow!("插件代码执行失败: {e}"))?;
@@ -293,6 +294,36 @@ impl MygoPlugin {
     /// 轮询登录状态：`loginPoll({ key })` → `{ status: waiting|scanned|done|expired|failed, message? }`
     pub fn login_poll(&self, key: &str) -> anyhow::Result<Value> {
         self.call("loginPoll", json!({ "key": key }))
+    }
+
+    /// `permissions.process` 里声明的可执行文件模式（字符串数组）。
+    pub fn process_patterns(&self) -> Vec<String> {
+        self.manifest
+            .permissions
+            .process
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// 插件是否自己实现整条登录流程（`signIn()`，登录中通过 `host.signInPrompt` 推二维码）。
+    pub fn supports_sign_in(&self) -> bool {
+        self.info.methods.iter().any(|m| m == "signIn")
+    }
+
+    /// 跑插件的 `signIn()`；登录过程中插件的 `host.signInPrompt` 会推到 `sink`。
+    pub fn sign_in_with(
+        &self,
+        sink: std::sync::mpsc::Sender<serde_json::Value>,
+    ) -> anyhow::Result<Value> {
+        crate::set_sign_in_sink(Some(sink));
+        let result = self.call("signIn", json!({}));
+        crate::set_sign_in_sink(None);
+        result
     }
 
     /// 歌词：`lyrics({id})` → `{lrc, translation}` 或 `{lines}`
@@ -780,5 +811,74 @@ export function broken() { throw new Error("boom"); }
         assert_eq!(out["v"], Value::from("secret-token"));
         plugin.set_setting("apiKey", "");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod sign_in_tests {
+    use super::*;
+
+    fn write_demo(dir: &std::path::Path) {
+        let _ = std::fs::create_dir_all(dir);
+        std::fs::write(
+            dir.join("plugin.json"),
+            r#"{"id":"signin-demo","name":"登录演示","version":"1.0.0","main":"index.js","permissions":{"network":[],"process":["bin/helper-*"]}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("index.js"),
+            r#"
+            export async function signIn() {
+              await host.signInPrompt({ qr: "https://example.com/qr-demo", text: "请扫码登录" });
+              return { name: "demo-user" };
+            }
+            export async function spawnCheck() {
+              const p = host.spawn("bin/helper-linux", []);
+              p.write("ping\n");
+              const line = await p.readLine();
+              p.kill();
+              return { line };
+            }
+            "#,
+        )
+        .unwrap();
+        let _ = std::fs::create_dir_all(dir.join("bin"));
+        std::fs::write(dir.join("bin/helper-linux"), "#!/bin/sh\nread line\necho \"{\\\"echo\\\":\\\"$line\\\"}\"\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                dir.join("bin/helper-linux"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn sign_in_prompt_reaches_host() {
+        let dir = std::env::temp_dir().join(format!("mygo-signin-{}", std::process::id()));
+        write_demo(&dir);
+        let plugin = MygoPlugin::load(&dir);
+        assert!(plugin.info.error.is_none(), "{:?}", plugin.info.error);
+        assert!(plugin.supports_sign_in());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let result = plugin.sign_in_with(tx).expect("signIn");
+        let prompt = rx.recv().expect("提示要推到宿主");
+        assert_eq!(prompt["qr"], "https://example.com/qr-demo");
+        assert_eq!(result["name"], "demo-user");
+        crate::set_process_policy(std::path::PathBuf::new(), Vec::new());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn plugin_can_spawn_whitelisted_helper() {
+        let dir = std::env::temp_dir().join(format!("mygo-spawn-{}", std::process::id()));
+        write_demo(&dir);
+        let plugin = MygoPlugin::load(&dir);
+        let result = plugin.call("spawnCheck", serde_json::json!({})).expect("spawnCheck");
+        assert!(result["line"].as_str().unwrap_or("").contains("ping"), "{result}");
+        crate::set_process_policy(std::path::PathBuf::new(), Vec::new());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
