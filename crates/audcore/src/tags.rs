@@ -4,7 +4,7 @@
 
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::probe::Probe;
-use lofty::tag::Accessor;
+use lofty::tag::{Accessor, ItemKey};
 use std::path::Path;
 
 #[derive(Clone, Debug, Default)]
@@ -52,6 +52,25 @@ pub fn read_art(path: &Path) -> Option<Vec<u8>> {
     let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
     let picture = tag.pictures().first()?;
     Some(picture.data().to_vec())
+}
+
+/// 读歌词文本：优先同目录同名 `.lrc`，其次内嵌歌词标签（ID3 USLT / FLAC LYRICS）。
+pub fn read_lyric(path: &Path) -> Option<String> {
+    let lrc = path.with_extension("lrc");
+    if let Ok(text) = std::fs::read_to_string(&lrc) {
+        if !text.trim().is_empty() {
+            return Some(text);
+        }
+    }
+    if lrc.exists() {
+        // 有 .lrc 但读不出来（编码问题）就不再往内嵌标签找，避免拿到完全无关的文本
+        return None;
+    }
+    let tagged = Probe::open(path).ok()?.read().ok()?;
+    let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
+    tag.get_string(&ItemKey::Lyrics)
+        .map(|s| s.to_string())
+        .filter(|s| !s.trim().is_empty())
 }
 
 fn format_from_ext(path: &Path) -> String {

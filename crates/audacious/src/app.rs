@@ -3365,13 +3365,13 @@ impl App {
 
         ui.add_space(6.0);
 
-        if self.current_online.is_none() {
+        if self.state.current.is_none() {
             ui.horizontal(|ui| {
                 ui.add_space(20.0);
                 ui.label(
                     RichText::new(self.t(
-                        "本地文件的歌词标签还没解析，先显示播放信息。",
-                        "Local lyric tags are not parsed yet; showing playback info.",
+                        "还没有在放的曲目，先点一首吧。",
+                        "Nothing playing yet.",
                     ))
                     .color(p.dim),
                 );
@@ -3570,12 +3570,31 @@ impl App {
                 item["title"].as_str().unwrap_or(""),
                 item["artist"].as_str().unwrap_or("")
             ),
-            None => String::new(),
+            None => match self.state.current {
+                Some(i) if i < self.playlist.entries.len() => {
+                    format!("local|{}", self.playlist.entries[i].path.display())
+                }
+                _ => String::new(),
+            },
         }
     }
 
     fn start_lyric_load(&mut self) {
         let Some((index, item)) = self.current_online.clone() else {
+            // 本地曲目：找同名 .lrc，其次内嵌歌词标签
+            let Some(i) = self.state.current else { return };
+            let Some(entry) = self.playlist.entries.get(i).cloned() else {
+                return;
+            };
+            self.lyric_state = LyricState::Loading;
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.lyric_rx = Some(rx);
+            std::thread::spawn(move || {
+                let text = audcore::tags::read_lyric(&entry.path);
+                let _ = tx.send(text.ok_or_else(|| {
+                    "本地文件没有歌词：放一个同名 .lrc，或给音频写入歌词标签".to_string()
+                }));
+            });
             return;
         };
         let Some(plugin) = self.media_plugins.get(index).cloned() else {
@@ -3733,13 +3752,16 @@ impl App {
                     .corner_radius(egui::CornerRadius::same(6))
                     .show(ui, |ui| {
                         ui.set_min_width(330.0);
+                        let current_name = names
+                            .get(self.search_plugin)
+                            .cloned()
+                            .unwrap_or_else(|| "—".into());
                         ui.horizontal(|ui| {
                             ui.label(
                                 RichText::new(format!(
-                                    "{} {}/{} · {} {}/{}",
+                                    "{} {} · {} {}/{}",
                                     self.t("插件", "Plugins"),
-                                    self.search_plugin + 1,
-                                    total,
+                                    elide(&current_name, 12),
                                     self.t("第", "page"),
                                     self.plugin_page + 1,
                                     pages
