@@ -26,6 +26,10 @@ pub enum Theme {
     SkyBlue,
     /// 绚丽紫：深紫底 + 亮紫强调
     Purple,
+    /// 暗夜金：近黑底 + 香槟金强调
+    NightGold,
+    /// 樱粉：淡樱粉底 + 玫粉强调
+    Sakura,
 }
 
 impl Theme {
@@ -38,6 +42,8 @@ impl Theme {
             Theme::EyeGreen => "护眼绿主题",
             Theme::SkyBlue => "天空蓝主题",
             Theme::Purple => "绚丽紫主题",
+            Theme::NightGold => "暗夜金主题",
+            Theme::Sakura => "樱粉主题",
         }
     }
 
@@ -50,21 +56,29 @@ impl Theme {
             Theme::EyeGreen => "Eye-care green theme",
             Theme::SkyBlue => "Sky blue theme",
             Theme::Purple => "Vivid purple theme",
+            Theme::NightGold => "Night gold theme",
+            Theme::Sakura => "Sakura pink theme",
         }
     }
 
     /// 深色系（决定 egui 的 base visuals）
     pub fn is_dark(&self) -> bool {
-        matches!(self, Theme::Dark | Theme::Teal | Theme::Purple)
+        matches!(
+            self,
+            Theme::Dark | Theme::Teal | Theme::Purple | Theme::NightGold
+        )
     }
 
-    pub fn all() -> [Theme; 7] {
+    /// 菜单里的排列顺序（按用户定的次序）
+    pub fn all() -> [Theme; 9] {
         [
-            Theme::Amber,
-            Theme::Light,
-            Theme::Dark,
-            Theme::Teal,
             Theme::EyeGreen,
+            Theme::Amber,
+            Theme::Teal,
+            Theme::NightGold,
+            Theme::Sakura,
+            Theme::Dark,
+            Theme::Light,
             Theme::SkyBlue,
             Theme::Purple,
         ]

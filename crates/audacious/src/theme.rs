@@ -185,6 +185,30 @@ pub fn palette(cfg: &audcore::Config) -> Palette {
             dim: Color32::from_rgb(158, 142, 182),
             dark: true,
         },
+        // 暗夜金：近黑底 + 香槟金强调
+        audcore::Theme::NightGold => Palette {
+            bg: Color32::from_rgb(20, 19, 17),
+            panel: Color32::from_rgb(31, 29, 26),
+            panel_alt: Color32::from_rgb(42, 39, 34),
+            field: Color32::from_rgb(15, 14, 12),
+            accent: Color32::from_rgb(212, 168, 88),
+            accent_soft: tint(Color32::from_rgb(212, 168, 88), 52),
+            text: Color32::from_rgb(238, 232, 221),
+            dim: Color32::from_rgb(160, 151, 134),
+            dark: true,
+        },
+        // 樱粉：淡樱粉纸底 + 玫粉强调
+        audcore::Theme::Sakura => Palette {
+            bg: Color32::from_rgb(253, 240, 244),
+            panel: Color32::from_rgb(250, 226, 233),
+            panel_alt: Color32::from_rgb(246, 214, 223),
+            field: Color32::from_rgb(255, 249, 251),
+            accent: Color32::from_rgb(206, 82, 122),
+            accent_soft: tint(Color32::from_rgb(206, 82, 122), 52),
+            text: Color32::from_rgb(58, 30, 40),
+            dim: Color32::from_rgb(136, 96, 110),
+            dark: false,
+        },
         // 橘黄：暖米底 + 橙色面板，强调色压暗一点保证对比度
         audcore::Theme::Amber => Palette {
             bg: Color32::from_rgb(253, 242, 227),
