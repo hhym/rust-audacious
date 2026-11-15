@@ -280,7 +280,9 @@ export async function loginPoll({ key }) {
   `bin/qishui-helper-windows-amd64.exe` 属于这种情况，Linux 包缺该二进制时会得到「请允许插件启动程序」提示）。
 - `host.signInPrompt` 只是把二维码显示出来并立即返回，轮询仍由插件自己做；宿主不碰账号密码。
   二维码是本地编码的（`qrcode` crate），不依赖外部图片服务。
-- `fetch` 只能拿到文本 / JSON（没有 `arrayBuffer`），也没有流式响应。
+- `fetch` 的响应支持 `text()` / `json()` / `arrayBuffer()` / `bytes()` / `blob()`：
+  `arrayBuffer()` 走宿主给的 base64 原始字节，图片 / 音频这类二进制不会被当成文本截坏；
+  但**没有流式响应**，整个响应体会一次性读完（超过 8MB 时不再附 base64，`arrayBuffer()` 会是空的）。
 - `stream` / `getMediaSource` 返回的 `headers`（Referer、User-Agent、Cookie…）会随下载请求一起发；
   缓存文件按「url + headers」取指纹，同一地址换了 Referer 不会错误命中旧文件。
 - 首页接了 `home`（MyGo）与 `getTopLists`（MusicFree）；`browse`、`playlists`、`show`、`comments`

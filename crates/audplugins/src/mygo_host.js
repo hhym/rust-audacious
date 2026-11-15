@@ -216,6 +216,7 @@
     this.url = resp.url || "";
     this.headers = new Headers(resp.headers || {});
     this.__body = resp.body === undefined || resp.body === null ? "" : String(resp.body);
+    this.__b64 = resp.body_b64 || "";
     this.bodyUsed = false;
   }
   ResponseBody.prototype.text = function () {
@@ -230,8 +231,48 @@
       return Promise.reject(e);
     }
   };
+  // 纯 JS 的 base64 解码，避免依赖原生 atob；返回 Uint8Array（boa 有实现）
+  var __B64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  var __B64_LOOKUP = {};
+  for (var __i = 0; __i < __B64_CHARS.length; __i++) __B64_LOOKUP[__B64_CHARS[__i]] = __i;
+  function bytesFromBase64(b64) {
+    var clean = String(b64 || "").replace(/[^A-Za-z0-9+/]/g, "");
+    var len = clean.length;
+    var pad = len % 4;
+    if (pad) len -= pad;
+    var out = new Uint8Array(Math.floor(len * 3 / 4));
+    var o = 0;
+    for (var i = 0; i < len; i += 4) {
+      var n =
+        (__B64_LOOKUP[clean[i]] << 18) |
+        (__B64_LOOKUP[clean[i + 1]] << 12) |
+        (__B64_LOOKUP[clean[i + 2]] << 6) |
+        __B64_LOOKUP[clean[i + 3]];
+      out[o++] = (n >> 16) & 255;
+      out[o++] = (n >> 8) & 255;
+      out[o++] = n & 255;
+    }
+    return out;
+  }
   ResponseBody.prototype.arrayBuffer = function () {
-    return Promise.reject(new Error("这版宿主不支持 arrayBuffer，请用 text()/json()"));
+    this.bodyUsed = true;
+    var bytes = this.__b64 ? bytesFromBase64(this.__b64) : new Uint8Array(0);
+    return Promise.resolve(bytes.buffer);
+  };
+  ResponseBody.prototype.bytes = function () {
+    this.bodyUsed = true;
+    var bytes = this.__b64 ? bytesFromBase64(this.__b64) : new Uint8Array(0);
+    return Promise.resolve(bytes);
+  };
+  ResponseBody.prototype.blob = function () {
+    var self = this;
+    var type = self.headers && self.headers.get ? self.headers.get("content-type") || "" : "";
+    return Promise.resolve({
+      type: type,
+      size: (self.__b64 || "").length,
+      arrayBuffer: function () { return self.arrayBuffer(); },
+      text: function () { return self.text(); },
+    });
   };
   ResponseBody.prototype.clone = function () {
     var copy = new ResponseBody({ status: this.status, headers: {}, body: this.__body, url: this.url });

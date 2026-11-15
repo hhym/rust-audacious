@@ -1151,11 +1151,20 @@ fn http_request(config_json: &str) -> String {
                     existing.push_str(&text);
                 }
             }
-            let body = resp.text().unwrap_or_default();
+            // 同时给一份 UTF-8 文本和一份 base64：插件用 text()/json() 走前者，
+            // arrayBuffer() 走后者，二进制内容（图片、音频）才不会被当成文本截坏。
+            let bytes = resp.bytes().unwrap_or_default();
+            let text = String::from_utf8_lossy(&bytes).to_string();
+            let b64_body = if bytes.len() <= 8 * 1024 * 1024 {
+                b64(bytes.to_vec())
+            } else {
+                String::new()
+            };
             serde_json::json!({
                 "status": status,
                 "headers": headers,
-                "body": body,
+                "body": text,
+                "body_b64": b64_body,
                 "url": final_url,
             })
             .to_string()

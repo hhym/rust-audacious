@@ -882,3 +882,60 @@ mod sign_in_tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 }
+
+#[cfg(test)]
+mod fetch_binary_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    /// 插件用 `res.arrayBuffer()` 拿二进制，宿主必须给到真实字节（而不是文本）。
+    #[test]
+    fn array_buffer_returns_real_bytes() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 256];
+                let _ = stream.read(&mut buf);
+                let body: &[u8] = b"\x00\x01\xff";
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(body);
+            }
+        });
+
+        let dir = std::env::temp_dir().join(format!("mygo-binbuf-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            dir.join("plugin.json"),
+            r#"{"id":"binbuf-demo","name":"二进制演示","version":"1.0.0","main":"index.js","permissions":{"network":["127.0.0.1"]}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("index.js"),
+            format!(
+                r#"
+                export async function search() {{
+                  const res = await fetch("http://127.0.0.1:{port}/bin");
+                  const buf = await res.arrayBuffer();
+                  const u8 = new Uint8Array(buf);
+                  return {{ status: res.status, len: u8.length, bytes: Array.from(u8) }};
+                }}
+                "#
+            ),
+        )
+        .unwrap();
+
+        let plugin = MygoPlugin::load(&dir);
+        assert!(plugin.info.error.is_none(), "{:?}", plugin.info.error);
+        let out = plugin.call("search", serde_json::json!({})).expect("fetch");
+        assert_eq!(out["len"], 3, "{out}");
+        assert_eq!(out["bytes"][0], 0, "{out}");
+        assert_eq!(out["bytes"][1], 1, "{out}");
+        assert_eq!(out["bytes"][2], 255, "{out}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
