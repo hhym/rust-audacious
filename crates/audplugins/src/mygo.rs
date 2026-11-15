@@ -24,7 +24,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::{invoke_exports, new_context, platform_name, storage_access};
+use crate::{invoke_exports, platform_name, storage_access};
 
 /// mygo 的插件清单。
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

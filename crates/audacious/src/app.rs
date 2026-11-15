@@ -14,6 +14,7 @@ use egui::{
 
 use crate::engine::{Cmd, PlaybackState, Shared, Status};
 use crate::ipc_server;
+use crate::liked::{Liked, LikedItem};
 use crate::theme::{self, Palette};
 
 pub struct Browser {
@@ -108,7 +109,20 @@ pub struct App {
     search_status: SearchStatus,
     search_rx: Option<Receiver<Result<Vec<serde_json::Value>, String>>>,
     /// 在线歌曲解析结果：item + 播放地址
-    resolve_rx: Option<Receiver<Result<(serde_json::Value, String, bool), String>>>,    
+    resolve_rx: Option<Receiver<Result<(serde_json::Value, String, bool), String>>>,
+    /// 主面板当前标签页
+    tab: MainTab,
+    /// 「喜欢」列表
+    liked: Liked,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MainTab {
+    Home,
+    Search,
+    Songs,
+    Liked,
+    Playlists,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -158,6 +172,8 @@ impl App {
             search_status: SearchStatus::Idle,
             search_rx: None,
             resolve_rx: None,
+            tab: MainTab::Songs,
+            liked: Liked::load(),
         };
         app.plugins = app.collect_plugins();
         app.reload_media_plugins();
@@ -353,7 +369,7 @@ impl eframe::App for App {
             self.toolbar_ui(ctx, &p);
             self.statusbar_ui(ctx, &p);
             self.nowband_ui(ctx, &p);
-            self.playlist_panel(ctx, &p);
+            self.main_panel(ctx, &p);
         }
 
         self.theme_menu_ui(ctx, &p);
@@ -651,6 +667,7 @@ impl App {
             });
     }
 
+    #[allow(dead_code)]
     fn playlist_panel(&mut self, ctx: &egui::Context, p: &Palette) {
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(p.bg))
@@ -813,6 +830,10 @@ impl App {
                             menu_action = Some((index, MenuAction::Remove));
                             ui.close_menu();
                         }
+                        if ui.button(self.t("加入喜欢", "Like")).clicked() {
+                            menu_action = Some((index, MenuAction::Like));
+                            ui.close_menu();
+                        }
                         if ui.button(self.t("上移", "Move up")).clicked() {
                             menu_action = Some((index, MenuAction::MoveUp));
                             ui.close_menu();
@@ -846,6 +867,25 @@ impl App {
                     if index > 0 {
                         if let Ok(mut pl) = self.shared.playlist.lock() {
                             pl.move_entry(index, index - 1);
+                        }
+                    }
+                }
+                MenuAction::Like => {
+                    if let Some(entry) = self.playlist.entries.get(index).cloned() {
+                        let item = LikedItem {
+                            title: entry.display_title(),
+                            artist: entry.display_artist(),
+                            album: entry.display_album(),
+                            duration: entry.length.unwrap_or(0.0),
+                            path: Some(entry.path.clone()),
+                            plugin: None,
+                            item: None,
+                            added_at: now_secs(),
+                        };
+                        if self.liked.add(item) {
+                            self.toast("已加入喜欢");
+                        } else {
+                            self.toast("这首歌已经在喜欢里了");
                         }
                     }
                 }
@@ -1873,6 +1913,7 @@ enum MenuAction {
     Remove,
     MoveUp,
     MoveDown,
+    Like,
 }
 
 /// 列宽：标题占一半弹性宽度，艺人/专辑各占四分之一，其余固定。
@@ -1960,6 +2001,612 @@ fn remote_entry(item: &serde_json::Value, url: &str) -> audcore::Entry {
         length: item["duration"].as_f64(),
         format: "在线".into(),
     }
+}
+
+impl App {
+    /// 主面板：上方是标签栏（首页/搜索/歌曲/喜欢/播放列表 + 插件切换），下方按标签渲染内容。
+    fn main_panel(&mut self, ctx: &egui::Context, p: &Palette) {
+        self.main_nav_ui(ctx, p);
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(p.bg))
+            .show(ctx, |ui| match self.tab {
+                MainTab::Home => self.home_tab(ui, p),
+                MainTab::Search => self.search_tab(ui, p),
+                MainTab::Songs => self.playlist_table(ui, p),
+                MainTab::Liked => self.liked_tab(ui, p),
+                MainTab::Playlists => self.playlists_tab(ui, p),
+            });
+    }
+
+    fn main_nav_ui(&mut self, ctx: &egui::Context, p: &Palette) {
+        let tabs = [
+            (MainTab::Home, self.t("首页", "Home")),
+            (MainTab::Search, self.t("搜索", "Search")),
+            (MainTab::Songs, self.t("歌曲", "Songs")),
+            (MainTab::Liked, self.t("喜欢", "Liked")),
+            (MainTab::Playlists, self.t("播放列表", "Playlists")),
+        ];
+        egui::TopBottomPanel::top("mainnav")
+            .exact_height(38.0)
+            .frame(egui::Frame::NONE.fill(p.panel_alt))
+            .show(ctx, |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.add_space(8.0);
+                    for (tab, label) in tabs {
+                        let selected = self.tab == tab;
+                        let text = RichText::new(label)
+                            .size(13.0)
+                            .color(if selected { p.accent } else { p.text });
+                        let text = if selected { text.strong() } else { text };
+                        if ui
+                            .add(egui::Button::new(text).frame(false).min_size(vec2(56.0, 24.0)))
+                            .clicked()
+                        {
+                            self.tab = tab;
+                        }
+                    }
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            ui.add_space(8.0);
+                            self.plugin_selector(ui, p);
+                            ui.label(RichText::new(self.t("来源", "Source")).small().color(p.dim));
+                        },
+                    );
+                });
+            });
+    }
+
+    /// 在线插件选择器：显示插件名，点开可以换插件。
+    fn plugin_selector(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        if self.media_plugins.is_empty() {
+            ui.label(
+                RichText::new(self.t("未安装在线插件", "No online plugin"))
+                    .small()
+                    .color(p.dim),
+            );
+            return;
+        }
+        let names: Vec<String> = self.media_plugins.iter().map(|pl| pl.name()).collect();
+        let current = names
+            .get(self.search_plugin)
+            .cloned()
+            .unwrap_or_else(|| "—".into());
+        egui::ComboBox::from_id_salt("main-plugin")
+            .selected_text(RichText::new(elide(&current, 26)).color(p.accent))
+            .width(200.0)
+            .show_ui(ui, |ui| {
+                for (i, name) in names.iter().enumerate() {
+                    if ui
+                        .selectable_label(self.search_plugin == i, elide(name, 34))
+                        .clicked()
+                    {
+                        self.search_plugin = i;
+                    }
+                }
+            });
+    }
+
+    fn home_tab(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        ui.add_space(14.0);
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            ui.vertical(|ui| {
+                ui.label(
+                    RichText::new("AUDACIOUS · RUST")
+                        .size(22.0)
+                        .strong()
+                        .color(p.accent),
+                );
+                ui.label(
+                    RichText::new(self.t(
+                        "本地播放 + 插件音源，一套界面搜歌、喜欢、攒歌单",
+                        "Local playback with plugin sources: search, like and build playlists in one place",
+                    ))
+                    .small()
+                    .color(p.dim),
+                );
+            });
+        });
+
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            ui.vertical(|ui| {
+                egui::Frame::NONE
+                    .fill(p.panel)
+                    .inner_margin(egui::Margin::same(12))
+                    .corner_radius(egui::CornerRadius::same(6))
+                    .show(ui, |ui| {
+                        ui.set_min_width(360.0);
+                        ui.label(
+                            RichText::new(self.t("当前在线音源", "Current online source"))
+                                .small()
+                                .color(p.dim),
+                        );
+                        match self.media_plugins.get(self.search_plugin) {
+                            Some(plugin) => {
+                                ui.label(RichText::new(plugin.name()).size(16.0).color(p.text));
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{}  ·  {}",
+                                        plugin.version(),
+                                        plugin.methods_brief().join(" / ")
+                                    ))
+                                    .small()
+                                    .color(p.dim),
+                                );
+                                if let Some(err) = plugin.error() {
+                                    ui.label(
+                                        RichText::new(err)
+                                            .small()
+                                            .color(egui::Color32::from_rgb(200, 80, 80)),
+                                    );
+                                }
+                            }
+                            None => {
+                                ui.label(
+                                    RichText::new(self.t("还没有可用的在线插件", "No plugin yet"))
+                                        .color(p.dim),
+                                );
+                            }
+                        }
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            if ui.button(self.t("在线搜索", "Search")).clicked() {
+                                self.tab = MainTab::Search;
+                            }
+                            if ui.button(self.t("管理插件", "Plugins")).clicked() {
+                                self.show_plugins = true;
+                            }
+                        });
+                    });
+
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    self.stat_card(ui, p, &format!("{}", self.playlist.len()), self.t("歌曲", "Songs"));
+                    self.stat_card(ui, p, &format!("{}", self.liked.len()), self.t("喜欢", "Liked"));
+                    self.stat_card(
+                        ui,
+                        p,
+                        &format!("{}", App::playlist_files().len()),
+                        self.t("播放列表", "Playlists"),
+                    );
+                });
+
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui.button(self.t("添加文件", "Add files")).clicked() {
+                        self.browser = Some(Browser::new(
+                            self.config
+                                .last_dir
+                                .clone()
+                                .unwrap_or_else(|| PathBuf::from(".")),
+                        ));
+                    }
+                    if ui.button(self.t("添加目录", "Add folder")).clicked() {
+                        let dir = self
+                            .config
+                            .last_dir
+                            .clone()
+                            .unwrap_or_else(|| dirs::home_dir().unwrap_or_default());
+                        self.add_paths(&[dir]);
+                    }
+                    if ui.button(self.t("保存当前列表", "Save list")).clicked() {
+                        self.save_playlist();
+                    }
+                    if ui.button(self.t("重新扫描插件", "Rescan plugins")).clicked() {
+                        self.reload_media_plugins();
+                    }
+                });
+            });
+        });
+    }
+
+    fn stat_card(&self, ui: &mut egui::Ui, p: &Palette, value: &str, label: &str) {
+        egui::Frame::NONE
+            .fill(p.panel)
+            .inner_margin(egui::Margin::symmetric(14, 10))
+            .corner_radius(egui::CornerRadius::same(6))
+            .show(ui, |ui| {
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(value).size(20.0).strong().color(p.accent));
+                    ui.label(RichText::new(label).small().color(p.dim));
+                });
+            });
+    }
+
+    fn search_tab(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.add_space(12.0);
+            ui.label(RichText::new(self.t("来源", "Source")).small().color(p.dim));
+            self.plugin_selector(ui, p);
+        });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.add_space(12.0);
+            let hint = self.t("歌名 / 歌手", "Song / artist");
+            let edit = ui.add_sized(
+                vec2((ui.available_width() - 110.0).max(240.0), 26.0),
+                egui::TextEdit::singleline(&mut self.search_query).hint_text(hint),
+            );
+            let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let busy = matches!(self.search_status, SearchStatus::Busy);
+            if ui
+                .add_enabled(!busy, egui::Button::new(self.t("搜索", "Search")))
+                .clicked()
+                || enter
+            {
+                self.start_search();
+            }
+            if busy {
+                ui.spinner();
+            }
+        });
+
+        if let SearchStatus::Error(err) = &self.search_status {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.add_space(12.0);
+                ui.label(
+                    RichText::new(err)
+                        .small()
+                        .color(egui::Color32::from_rgb(200, 80, 80)),
+                );
+            });
+        }
+
+        ui.add_space(6.0);
+        if self.search_results.is_empty() {
+            if matches!(self.search_status, SearchStatus::Idle) {
+                ui.add_space(30.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        RichText::new(self.t(
+                            "输入关键词，回车搜索当前音源",
+                            "Type a keyword and press Enter to search the current source",
+                        ))
+                        .color(p.dim),
+                    );
+                });
+            }
+            return;
+        }
+
+        self.search_results_grid(ui, p);
+    }
+
+    /// 搜索结果表格：主面板「搜索」和弹出窗口共用一套列。
+    fn search_results_grid(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        let items = self.search_results.clone();
+        let mut like_request: Option<usize> = None;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                egui::Grid::new("main-search-results")
+                    .num_columns(6)
+                    .striped(true)
+                    .min_col_width(36.0)
+                    .show(ui, |ui| {
+                        for label in [
+                            self.t("标题", "Title"),
+                            self.t("艺人", "Artist"),
+                            self.t("专辑", "Album"),
+                            self.t("时长", "Length"),
+                            "",
+                            "",
+                        ] {
+                            ui.label(RichText::new(label).strong().color(p.accent));
+                        }
+                        ui.end_row();
+
+                        for (i, item) in items.iter().enumerate() {
+                            let title = item["title"].as_str().unwrap_or("未命名").to_string();
+                            let artist = item["artist"].as_str().unwrap_or("—").to_string();
+                            let album = item["album"].as_str().unwrap_or("—").to_string();
+                            let length = item["duration"]
+                                .as_f64()
+                                .map(audcore::config::format_time)
+                                .unwrap_or_else(|| "--:--".into());
+                            ui.label(format!("{}. {}", i + 1, elide(&title, 28)));
+                            ui.label(elide(&artist, 18));
+                            ui.label(elide(&album, 18));
+                            ui.label(length);
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .small_button("▶")
+                                    .on_hover_text(self.t("播放", "Play"))
+                                    .clicked()
+                                {
+                                    self.resolve_media(item, true);
+                                }
+                                if ui
+                                    .small_button("＋")
+                                    .on_hover_text(self.t("加入列表", "Add"))
+                                    .clicked()
+                                {
+                                    self.resolve_media(item, false);
+                                }
+                            });
+                            if ui
+                                .small_button("☆")
+                                .on_hover_text(self.t("加入喜欢", "Like"))
+                                .clicked()
+                            {
+                                like_request = Some(i);
+                            }
+                            ui.end_row();
+                        }
+                    });
+            });
+        if let Some(i) = like_request {
+            if let Some(item) = items.get(i) {
+                self.like_online(item);
+            }
+        }
+    }
+
+    fn like_online(&mut self, item: &serde_json::Value) {
+        let plugin = self
+            .media_plugins
+            .get(self.search_plugin)
+            .map(|p| p.name())
+            .unwrap_or_default();
+        let entry = LikedItem {
+            title: item["title"].as_str().unwrap_or("未命名").to_string(),
+            artist: item["artist"].as_str().unwrap_or_default().to_string(),
+            album: item["album"].as_str().unwrap_or_default().to_string(),
+            duration: item["duration"].as_f64().unwrap_or(0.0),
+            path: None,
+            plugin: Some(plugin),
+            item: Some(item.clone()),
+            added_at: now_secs(),
+        };
+        if self.liked.add(entry) {
+            self.toast("已加入喜欢");
+        } else {
+            self.toast("这首歌已经在喜欢里了");
+        }
+    }
+
+    fn liked_tab(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.add_space(12.0);
+            ui.label(
+                RichText::new(format!(
+                    "{}（{}）",
+                    self.t("喜欢", "Liked"),
+                    self.liked.len()
+                ))
+                .strong()
+                .color(p.accent),
+            );
+            ui.label(
+                RichText::new(self.t(
+                    "搜索结果里的 ☆、歌曲右键「加入喜欢」都会到这里",
+                    "Stars from search and the right-click menu land here",
+                ))
+                .small()
+                .color(p.dim),
+            );
+        });
+        ui.separator();
+
+        if self.liked.is_empty() {
+            ui.add_space(30.0);
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    RichText::new(self.t("还没有喜欢的歌", "Nothing liked yet"))
+                        .color(p.dim),
+                );
+            });
+            return;
+        }
+
+        let items = self.liked.items().to_vec();
+        let mut play: Option<usize> = None;
+        let mut remove: Option<usize> = None;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for (i, item) in items.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.add_space(8.0);
+                        if ui.small_button("▶").clicked() {
+                            play = Some(i);
+                        }
+                        let online = item.plugin.is_some();
+                        ui.label(
+                            RichText::new(elide(&item.title, 34))
+                                .color(if online { p.accent } else { p.text }),
+                        );
+                        ui.label(RichText::new(elide(&item.subtitle(), 22)).small().color(p.dim));
+                        if online {
+                            ui.label(
+                                RichText::new(item.plugin.clone().unwrap_or_default())
+                                    .small()
+                                    .color(p.dim),
+                            );
+                        }
+                        ui.label(RichText::new(item.length_text()).small().color(p.dim));
+                        if ui.small_button(self.t("移除", "Remove")).clicked() {
+                            remove = Some(i);
+                        }
+                    });
+                }
+            });
+        if let Some(i) = play {
+            if let Some(item) = items.get(i).cloned() {
+                self.play_liked(item);
+            }
+        }
+        if let Some(i) = remove {
+            self.liked.remove(i);
+            self.toast("已从喜欢里移除");
+        }
+    }
+
+    fn play_liked(&mut self, item: LikedItem) {
+        if let Some(path) = item.path {
+            let index = {
+                let Ok(mut pl) = self.shared.playlist.lock() else {
+                    return;
+                };
+                pl.add_path(&path)
+            };
+            self.shared.send(Cmd::Refresh);
+            self.shared.send(Cmd::PlayIndex(index));
+            return;
+        }
+        let (Some(plugin_name), Some(js_item)) = (item.plugin, item.item) else {
+            self.toast("这条记录没有可播放的来源");
+            return;
+        };
+        let Some(index) = self
+            .media_plugins
+            .iter()
+            .position(|p| p.name() == plugin_name)
+        else {
+            self.toast(format!("找不到插件「{plugin_name}」，先重新扫描插件"));
+            return;
+        };
+        self.search_plugin = index;
+        self.resolve_media(&js_item, true);
+    }
+
+    fn playlist_files() -> Vec<PathBuf> {
+        let dir = dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(audcore::APP_NAME)
+            .join("playlists");
+        let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|path| {
+                        matches!(
+                            path.extension().and_then(|e| e.to_str()),
+                            Some("m3u") | Some("m3u8")
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        files.sort();
+        files.reverse();
+        files
+    }
+
+    fn playlists_tab(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.add_space(12.0);
+            ui.label(RichText::new(self.t("播放列表", "Playlists")).strong().color(p.accent));
+            ui.label(
+                RichText::new(self.t(
+                    "「保存列表」存在这个目录，点「载入」或「播放」即可恢复",
+                    "Saved lists live in this folder; load or play them here",
+                ))
+                .small()
+                .color(p.dim),
+            );
+            ui.with_layout(
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    ui.add_space(12.0);
+                    if ui.button(self.t("保存当前列表", "Save list")).clicked() {
+                        self.save_playlist();
+                    }
+                },
+            );
+        });
+        ui.separator();
+
+        let files = App::playlist_files();
+        if files.is_empty() {
+            ui.add_space(30.0);
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    RichText::new(self.t(
+                        "还没有保存的播放列表 —— 点右上角「保存当前列表」",
+                        "No saved playlists yet — use Save list",
+                    ))
+                    .color(p.dim),
+                );
+            });
+            return;
+        }
+
+        let mut load: Option<(PathBuf, bool)> = None;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for path in &files {
+                    ui.horizontal(|ui| {
+                        ui.add_space(8.0);
+                        if ui.button("▶").on_hover_text(self.t("播放", "Play")).clicked() {
+                            load = Some((path.clone(), true));
+                        }
+                        if ui.button(self.t("载入", "Load")).clicked() {
+                            load = Some((path.clone(), false));
+                        }
+                        let name = path
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("playlist")
+                            .to_string();
+                        let count = audcore::plugin::load_playlist(path)
+                            .map(|p| p.len())
+                            .unwrap_or(0);
+                        ui.label(RichText::new(name).color(p.text));
+                        ui.label(
+                            RichText::new(format!("{} {}", count, self.t("首", "tracks")))
+                                .small()
+                                .color(p.dim),
+                        );
+                    });
+                }
+            });
+        if let Some((path, play)) = load {
+            self.load_playlist_file(&path, play);
+        }
+    }
+
+    fn load_playlist_file(&mut self, path: &std::path::Path, play: bool) {
+        let paths = match audcore::plugin::load_playlist(path) {
+            Ok(paths) if !paths.is_empty() => paths,
+            Ok(_) => {
+                self.toast("这个播放列表是空的");
+                return;
+            }
+            Err(err) => {
+                self.toast(format!("载入失败：{err}"));
+                return;
+            }
+        };
+        let start = self.playlist.len();
+        let added = {
+            let Ok(mut pl) = self.shared.playlist.lock() else {
+                return;
+            };
+            ipc_server::add_paths(&mut pl, &paths)
+        };
+        self.shared.send(Cmd::Refresh);
+        if play && added > 0 {
+            self.shared.send(Cmd::PlayIndex(start));
+        }
+        self.toast(format!("已载入 {added} 首"));
+    }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn open_in_file_manager(dir: &std::path::Path) {

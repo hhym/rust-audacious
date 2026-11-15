@@ -361,7 +361,8 @@ fn inspect(code: &str) -> anyhow::Result<Meta> {
     }))
 }
 
-/// 跑一遍插件代码，把导出的元信息和方法名读出来。
+/// 跑一遍插件代码，把导出的元信息和方法名读出来（静态读不出来时的兜底）。
+#[allow(dead_code)]
 fn describe(code: &str) -> anyhow::Result<Meta> {
     let mut ctx = new_context_with_limit(LOAD_LOOP_LIMIT);
     eval_plugin(&mut ctx, code).map_err(|e| anyhow::anyhow!(friendly_error(&e.to_string())))?;

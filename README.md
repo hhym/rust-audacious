@@ -21,6 +21,10 @@ Audacious 内核的 Rust 重写。二进制名沿用原版命名：`audacious-rs
 - **频谱**：采样旁路 + Goertzel 频段能量，16 段 log 频谱，信息带里跳动
 - **三套主题**：橘黄（默认）、浅色、深色，工具栏右下角「衣服图标」一点即换，配置随存
 - **在线插件（MusicFree / MyGo 标准）**：MusicFree 的 `.js` 直接丢进插件目录；MyGo 的插件目录（`plugin.json` + ES 模块）同样丢进去即可。两种标准都会出现在「插件 → 在线插件」和「在线搜索」里，搜到歌点 ▶ 就能直接播放网络音源（详见 [PLUGINS.md](PLUGINS.md)）
+- **主面板五个标签**：首页 / 搜索 / 歌曲 / 喜欢 / 播放列表。首页显示当前音源、歌曲与喜欢的数量、快捷入口；
+  搜索页直接搜当前音源（结果行有 ▶ / ＋ / ☆）；喜欢页收藏本地和在线歌曲（右键歌曲或搜索结果里的 ☆ 都能加入，
+  存在 `<config>/audacious-rs/liked.json`）；播放列表页列出保存过的 M3U，点「载入」或「播放」恢复
+- **音源切换**：标签栏右侧显示当前插件名（如 `iTunes (MyGo) · MyGo`），下拉即可切换插件接口
 - **audtool 控制**：本地 TCP 控制协议，25 条命令，脚本可驱动播放器
 - **无设备兜底**：机器没有声卡时自动进入静音解码模式，进度、频谱、切歌照常
 
@@ -34,6 +38,16 @@ Audacious 内核的 Rust 重写。二进制名沿用原版命名：`audacious-rs
 工具栏最右侧是主题按钮，图标是一件 T 恤（「换一件衣服」），点开是三选一的小菜单：
 
 ![主题菜单](docs/screenshot-theme-menu.png)
+
+主面板：标签栏右侧就是音源选择器。
+
+| 首页 | 搜索 |
+|---|---|
+| ![首页](docs/screenshot-home.png) | ![搜索](docs/screenshot-search-tab.png) |
+
+| 喜欢 |
+|---|
+| ![喜欢](docs/screenshot-liked.png) |
 
 | 均衡器 | 迷你模式 |
 |---|---|
@@ -137,11 +151,12 @@ MyGo 插件的 ES 模块改写/搜索/取地址/歌词/设置项。共 20 个用
 
 ## 版本
 
-版本号统一在 `Cargo.toml` 的 `workspace.package.version` 维护，按习惯从 **5.0** 起标，当前 **5.3.1**：
+版本号统一在 `Cargo.toml` 的 `workspace.package.version` 维护，按习惯从 **5.0** 起标，当前 **5.4.0**：
 
 - 5.0.0 首个可运行版本
 - 5.0.1 修掉 Windows 发布版弹出控制台窗口的问题，日志改写到 `%APPDATA%\audacious-rs\app.log`
 - 5.1.0 三套主题（橘黄 / 浅色 / 深色）与工具栏换肤按钮，默认橘黄
+- 5.4.0 主面板加五个标签（首页 / 搜索 / 歌曲 / 喜欢 / 播放列表）和音源切换器；喜欢列表跨会话保存，播放列表页可直接载入/播放已保存的 M3U
 - 5.3.1 「重新扫描」改为后台扫描：不再执行插件代码、只做语法检查和静态取元信息，结果按「路径+修改时间+大小」缓存到 `plugin-cache.json`，76 个插件首次 3.5 秒、再次 24 毫秒；扫描失败/超时不再拖死窗口，语法错误改为中文提示并显示插件名
 - 5.3.0 在线插件支持 MyGo 标准（目录 + `plugin.json` + ES 模块，`search`/`stream`/`lyrics`、`host`/`fetch`/设置项），两种标准在界面里统一展示；新增示例插件 `examples/mygo-plugins/itunes`
 - 5.2.1 插件垫片补齐 `CryptoJS.AES`（CBC/ECB + PKCS7）与完整 `big-integer`（含 `modPow`），修掉真实网易插件 `cannot convert null to object at AES` 报错；`require` 模块补 `default` 自引用，兼容 TS 产物 `axios_1.default(...)` 调用

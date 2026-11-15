@@ -7,6 +7,7 @@ mod app;
 mod effects;
 mod engine;
 mod ipc_server;
+mod liked;
 mod theme;
 
 use audcore::Config;
