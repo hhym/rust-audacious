@@ -572,7 +572,8 @@ fn transform_module(src: &str) -> (String, Vec<(String, String)>) {
         .into_owned();
 
     // export { a, b as c }
-    let re_export_list = Regex::new(r#"(?m)export\s+\{(.*?)\};?"#).unwrap();
+    // 导出清单可能跨多行，用 (?s) 让 . 也能匹配换行
+    let re_export_list = Regex::new(r#"(?s)export\s*\{(.*?)\}\s*;?"#).unwrap();
     out = re_export_list
         .replace_all(&out, |c: &regex::Captures| {
             for piece in c[1].split(',') {
@@ -628,6 +629,25 @@ mod tests {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join("plugin.json"), manifest).unwrap();
         std::fs::write(dir.join("index.js"), js).unwrap();
+    }
+
+    #[test]
+    fn esm_transform_handles_multiline_export_list() {
+        // 汽水音乐 / QQ Music 这类插件用跨多行的 `export { a,\n b as c };`
+        let (body, names) = transform_module(
+            r#"
+async function search() { return { tracks: [] }; }
+function stream2() { return { url: "x" }; }
+export {
+  search,
+  stream2 as stream,
+};
+"#,
+        );
+        assert!(!body.contains("export"), "export 关键字应当被改写掉");
+        assert!(body.contains("async function search"));
+        assert!(names.iter().any(|(k, v)| k == "search" && v == "search"));
+        assert!(names.iter().any(|(k, v)| k == "stream" && v == "stream2"));
     }
 
     #[test]
