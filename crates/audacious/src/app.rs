@@ -1320,38 +1320,93 @@ impl App {
                         ui.label(RichText::new(elide(&sub, 34)).size(11.0).color(p.dim));
                     });
 
-                    ui.add_space(16.0);
-                    if ui.button("◀◀").on_hover_text(self.t("上一首", "Prev")).clicked() {
+                    ui.add_space(14.0);
+                    // 按迷你卡片那套手绘图标重画的播放条按钮
+                    let liked = self.current_liked();
+                    let (heart_rect, heart) =
+                        ui.allocate_exact_size(vec2(30.0, 30.0), Sense::click());
+                    heart_icon(
+                        ui.painter(),
+                        heart_rect,
+                        if liked {
+                            Color32::from_rgb(240, 96, 108)
+                        } else if heart.hovered() {
+                            p.text
+                        } else {
+                            p.dim
+                        },
+                    );
+                    if heart
+                        .on_hover_text(self.t("喜欢", "Like"))
+                        .clicked()
+                    {
+                        self.toggle_current_liked();
+                    }
+                    ui.add_space(2.0);
+
+                    let (prev_rect, prev) =
+                        ui.allocate_exact_size(vec2(30.0, 30.0), Sense::click());
+                    mini_prev_icon(ui.painter(), prev_rect, mini_icon_color(&prev));
+                    if prev
+                        .on_hover_text(self.t("上一首", "Prev"))
+                        .clicked()
+                    {
                         self.shared.send(Cmd::Prev);
                     }
-                    let label = if self.state.status == Status::Playing {
-                        "❚❚"
+                    ui.add_space(4.0);
+
+                    let (play_rect, play) =
+                        ui.allocate_exact_size(vec2(40.0, 40.0), Sense::click());
+                    ui.painter().circle_filled(play_rect.center(), 20.0, p.accent);
+                    if self.state.status == Status::Playing {
+                        mini_pause_icon(ui.painter(), play_rect);
                     } else {
-                        "▶"
-                    };
-                    if ui
-                        .add(egui::Button::new(RichText::new(label).size(15.0).color(Color32::WHITE))
-                            .fill(p.accent)
-                            .min_size(vec2(38.0, 30.0)))
+                        mini_play_icon(ui.painter(), play_rect, Color32::WHITE);
+                    }
+                    if play
+                        .on_hover_text(if self.state.status == Status::Playing {
+                            self.t("暂停", "Pause")
+                        } else {
+                            self.t("播放", "Play")
+                        })
                         .clicked()
                     {
                         self.shared.send(Cmd::Toggle);
                     }
-                    if ui.button("▶▶").on_hover_text(self.t("下一首", "Next")).clicked() {
+                    ui.add_space(4.0);
+
+                    let (next_rect, next) =
+                        ui.allocate_exact_size(vec2(30.0, 30.0), Sense::click());
+                    mini_next_icon(ui.painter(), next_rect, mini_icon_color(&next));
+                    if next
+                        .on_hover_text(self.t("下一首", "Next"))
+                        .clicked()
+                    {
                         self.shared.send(Cmd::Next);
                     }
-                    ui.add_space(6.0);
-                    if ui.button("■").on_hover_text(self.t("停止", "Stop")).clicked() {
+                    ui.add_space(2.0);
+
+                    let (stop_rect, stop) =
+                        ui.allocate_exact_size(vec2(26.0, 30.0), Sense::click());
+                    let stop_color = if stop.hovered() { p.text } else { p.dim };
+                    ui.painter().rect_filled(
+                        egui::Rect::from_center_size(stop_rect.center(), vec2(11.0, 11.0)),
+                        CornerRadius::same(2),
+                        stop_color,
+                    );
+                    if stop
+                        .on_hover_text(self.t("停止", "Stop"))
+                        .clicked()
+                    {
                         self.shared.send(Cmd::Stop);
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(12.0);
-                        if ui
-                            .add(
-                                egui::Button::new(RichText::new("≡").size(14.0).color(p.dim))
-                                    .min_size(vec2(30.0, 28.0)),
-                            )
+                        let (list_rect, list_resp) =
+                            ui.allocate_exact_size(vec2(30.0, 30.0), Sense::click());
+                        mini_list_icon(ui.painter(), list_rect, mini_icon_color(&list_resp));
+                        if list_resp
                             .on_hover_text(self.t("待播清单", "Playlists"))
                             .clicked()
                         {
@@ -1498,9 +1553,9 @@ impl App {
                 );
 
                 // 控制按钮：从封面右侧开始，整组居中
-                let bsize = 28.0;
-                let gap = 16.0;
-                let group_w = bsize * 4.0 + gap * 3.0 + 42.0 + gap; // 心/上一/播放/下一/清单
+                let bsize = 26.0;
+                let gap = 22.0;
+                let group_w = bsize * 4.0 + gap * 3.0 + 46.0 + gap; // 心/上一/播放/下一/清单
                 let start_x = cover.right() + 12.0;
                 let right_edge = card.right() - 44.0;
                 let x0 = ((start_x + right_edge) * 0.5 - group_w * 0.5)
@@ -1516,19 +1571,17 @@ impl App {
                 };
 
                 // 喜欢
-                let heart_rect = rect_at(0, bsize);
+                let heart_rect = rect_at(0, 24.0);
                 let heart = ui.interact(heart_rect, ui.id().with("mini-heart"), Sense::click());
-                ui.painter().text(
-                    heart_rect.center(),
-                    Align2::CENTER_CENTER,
-                    "♥",
-                    FontId::proportional(19.0),
+                mini_heart_icon(
+                    ui.painter(),
+                    heart_rect,
                     if liked {
-                        Color32::from_rgb(240, 96, 108)
+                        Color32::from_rgb(206, 62, 78)
                     } else if heart.hovered() {
-                        Color32::from_rgb(190, 195, 202)
+                        Color32::from_rgb(176, 182, 190)
                     } else {
-                        Color32::from_rgb(138, 143, 150)
+                        Color32::from_rgb(132, 138, 146)
                     },
                 );
                 if heart.clicked() {
@@ -1544,7 +1597,7 @@ impl App {
                 }
 
                 // 播放 / 暂停（实心强调色圆）
-                let play_size = 42.0;
+                let play_size = 46.0;
                 let play_rect = rect_at(2, play_size);
                 let play = ui.interact(play_rect, ui.id().with("mini-play"), Sense::click());
                 ui.painter().circle_filled(play_rect.center(), play_size * 0.5, accent);
@@ -1578,7 +1631,7 @@ impl App {
                 // 关闭：回主界面
                 let close_rect = egui::Rect::from_center_size(
                     egui::pos2(card.right() - 20.0, card.top() + 20.0),
-                    vec2(24.0, 24.0),
+                    vec2(28.0, 28.0),
                 );
                 let close = ui.interact(close_rect, ui.id().with("mini-close"), Sense::click());
                 mini_close_icon(
@@ -5108,104 +5161,128 @@ fn round_texture(
 
 fn mini_icon_color(resp: &egui::Response) -> Color32 {
     if resp.hovered() {
-        Color32::from_rgb(214, 218, 224)
+        Color32::from_rgb(224, 228, 234)
     } else {
-        Color32::from_rgb(150, 155, 162)
+        Color32::from_rgb(150, 156, 164)
     }
 }
 
-/// 上一首：竖条 + 向左的三角
+/// 心：两个圆 + 一个朝下的三角拼成，顶上留出中间的凹口。
+fn mini_heart_icon(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    let c = rect.center();
+    let w = rect.width();
+    let h = rect.height();
+    let r = w * 0.215;
+    let dx = w * 0.195;
+    let cy = c.y - h * 0.11;
+    painter.circle_filled(egui::pos2(c.x - dx, cy), r, color);
+    painter.circle_filled(egui::pos2(c.x + dx, cy), r, color);
+    // 倒三角：上沿压在两个圆的腰部，尖落在心口，中间那段自然形成凹口
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(c.x - w * 0.355, c.y - h * 0.015),
+            egui::pos2(c.x + w * 0.355, c.y - h * 0.015),
+            egui::pos2(c.x, c.y + h * 0.40),
+        ],
+        color,
+        Stroke::NONE,
+    ));
+}
+
+/// 上一首：靠左一根竖条 + 朝左的三角（条和三角尖贴着）。
 fn mini_prev_icon(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
     let c = rect.center();
-    let h = rect.height().min(rect.width()) * 0.42;
+    let h = rect.height() * 0.36;
+    let w = rect.width() * 0.32;
     let bar = egui::Rect::from_min_max(
-        egui::pos2(c.x - h * 0.62, c.y - h * 0.5),
-        egui::pos2(c.x - h * 0.5, c.y + h * 0.5),
+        egui::pos2(c.x - w, c.y - h * 0.95),
+        egui::pos2(c.x - w * 0.78, c.y + h * 0.95),
     );
     painter.rect_filled(bar, CornerRadius::same(1), color);
     painter.add(egui::Shape::convex_polygon(
         vec![
-            egui::pos2(c.x + h * 0.62, c.y - h * 0.52),
-            egui::pos2(c.x + h * 0.62, c.y + h * 0.52),
-            egui::pos2(c.x - h * 0.34, c.y),
+            egui::pos2(c.x - w * 0.74, c.y),
+            egui::pos2(c.x + w, c.y - h * 0.95),
+            egui::pos2(c.x + w, c.y + h * 0.95),
         ],
         color,
         Stroke::NONE,
     ));
 }
 
-/// 下一首：向右的三角 + 竖条
+/// 下一首：朝右的三角 + 靠右的竖条。
 fn mini_next_icon(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
     let c = rect.center();
-    let h = rect.height().min(rect.width()) * 0.42;
+    let h = rect.height() * 0.36;
+    let w = rect.width() * 0.32;
     painter.add(egui::Shape::convex_polygon(
         vec![
-            egui::pos2(c.x - h * 0.62, c.y - h * 0.52),
-            egui::pos2(c.x - h * 0.62, c.y + h * 0.52),
-            egui::pos2(c.x + h * 0.34, c.y),
+            egui::pos2(c.x - w, c.y - h * 0.95),
+            egui::pos2(c.x - w, c.y + h * 0.95),
+            egui::pos2(c.x + w * 0.74, c.y),
         ],
         color,
         Stroke::NONE,
     ));
     let bar = egui::Rect::from_min_max(
-        egui::pos2(c.x + h * 0.5, c.y - h * 0.5),
-        egui::pos2(c.x + h * 0.62, c.y + h * 0.5),
+        egui::pos2(c.x + w * 0.78, c.y - h * 0.95),
+        egui::pos2(c.x + w, c.y + h * 0.95),
     );
     painter.rect_filled(bar, CornerRadius::same(1), color);
 }
 
-/// 播放：向右的实心三角
+/// 播放：白色实心三角，底边略短、尖端略钝，跟设计稿的圆内三角一致。
 fn mini_play_icon(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
     let c = rect.center();
     let h = rect.height() * 0.34;
     painter.add(egui::Shape::convex_polygon(
         vec![
-            egui::pos2(c.x - h * 0.55, c.y - h),
-            egui::pos2(c.x - h * 0.55, c.y + h),
-            egui::pos2(c.x + h * 0.9, c.y),
+            egui::pos2(c.x - h * 0.62, c.y - h),
+            egui::pos2(c.x - h * 0.62, c.y + h),
+            egui::pos2(c.x + h * 1.02, c.y),
         ],
         color,
         Stroke::NONE,
     ));
 }
 
-/// 暂停：两根竖条
+/// 暂停：两根白竖条
 fn mini_pause_icon(painter: &egui::Painter, rect: egui::Rect) {
     let c = rect.center();
-    let h = rect.height() * 0.3;
-    for dx in [-h * 0.45, h * 0.25] {
+    let h = rect.height() * 0.28;
+    for dx in [-h * 0.5, h * 0.5] {
         let bar = egui::Rect::from_min_max(
-            egui::pos2(c.x + dx - h * 0.18, c.y - h),
-            egui::pos2(c.x + dx + h * 0.18, c.y + h),
+            egui::pos2(c.x + dx - h * 0.16, c.y - h),
+            egui::pos2(c.x + dx + h * 0.16, c.y + h),
         );
         painter.rect_filled(bar, CornerRadius::same(2), Color32::WHITE);
     }
 }
 
-/// 待播清单：三横线，最短的一条右边带小箭头
+/// 待播清单：三条横线，最后一条末尾带个指向右下的小箭头（看齐设计稿那个「队列」图标）。
 fn mini_list_icon(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
     let c = rect.center();
-    let w = rect.width() * 0.34;
-    let step = rect.height() * 0.16;
+    let w = rect.width() * 0.30;
+    let step = rect.height() * 0.19;
     for (i, dy) in [-1.0_f32, 0.0, 1.0].iter().enumerate() {
-        let len = if i == 2 { w * 1.35 } else { w * 1.6 };
         let y = c.y + dy * step;
+        let len = if i == 2 { w * 1.15 } else { w * 1.75 };
         let line = egui::Rect::from_min_max(
-            egui::pos2(c.x - w, y - 1.1),
-            egui::pos2(c.x - w + len, y + 1.1),
+            egui::pos2(c.x - w, y - 1.4),
+            egui::pos2(c.x - w + len, y + 1.4),
         );
         painter.rect_filled(line, CornerRadius::same(1), color);
         if i == 2 {
-            // 末尾的小三角，看着像「加入播放列表」
-            painter.add(egui::Shape::convex_polygon(
-                vec![
-                    egui::pos2(c.x - w + len + 4.0, y - 3.4),
-                    egui::pos2(c.x - w + len + 4.0, y + 3.4),
-                    egui::pos2(c.x - w + len + 9.5, y),
-                ],
-                color,
-                Stroke::NONE,
-            ));
+            // 末端箭头：两条短线组成「↘」
+            let tip = egui::pos2(c.x - w + len + 7.0, y + 2.0);
+            painter.line_segment(
+                [tip + vec2(-4.0, -0.5), tip],
+                Stroke::new(1.6_f32, color),
+            );
+            painter.line_segment(
+                [tip + vec2(-0.5, -4.0), tip],
+                Stroke::new(1.6_f32, color),
+            );
         }
     }
 }
@@ -5241,4 +5318,21 @@ mod round_cover_tests {
         assert!(center[3] > 0, "中心不能是透明的");
         let _ = px;
     }
+}
+
+/// 喜欢：实心心形（两个圆 + 一个尖角三角），跟迷你卡片里那颗心同一套画法。
+fn heart_icon(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    let c = rect.center();
+    let s = rect.width().min(rect.height()) * 0.42;
+    painter.circle_filled(c + vec2(-s * 0.5, -s * 0.28), s * 0.62, color);
+    painter.circle_filled(c + vec2(s * 0.5, -s * 0.28), s * 0.62, color);
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(c.x - s * 1.05, c.y - s * 0.05),
+            egui::pos2(c.x + s * 1.05, c.y - s * 0.05),
+            egui::pos2(c.x, c.y + s * 1.15),
+        ],
+        color,
+        Stroke::NONE,
+    ));
 }
