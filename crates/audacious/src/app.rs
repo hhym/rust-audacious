@@ -116,7 +116,7 @@ pub struct App {
     search_rx: Option<Receiver<Result<Vec<serde_json::Value>, String>>>,
     /// 在线歌曲解析结果：item + 播放地址
     resolve_rx: Option<
-        Receiver<Result<(serde_json::Value, audplugins::MediaSource, bool), String>>,
+        Receiver<Result<(serde_json::Value, audplugins::MediaSource, bool, usize), String>>,
     >,
     /// 主面板当前标签页
     tab: MainTab,
@@ -135,6 +135,24 @@ pub struct App {
     song_select: std::collections::BTreeSet<usize>,
     /// Shift 连选的起点
     song_anchor: Option<usize>,
+    /// 按专辑视图里正在看哪张专辑
+    album_filter: String,
+    /// 当前在线曲目（插件 + 原始 item），歌词从这里取
+    current_online: Option<(usize, serde_json::Value)>,
+    /// 歌词加载结果对应的曲目 key
+    lyric_key: String,
+    lyric_state: LyricState,
+    lyric_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+    lyric_active: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum LyricState {
+    Idle,
+    Loading,
+    Lines(Vec<(f64, String)>),
+    Plain(String),
+    Error(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -145,6 +163,7 @@ enum MainTab {
     Playlists,
     Songs,
     Lyrics,
+    Album,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -206,6 +225,12 @@ impl App {
             home_error: None,
             song_select: std::collections::BTreeSet::new(),
             song_anchor: None,
+            album_filter: String::new(),
+            current_online: None,
+            lyric_key: String::new(),
+            lyric_state: LyricState::Idle,
+            lyric_rx: None,
+            lyric_active: 0,
         };
         app.plugins = app.collect_plugins();
         app.reload_media_plugins();
@@ -1088,20 +1113,20 @@ impl App {
         }
     }
 
+    /// 底部播放条：细一条，封面 + 曲目信息 + 播放控制 + 音量，下方通栏进度。
     fn nowband_ui(&mut self, ctx: &egui::Context, p: &Palette) {
         egui::TopBottomPanel::bottom("nowband")
-            .exact_height(96.0)
+            .exact_height(100.0)
             .frame(egui::Frame::NONE.fill(if p.dark {
                 Color32::from_rgb(17, 18, 21)
             } else {
                 p.panel_alt
             }))
             .show(ctx, |ui| {
-                ui.add_space(8.0);
+                ui.add_space(5.0);
                 ui.horizontal(|ui| {
-                    ui.add_space(14.0);
-                    let (rect, _) =
-                        ui.allocate_exact_size(vec2(78.0, 78.0), Sense::hover());
+                    ui.add_space(12.0);
+                    let (rect, _) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::hover());
                     let painter = ui.painter();
                     painter.rect_filled(rect, CornerRadius::same(6), p.accent_soft);
                     painter.rect_stroke(
@@ -1121,67 +1146,121 @@ impl App {
                         rect.center(),
                         Align2::CENTER_CENTER,
                         initial,
-                        FontId::proportional(30.0),
+                        FontId::proportional(18.0),
                         p.accent,
                     );
 
-                    ui.add_space(14.0);
+                    ui.add_space(8.0);
                     ui.vertical(|ui| {
-                        ui.add_space(10.0);
                         let title = if self.state.title.is_empty() {
                             self.t("未在播放", "Nothing playing").to_string()
                         } else {
                             self.state.title.clone()
                         };
-                        ui.label(RichText::new(title).size(17.0).color(p.text).strong());
-                        ui.add_space(2.0);
+                        ui.label(
+                            RichText::new(elide(&title, 30))
+                                .size(14.0)
+                                .strong()
+                                .color(p.text),
+                        );
                         let sub = if self.state.title.is_empty() {
-                            self.t("拖入音频文件开始", "Drop audio to start").to_string()
-                        } else if self.state.artist.is_empty() && self.state.album.is_empty() {
-                            self.t("无标签信息", "No tag info").to_string()
+                            self.t("选一首开始", "Pick a track").to_string()
+                        } else if self.state.artist.is_empty() {
+                            self.state.album.clone()
                         } else {
                             format!("{} · {}", self.state.artist, self.state.album)
                         };
-                        ui.label(RichText::new(sub).size(12.0).color(p.dim));
-                        ui.add_space(4.0);
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(format!(
-                                    "{} / {}",
-                                    theme::time_text(self.state.position),
-                                    theme::time_text(self.state.length)
-                                ))
-                                .monospace()
-                                .size(11.5)
-                                .color(p.dim),
-                            );
-                            if self.state.status == Status::Playing {
-                                ui.label(
-                                    RichText::new(format!("· {}", self.state.message))
-                                        .size(11.0)
-                                        .color(p.dim),
-                                );
-                            }
-                        });
+                        ui.label(RichText::new(elide(&sub, 34)).size(11.0).color(p.dim));
                     });
 
-                    // 频谱与采样率固定在右下角，不随信息文字宽度浮动
-                    let panel = ui.max_rect();
-                    let spec = egui::Rect::from_min_size(
-                        egui::pos2(panel.right() - 16.0 - 220.0, panel.top() + 12.0),
-                        vec2(220.0, 52.0),
+                    ui.add_space(16.0);
+                    if ui.button("◀◀").on_hover_text(self.t("上一首", "Prev")).clicked() {
+                        self.shared.send(Cmd::Prev);
+                    }
+                    let label = if self.state.status == Status::Playing {
+                        "❚❚"
+                    } else {
+                        "▶"
+                    };
+                    if ui
+                        .add(egui::Button::new(RichText::new(label).size(15.0).color(Color32::WHITE))
+                            .fill(p.accent)
+                            .min_size(vec2(38.0, 30.0)))
+                        .clicked()
+                    {
+                        self.shared.send(Cmd::Toggle);
+                    }
+                    if ui.button("▶▶").on_hover_text(self.t("下一首", "Next")).clicked() {
+                        self.shared.send(Cmd::Next);
+                    }
+                    ui.add_space(6.0);
+                    if ui.button("■").on_hover_text(self.t("停止", "Stop")).clicked() {
+                        self.shared.send(Cmd::Stop);
+                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(12.0);
+                        let mut vol = self.config.volume;
+                        if ui
+                            .add_sized(
+                                vec2(110.0, 20.0),
+                                egui::Slider::new(&mut vol, 0.0..=1.0).show_value(false),
+                            )
+                            .changed()
+                        {
+                            self.config.volume = vol;
+                            self.shared.send(Cmd::SetVolume(vol));
+                        }
+                        ui.label(RichText::new("音量").small().color(p.dim));
+                        ui.add_space(14.0);
+                        let (spec_rect, _) =
+                            ui.allocate_exact_size(vec2(96.0, 26.0), Sense::hover());
+                        paint_spectrum(ui.painter(), spec_rect, &self.spectrum, p);
+                    });
+                });
+
+                // 通栏进度条（自绘，保证细条也看得见）
+                let len = self.state.length.max(1.0);
+                let pos = self.state.position.clamp(0.0, len);
+                ui.horizontal(|ui| {
+                    ui.add_space(12.0);
+                    ui.label(
+                        RichText::new(theme::time_text(self.state.position))
+                            .monospace()
+                            .size(10.5)
+                            .color(p.dim),
                     );
-                    paint_spectrum(ui.painter(), spec, &self.spectrum, p);
-                    ui.painter().text(
-                        egui::pos2(spec.left(), spec.bottom() + 12.0),
-                        Align2::LEFT_CENTER,
-                        format!(
-                            "{} Hz  ·  {}",
-                            self.state.sample_rate,
-                            self.state.status.label()
-                        ),
-                        FontId::proportional(11.0),
-                        p.dim,
+                    ui.add_space(6.0);
+                    let width = (ui.available_width() - 90.0).max(120.0);
+                    let (rect, resp) =
+                        ui.allocate_exact_size(vec2(width, 10.0), Sense::click_and_drag());
+                    let painter = ui.painter();
+                    painter.rect_filled(rect, CornerRadius::same(5), p.panel);
+                    let frac = (pos / len) as f32;
+                    let fill = egui::Rect::from_min_size(
+                        rect.min,
+                        vec2(rect.width() * frac, rect.height()),
+                    );
+                    painter.rect_filled(fill, CornerRadius::same(5), p.accent);
+                    if resp.hovered() {
+                        painter.circle_filled(
+                            egui::pos2(rect.left() + rect.width() * frac, rect.center().y),
+                            5.0,
+                            p.accent,
+                        );
+                    }
+                    if resp.clicked() || resp.dragged() {
+                        if let Some(p) = resp.interact_pointer_pos() {
+                            let frac = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+                            self.shared.send(Cmd::Seek(frac as f64 * len));
+                        }
+                    }
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(theme::time_text(self.state.length))
+                            .monospace()
+                            .size(10.5)
+                            .color(p.dim),
                     );
                 });
             });
@@ -1581,9 +1660,36 @@ impl App {
             }
         }
 
+        if let Some(rx) = &self.lyric_rx {
+            match rx.try_recv() {
+                Ok(Ok(raw)) => {
+                    self.lyric_rx = None;
+                    self.lyric_state = if raw.trim().is_empty() {
+                        LyricState::Error("插件没有返回歌词".into())
+                    } else {
+                        let lines = parse_lrc(&raw);
+                        if lines.is_empty() {
+                            LyricState::Plain(raw)
+                        } else {
+                            LyricState::Lines(lines)
+                        }
+                    };
+                }
+                Ok(Err(err)) => {
+                    self.lyric_rx = None;
+                    self.lyric_state = LyricState::Error(err.to_string());
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.lyric_rx = None;
+                    self.lyric_state = LyricState::Error("歌词线程异常结束".into());
+                }
+            }
+        }
+
         if let Some(rx) = &self.resolve_rx {
             match rx.try_recv() {
-                Ok(Ok((item, source, play_now))) => {
+                Ok(Ok((item, source, play_now, plugin_index))) => {
                     self.resolve_rx = None;
                     audplugins::remember_headers(&source.url, &source.headers);
                     let entry = remote_entry(&item, &source.url);
@@ -1596,6 +1702,10 @@ impl App {
                     };
                     self.shared.send(Cmd::Refresh);
                     if play_now {
+                        self.current_online = Some((plugin_index, item.clone()));
+                        self.lyric_key.clear();
+                        self.lyric_state = LyricState::Idle;
+                        self.lyric_rx = None;
                         self.shared.send(Cmd::PlayIndex(index));
                         self.toast(format!("正在播放 {title}"));
                     } else {
@@ -1661,6 +1771,7 @@ impl App {
         }
 
         let item = item.clone();
+        let index = self.search_plugin;
         let (tx, rx) = std::sync::mpsc::channel();
         self.resolve_rx = Some(rx);
         std::thread::spawn(move || {
@@ -1669,7 +1780,7 @@ impl App {
                 .media(&item, "standard")
                 .map_err(|e| e.to_string());
             log::info!("resolve result: {:?}", result);
-            let _ = tx.send(result.map(|url| (item, url, play_now)));
+            let _ = tx.send(result.map(|url| (item, url, play_now, index)));
         });
     }
 
@@ -2223,6 +2334,7 @@ impl App {
                     MainTab::Liked => self.liked_tab(ui, p),
                     MainTab::Playlists => self.playlists_tab(ui, p),
                     MainTab::Lyrics => self.lyrics_tab(ui, p),
+                    MainTab::Album => self.album_tab(ui, p),
                 }
             });
     }
@@ -2355,11 +2467,27 @@ impl App {
                     );
                 }
                 for (album, count) in albums.iter().take(8) {
-                    ui.label(
-                        RichText::new(format!("{}  ·  {}", elide(album, 14), count))
-                            .small()
-                            .color(p.dim),
+                    let text = format!("{}  ·  {}", elide(album, 14), count);
+                    let width = ui.available_width();
+                    let (rect, resp) =
+                        ui.allocate_exact_size(vec2(width, 24.0), Sense::click());
+                    if self.tab == MainTab::Album && self.album_filter == *album {
+                        ui.painter()
+                            .rect_filled(rect, CornerRadius::same(5), p.accent_soft);
+                    } else if resp.hovered() {
+                        ui.painter().rect_filled(rect, CornerRadius::same(5), p.panel);
+                    }
+                    ui.painter().text(
+                        rect.left_center() + vec2(6.0, 0.0),
+                        Align2::LEFT_CENTER,
+                        text,
+                        FontId::proportional(11.5),
+                        p.dim,
                     );
+                    if resp.clicked() {
+                        self.album_filter = album.clone();
+                        self.tab = MainTab::Album;
+                    }
                 }
             });
     }
@@ -2402,6 +2530,14 @@ impl App {
         if resp.clicked() {
             self.tab = tab;
         }
+    }
+
+    fn album_counts_btn_count(&self) -> usize {
+        self.album_counts()
+            .iter()
+            .find(|(name, _)| name == &self.album_filter)
+            .map(|(_, n)| *n)
+            .unwrap_or(0)
     }
 
     fn album_counts(&self) -> Vec<(String, usize)> {
@@ -2472,12 +2608,21 @@ impl App {
                 self.t("歌词", "Lyrics"),
                 self.t("跟随正在播放的曲目", "Follows the current track"),
             ),
+            MainTab::Album => (
+                self.t("专辑", "Album"),
+                self.t("列表里这张专辑的曲目", "Tracks of this album in the queue"),
+            ),
+        };
+        let title = if self.tab == MainTab::Album && !self.album_filter.is_empty() {
+            format!("{} · {}", self.t("专辑", "Album"), self.album_filter)
+        } else {
+            title.to_string()
         };
         ui.add_space(12.0);
         ui.horizontal(|ui| {
             ui.add_space(16.0);
             ui.vertical(|ui| {
-                ui.label(RichText::new(title).size(20.0).strong().color(p.text));
+                ui.label(RichText::new(&title).size(20.0).strong().color(p.text));
                 ui.label(RichText::new(subtitle).small().color(p.dim));
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2488,6 +2633,7 @@ impl App {
                     }
                     MainTab::Songs => format!("队列 {} 首", self.playlist.len()),
                     MainTab::Liked => format!("{} 首", self.liked.len()),
+                    MainTab::Album => format!("{} 首", self.album_counts_btn_count()),
                     _ => String::new(),
                 };
                 ui.label(RichText::new(hint).small().color(p.dim));
@@ -2497,44 +2643,219 @@ impl App {
         ui.separator();
     }
 
-    /// 歌词页：先显示当前曲目信息，插件支持时再补歌词正文。
+    /// 歌词页：按时间轴滚动高亮，数据来自插件的 getLyric / lyrics。
     fn lyrics_tab(&mut self, ui: &mut egui::Ui, p: &Palette) {
-        ui.add_space(16.0);
-        let current = self.playlist.current().cloned();
-        match current {
-            Some(entry) => {
+        ui.add_space(10.0);
+        let playing_title = self.state.title.clone();
+        if playing_title.is_empty() {
+            ui.horizontal(|ui| {
+                ui.add_space(20.0);
+                ui.label(RichText::new(self.t("还没有正在播放的歌", "Nothing playing")).color(p.dim));
+            });
+            return;
+        }
+        let sub = if self.state.artist.is_empty() {
+            self.state.album.clone()
+        } else {
+            format!("{} · {}", self.state.artist, self.state.album)
+        };
+        ui.horizontal(|ui| {
+            ui.add_space(20.0);
+            ui.vertical(|ui| {
+                ui.label(RichText::new(&playing_title).size(21.0).color(p.accent));
+                ui.label(RichText::new(sub).small().color(p.dim));
+            });
+        });
+        ui.add_space(10.0);
+
+        if self.current_online.is_none() {
+            ui.horizontal(|ui| {
+                ui.add_space(20.0);
+                ui.label(
+                    RichText::new(self.t(
+                        "本地文件的歌词标签还没解析，先显示播放信息。",
+                        "Local lyric tags are not parsed yet; showing playback info.",
+                    ))
+                    .color(p.dim),
+                );
+            });
+            return;
+        }
+
+        let key = self.current_lyric_key();
+        if self.lyric_key != key {
+            self.lyric_key = key;
+            self.start_lyric_load();
+        }
+        match &self.lyric_state {
+            LyricState::Loading => {
                 ui.horizontal(|ui| {
                     ui.add_space(20.0);
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new(entry.display_title()).size(22.0).color(p.accent));
-                        ui.label(
-                            RichText::new(format!(
-                                "{} · {}",
-                                entry.display_artist(),
-                                entry.display_album()
-                            ))
-                            .color(p.dim),
-                        );
-                    });
+                    ui.spinner();
+                    ui.label(RichText::new(self.t("正在取歌词…", "Loading lyrics…")).color(p.dim));
                 });
-                ui.add_space(20.0);
+            }
+            LyricState::Error(err) => {
                 ui.horizontal(|ui| {
                     ui.add_space(20.0);
                     ui.label(
-                        RichText::new(self.t(
-                            "歌词面板还没接：在线曲目的 getLyric / lyrics 已可用，下一步按时间轴滚动显示。",
-                            "Lyrics view is not wired yet; plugin lyrics are available, next step is synced scrolling.",
-                        ))
-                        .color(p.dim),
+                        RichText::new(format!("歌词不可用：{err}"))
+                            .small()
+                            .color(egui::Color32::from_rgb(190, 90, 90)),
                     );
                 });
             }
-            None => {
-                ui.horizontal(|ui| {
-                    ui.add_space(20.0);
-                    ui.label(RichText::new(self.t("还没有正在播放的歌", "Nothing playing")).color(p.dim));
-                });
+            LyricState::Plain(text) => {
+                let text = text.clone();
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.add_space(10.0);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.add_space(20.0);
+                            ui.label(RichText::new(text).size(15.0).color(p.text));
+                        });
+                    });
             }
+            LyricState::Lines(lines) => {
+                let lines = lines.clone();
+                let pos = self.state.position;
+                let mut active = 0usize;
+                for (i, (t, _)) in lines.iter().enumerate() {
+                    if *t <= pos + 0.05 {
+                        active = i;
+                    }
+                }
+                let changed = self.lyric_active != active;
+                self.lyric_active = active;
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.add_space(ui.available_height() * 0.3);
+                        for (i, (_, text)) in lines.iter().enumerate() {
+                            let is_active = i == active;
+                            let color = if is_active { p.accent } else { p.dim };
+                            let size = if is_active { 18.0 } else { 14.5 };
+                            let text = if is_active {
+                                RichText::new(text).size(size).color(color).strong()
+                            } else {
+                                RichText::new(text).size(size).color(color)
+                            };
+                            let resp = ui.horizontal(|ui| {
+                                ui.add_space(20.0);
+                                ui.label(text)
+                            });
+                            if is_active && changed {
+                                ui.scroll_to_rect(resp.response.rect, Some(egui::Align::Center));
+                            }
+                        }
+                        ui.add_space(ui.available_height() * 0.5);
+                    });
+            }
+            LyricState::Idle => {}
+        }
+    }
+
+    /// 当前在线曲目的歌词缓存键。
+    fn current_lyric_key(&self) -> String {
+        match &self.current_online {
+            Some((idx, item)) => format!(
+                "{idx}|{}|{}",
+                item["title"].as_str().unwrap_or(""),
+                item["artist"].as_str().unwrap_or("")
+            ),
+            None => String::new(),
+        }
+    }
+
+    fn start_lyric_load(&mut self) {
+        let Some((index, item)) = self.current_online.clone() else {
+            return;
+        };
+        let Some(plugin) = self.media_plugins.get(index).cloned() else {
+            self.lyric_state = LyricState::Error(self.t("曲目来自插件，但插件已被卸载", "Plugin missing").into());
+            return;
+        };
+        if !plugin.supports("lyric") && !plugin.supports("lyrics") && !plugin.supports("getLyric") {
+            self.lyric_state = LyricState::Error(self.t("该插件没有歌词接口", "No lyric API").into());
+            return;
+        }
+        self.lyric_state = LyricState::Loading;
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.lyric_rx = Some(rx);
+        std::thread::spawn(move || {
+            let out = plugin.lyric(&item).map_err(|e| e.to_string());
+            let text = out.and_then(|v| extract_lyric_text(&v).ok_or_else(|| "插件没有返回歌词文本".to_string()));
+            let _ = tx.send(text);
+        });
+    }
+
+    /// 按专辑视图：列出这张专辑里的曲目，点一行直接播。
+    fn album_tab(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        ui.add_space(10.0);
+        if self.album_filter.is_empty() {
+            return;
+        }
+        let album = self.album_filter.clone();
+        let rows: Vec<(usize, String, String, f64)> = self
+            .shared
+            .playlist
+            .lock()
+            .map(|pl| {
+                pl.entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| e.display_album() == album)
+                    .map(|(i, e)| {
+                        (i, e.display_title(), e.display_artist(), e.length.unwrap_or(0.0))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if rows.is_empty() {
+            ui.horizontal(|ui| {
+                ui.add_space(20.0);
+                ui.label(RichText::new(self.t("这张专辑的歌已经不在列表里了", "No tracks in this album")).color(p.dim));
+            });
+            return;
+        }
+        let mut play: Option<usize> = None;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                egui::Grid::new("album-grid")
+                    .num_columns(4)
+                    .striped(true)
+                    .min_col_width(60.0)
+                    .show(ui, |ui| {
+                        ui.label(RichText::new(self.t("标题", "Title")).small().color(p.accent));
+                        ui.label(RichText::new(self.t("艺人", "Artist")).small().color(p.accent));
+                        ui.label(RichText::new(self.t("时长", "Length")).small().color(p.accent));
+                        ui.label("");
+                        ui.end_row();
+                        for (index, title, artist, len) in &rows {
+                            if ui
+                                .add(egui::Button::new(RichText::new(title).color(p.text)).frame(false))
+                                .clicked()
+                            {
+                                play = Some(*index);
+                            }
+                            ui.label(RichText::new(artist).small().color(p.dim));
+                            ui.label(
+                                RichText::new(theme::time_text(*len))
+                                    .monospace()
+                                    .small()
+                                    .color(p.dim),
+                            );
+                            if ui.small_button("▶").clicked() {
+                                play = Some(*index);
+                            }
+                            ui.end_row();
+                        }
+                    });
+            });
+        if let Some(index) = play {
+            self.shared.send(Cmd::PlayIndex(index));
         }
     }
 
@@ -3372,5 +3693,95 @@ fn elide(text: &str, max: usize) -> String {
         let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
         out.push('…');
         out
+    }
+}
+
+/// 从插件返回的 JSON 里挖歌词文本：优先 rawLrc / lrc，其次 lyric(s) / text。
+fn extract_lyric_text(value: &serde_json::Value) -> Option<String> {
+    fn walk(value: &serde_json::Value, best: &mut Option<String>) {
+        match value {
+            serde_json::Value::String(s) => {
+                if s.len() > best.as_ref().map(|b| b.len()).unwrap_or(0) {
+                    *best = Some(s.clone());
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    walk(item, best);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                for (key, item) in map {
+                    let lk = key.to_ascii_lowercase();
+                    if lk.contains("lrc")
+                        || lk.contains("lyric")
+                        || lk == "text"
+                        || lk == "content"
+                        || lk == "contenttext"
+                    {
+                        walk(item, best);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut best = None;
+    walk(value, &mut best);
+    best.filter(|s| !s.trim().is_empty())
+}
+
+/// 解析 LRC：`[mm:ss.xx]文本`，返回 (秒, 文本)。
+fn parse_lrc(raw: &str) -> Vec<(f64, String)> {
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let mut rest = line.trim();
+        let mut stamp = None;
+        while rest.starts_with('[') {
+            let Some(end) = rest.find(']') else { break };
+            let tag = &rest[1..end];
+            let mut parts = tag.split(':');
+            if let (Some(mm), Some(ss)) = (parts.next(), parts.next()) {
+                if let (Ok(m), Ok(s)) = (mm.parse::<f64>(), ss.parse::<f64>()) {
+                    stamp = Some(m * 60.0 + s);
+                }
+            }
+            rest = rest[end + 1..].trim_start();
+        }
+        if let Some(sec) = stamp {
+            let text = rest.trim();
+            if !text.is_empty() {
+                out.push((sec, text.to_string()));
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    out
+}
+
+#[cfg(test)]
+mod lyric_parse_tests {
+    use super::{extract_lyric_text, parse_lrc};
+
+    #[test]
+    fn parse_lrc_reads_timestamps_and_text() {
+        let raw = "[00:03.00] 第一句\n[00:08.50]第二句\n不是时间戳的行\n[01:02.25] 第三句 ";
+        let lines = parse_lrc(raw);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].0, 3.0);
+        assert_eq!(lines[0].1, "第一句");
+        assert!((lines[1].0 - 8.5).abs() < 0.001);
+        assert!((lines[2].0 - 62.25).abs() < 0.001);
+    }
+
+    #[test]
+    fn extract_lyric_text_prefers_longest_field() {
+        let value = serde_json::json!({
+            "rawLrc": "",
+            "lrc": "[00:01.00] 一句\n[00:05.00] 第二句",
+            "extra": { "text": "短" }
+        });
+        let text = extract_lyric_text(&value).unwrap();
+        assert!(text.contains("第二句"));
     }
 }
