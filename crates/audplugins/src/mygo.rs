@@ -24,7 +24,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::{invoke_exports, invoke_exports_with, platform_name, storage_access};
+use crate::{invoke_exports_with, platform_name, storage_access};
 
 /// mygo 的插件清单。
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -483,9 +483,7 @@ fn mygo_context_parts_with_limit(
 ) -> Context {
     let mut ctx = crate::new_context_with_limit(loop_limit);
 
-    let data_dir = dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(audcore::APP_NAME)
+    let data_dir = audcore::config::data_dir()
         .join("mygo-data")
         .join(&manifest.id);
 

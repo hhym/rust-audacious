@@ -149,6 +149,20 @@ cargo test
 静音解码器的实时推进、MusicFree 插件加载/cheerio 搜索/取播放地址与歌词、
 MyGo 插件的 ES 模块改写/搜索/取地址/歌词/设置项。共 32 个用例。
 
+## Android（分支 `android`，进行中）
+
+安卓手机版单独放在 `android` 分支，主线 `main` 不受影响：数据目录已统一到
+`audcore::config::data_dir()`，APK 清单模板（`android/AndroidManifest.xml`）、
+构建脚本（`scripts/build-android.sh`）和移植计划都就位，详细步骤见
+[`docs/ANDROID.md`](docs/ANDROID.md)。
+
+```bash
+git checkout android
+rustup target add aarch64-linux-android
+cargo install cargo-apk
+./scripts/build-android.sh        # 需先设 ANDROID_NDK_HOME
+```
+
 ## 版本
 
 版本号统一在 `Cargo.toml` 的 `workspace.package.version` 维护，按习惯从 **5.0** 起标，当前 **5.18.0**：

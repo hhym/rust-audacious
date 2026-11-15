@@ -233,6 +233,16 @@ fn cjk_candidates() -> Vec<PathBuf> {
                 list.push(fonts.join(name));
             }
         }
+    } else if cfg!(target_os = "android") {
+        // Android 系统的 CJK 字体就在这几个固定位置
+        for p in [
+            "/system/fonts/NotoSansCJK-Regular.ttc",
+            "/system/fonts/NotoSansCJKsc-Regular.otf",
+            "/system/fonts/DroidSansFallbackFull.ttf",
+            "/system/fonts/DroidSansFallback.ttf",
+        ] {
+            list.push(PathBuf::from(p));
+        }
     } else if cfg!(target_os = "macos") {
         for p in [
             "/System/Library/Fonts/PingFang.ttc",

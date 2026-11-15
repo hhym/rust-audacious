@@ -19,10 +19,7 @@ pub(crate) struct Entry {
 }
 
 pub(crate) fn cache_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(audcore::APP_NAME)
-        .join("plugin-cache.json")
+    audcore::config::data_dir().join("plugin-cache.json")
 }
 
 /// 用文件/目录的修改时间和大小做键，文件一改缓存自然失效。

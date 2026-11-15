@@ -60,10 +60,7 @@ pub struct Liked {
 
 impl Liked {
     pub fn path() -> PathBuf {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(audcore::APP_NAME)
-            .join("liked.json")
+        audcore::config::data_dir().join("liked.json")
     }
 
     pub fn load() -> Liked {

@@ -24,10 +24,7 @@ use serde_json::Value;
 
 /// 插件目录：`<config>/audacious-rs/plugins`
 pub fn plugins_dir() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(audcore::APP_NAME)
-        .join("plugins")
+    audcore::config::data_dir().join("plugins")
 }
 
 /// 插件对外的一层描述，UI 用这个列表。
@@ -1349,10 +1346,7 @@ fn aes_crypt(op: &str, data_b64: &str, key_b64: &str, iv_b64: &str, padding: &st
 }
 
 fn storage_path() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(audcore::APP_NAME)
-        .join("plugin-storage.json")
+    audcore::config::data_dir().join("plugin-storage.json")
 }
 
 pub(crate) fn storage_access(key: &str, value: Option<&str>) -> String {

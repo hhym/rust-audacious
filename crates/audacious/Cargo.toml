@@ -24,3 +24,10 @@ dirs = "5"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 base64 = "0.22"
 qrcode = "0.14"
+
+[package.metadata.android]
+package = "io.github.hhym.audaciousrs"
+apk_name = "audacious-rs"
+build_targets = ["aarch64-linux-android"]
+res = "../../android/res"
+manifest = "../../android/AndroidManifest.xml"

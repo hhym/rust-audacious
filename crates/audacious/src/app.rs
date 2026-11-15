@@ -507,9 +507,7 @@ impl App {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let path = dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(audcore::APP_NAME)
+        let path = audcore::config::data_dir()
             .join("playlists")
             .join(format!("playlist-{stamp}.m3u"));
         if let Some(dir) = path.parent() {
@@ -4677,10 +4675,7 @@ impl App {
     }
 
     fn playlist_files() -> Vec<PathBuf> {
-        let dir = dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(audcore::APP_NAME)
-            .join("playlists");
+        let dir = audcore::config::data_dir().join("playlists");
         let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
             .map(|entries| {
                 entries

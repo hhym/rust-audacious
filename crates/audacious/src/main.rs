@@ -104,9 +104,7 @@ fn init_logging() {
 
     #[cfg(all(windows, not(debug_assertions)))]
     {
-        let dir = dirs::config_dir()
-            .map(|d| d.join("audacious-rs"))
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let dir = audcore::config::data_dir();
         let _ = std::fs::create_dir_all(&dir);
         if let Ok(file) = std::fs::File::create(dir.join("app.log")) {
             builder.target(env_logger::Target::Pipe(Box::new(file)));

@@ -73,10 +73,7 @@ impl Response {
 
 /// 端口文件路径。
 pub fn port_file() -> PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(crate::APP_NAME)
-        .join("control.port")
+    crate::config::data_dir().join("control.port")
 }
 
 /// 从端口文件读取服务端口；没有则回退到默认 6600。

@@ -135,13 +135,26 @@ impl Default for Config {
     }
 }
 
+/// 应用私有目录 `<config>/audacious-rs`。
+///
+/// 桌面上就是 `~/.config/audacious-rs`；Android 上 `dirs::config_dir()` 通常返回 None，
+/// 此时由启动代码设 `AUDACIOUS_RS_DATA_DIR` 环境变量指向 App 私有目录，
+/// 路径解析统一走这里，别在各处各写一份。
+pub fn data_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("AUDACIOUS_RS_DATA_DIR") {
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(crate::APP_NAME)
+}
+
 impl Config {
     /// 配置文件路径：`<config>/audacious-rs/config.json`
     pub fn path() -> PathBuf {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(crate::APP_NAME)
-            .join("config.json")
+        data_dir().join("config.json")
     }
 
     pub fn load() -> Self {
