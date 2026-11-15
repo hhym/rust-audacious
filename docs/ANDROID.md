@@ -53,6 +53,7 @@ export JAVA_HOME=/path/to/jdk17                # keytool / apksigner 需要 JDK 
 | APK 清单 | `android/AndroidManifest.xml` | `NativeActivity` + `android.app.lib_name=audacious_rs`、`uses-sdk 26/34`、媒体权限 |
 | 图标 | `android/res/mipmap-*` | 由 `crates/audacious/assets/icon.png` 缩放出的 5 档 launcher 图标 |
 | CJK 字体 | `theme::cjk_candidates()` | 已带 `/system/fonts/NotoSansCJK-Regular.ttc` 等 Android 路径 |
+| SAF 选文件 | `android.rs` + `android/java/.../MainActivity.java` | 「添加文件」在 Android 上拉起 `ACTION_OPEN_DOCUMENT`（多选音频）；Java 壳把 `onActivityResult` 转给 JNI，Rust 用 `ContentResolver` 读流落到 `files/imported/`，再把路径交给列表 |
 | 手机布局 | `app.rs::mobile_mode / mobile_command_bar / mobile_play_bar` | 侧栏变顶部可横滑导航（40px 高），菜单栏/工具栏/状态栏收成一条命令条，播放条换封面+三键+满宽进度；窄屏列表只留 序号/标题/时长 三列、行高 34px；`config.mobile_layout` 或窗口 <700px 自动生效 |
 
 已实测（桌面 430×900 窗口）：导航切换、命令条按钮、播放条播放/暂停/切歌、进度点按 seek、
@@ -62,8 +63,9 @@ export JAVA_HOME=/path/to/jdk17                # keytool / apksigner 需要 JDK 
 
 1. `adb install -r dist/rust-audacious-<ver>-android-arm64.apk`，首启看 `adb logcat -s audacious`
    有没有启动日志与 eframe 报错。
-2. 本地文件选择：桌面用的目录浏览器（`Browser`）在 Android 上读不到 `/storage`，
-   要接 SAF（`ACTION_OPEN_DOCUMENT`）+ `ContentResolver` 取 fd，再交给 symphonia。
+2. SAF 选文件：点「添加文件」→ 选 1 首和多选各试一次，确认 `files/imported/` 落盘、
+   列表里能播。注意目前是**同步拷贝**（回调跑在 UI 线程），几十 MB 的整轨会卡一下，
+   后续改成后台线程 + 进度。
 3. 音频焦点：来电/其他 App 抢占时暂停，接 `AAudio` 的焦点回调。
 4. 插件：`boa` + `reqwest(rustls)` 在 arm64 上重跑一遍 `audplugins` 的用例。
 

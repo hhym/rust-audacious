@@ -40,7 +40,9 @@ BUILD_TOOLS="$ANDROID_HOME/build-tools/${BUILD_TOOLS_VERSION:-34.0.0}"
 PLATFORM="$ANDROID_HOME/platforms/android-${ANDROID_PLATFORM:-34}"
 [[ -f "$PLATFORM/android.jar" ]] || PLATFORM="$(ls -d "$ANDROID_HOME"/platforms/android-* 2>/dev/null | sort -V | tail -1)"
 
-for t in aapt2 zipalign apksigner; do need "$BUILD_TOOLS/$t" "SDK build-tools 里没有 $t"; done
+for t in aapt2 zipalign apksigner d8; do need "$BUILD_TOOLS/$t" "SDK build-tools 里没有 $t"; done
+need javac "装 JDK 17，并把 bin 放进 PATH"
+need java "装 JDK 17，并把 bin 放进 PATH"
 
 TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
 [[ -d "$TC" ]] || { echo "NDK 工具链不在 $TC"; exit 1; }
@@ -75,8 +77,17 @@ echo "==> aapt2 编译资源"
     -R "$WORK/res.zip" \
     --auto-add-overlay
 
-echo "==> 塞入 native 库"
-(cd "$WORK" && zip -q -r base.apk lib)
+echo "==> 编译 Java 壳（MainActivity，转发 onActivityResult）"
+rm -rf "$WORK/classes" "$WORK/dex"
+mkdir -p "$WORK/classes" "$WORK/dex"
+javac --release 8 -classpath "$PLATFORM/android.jar" -d "$WORK/classes" \
+    $(find "$ROOT/android/java" -name '*.java')
+"$BUILD_TOOLS/d8" --lib "$PLATFORM/android.jar" --min-api "$API_LEVEL" \
+    --output "$WORK/dex" $(find "$WORK/classes" -name '*.class')
+
+echo "==> 塞入 classes.dex 与 native 库"
+cp "$WORK/dex/classes.dex" "$WORK/classes.dex"
+(cd "$WORK" && zip -q -r base.apk classes.dex lib)
 
 echo "==> zipalign + 签名"
 "$BUILD_TOOLS/zipalign" -f -p 4 "$WORK/base.apk" "$WORK/aligned.apk"

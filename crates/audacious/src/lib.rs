@@ -4,6 +4,8 @@
 //! 两者除了入口和日志/数据目录之外没有任何差别。
 
 pub mod app;
+#[cfg(target_os = "android")]
+pub mod android;
 pub mod effects;
 pub mod engine;
 pub mod ipc_server;
@@ -85,6 +87,8 @@ pub extern "C" fn android_main(app: android_activity::AndroidApp) {
         );
     }
     init_logging();
+    // SAF 选择器要靠 AndroidApp 拿 JavaVM 与 Activity
+    android::install(&app);
 
     let config = Config::load();
     let shared = Shared::spawn(config.clone());

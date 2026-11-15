@@ -554,6 +554,15 @@ impl eframe::App for App {
                 .filter_map(|f| f.path.clone())
                 .collect()
         });
+        // SAF 选完的音频由 android.rs 落盘后塞进通道，这里每帧取走
+        #[cfg(target_os = "android")]
+        {
+            let picked = crate::android::take_picked();
+            if !picked.is_empty() {
+                self.add_paths(&picked);
+            }
+        }
+
         if !dropped.is_empty() {
             let mut audio_paths: Vec<PathBuf> = Vec::new();
             for path in dropped {
@@ -655,12 +664,20 @@ impl App {
                     ui.add_space(6.0);
                     ui.separator();
                     if ui.button(self.t("添加文件", "Add files")).clicked() {
-                        self.browser = Some(Browser::new(
-                            self.config
-                                .last_dir
-                                .clone()
-                                .unwrap_or_else(|| PathBuf::from(".")),
-                        ));
+                        // Android 上没有可浏览的目录树，交给 SAF 系统选择器
+                        #[cfg(target_os = "android")]
+                        {
+                            crate::android::open_audio_picker();
+                        }
+                        #[cfg(not(target_os = "android"))]
+                        {
+                            self.browser = Some(Browser::new(
+                                self.config
+                                    .last_dir
+                                    .clone()
+                                    .unwrap_or_else(|| PathBuf::from(".")),
+                            ));
+                        }
                     }
                     if ui.button(self.t("添加目录", "Add folder")).clicked() {
                         let dir = self
@@ -4497,12 +4514,20 @@ impl App {
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
                     if ui.button(self.t("添加文件", "Add files")).clicked() {
-                        self.browser = Some(Browser::new(
-                            self.config
-                                .last_dir
-                                .clone()
-                                .unwrap_or_else(|| PathBuf::from(".")),
-                        ));
+                        // Android 上没有可浏览的目录树，交给 SAF 系统选择器
+                        #[cfg(target_os = "android")]
+                        {
+                            crate::android::open_audio_picker();
+                        }
+                        #[cfg(not(target_os = "android"))]
+                        {
+                            self.browser = Some(Browser::new(
+                                self.config
+                                    .last_dir
+                                    .clone()
+                                    .unwrap_or_else(|| PathBuf::from(".")),
+                            ));
+                        }
                     }
                     if ui.button(self.t("添加目录", "Add folder")).clicked() {
                         let dir = self
