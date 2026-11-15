@@ -2925,7 +2925,7 @@ impl App {
         }
     }
 
-    const PLUGIN_PAGE_SIZE: usize = 8;
+    const PLUGIN_PAGE_SIZE: usize = 16;
 
     /// 插件选择弹层：每页 8 个，底部翻页。
     fn plugin_picker_ui(
@@ -3006,6 +3006,15 @@ impl App {
                             });
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
+                            if ui
+                                .add_enabled(
+                                    self.plugin_page > 0,
+                                    egui::Button::new(self.t("« 第一页", "« First")),
+                                )
+                                .clicked()
+                            {
+                                self.plugin_page = 0;
+                            }
                             if ui
                                 .add_enabled(
                                     self.plugin_page > 0,
