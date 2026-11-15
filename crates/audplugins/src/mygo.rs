@@ -633,6 +633,37 @@ export const extra = 1;
     }
 
     #[test]
+    fn mygo_abort_controller() {
+        let dir = std::env::temp_dir().join(format!("mygo-abort-{}", std::process::id()));
+        write_plugin(
+            &dir,
+            r#"{"id":"abort","name":"Abort","version":"1.0.0","main":"index.js"}"#,
+            r#"
+export async function search() {
+  const controller = new AbortController();
+  let fired = false;
+  controller.signal.addEventListener("abort", () => { fired = true; });
+  controller.abort();
+  const aborted = AbortSignal.abort();
+  return {
+    tracks: [{
+      id: "1",
+      name: (controller.signal.aborted && fired && aborted.aborted) ? "aborted" : "bad",
+      artists: [{ id: "a", name: "t" }],
+    }],
+    more: false,
+  };
+}
+"#,
+        );
+        let plugin = MygoPlugin::load(&dir);
+        assert!(plugin.info.error.is_none(), "{:?}", plugin.info.error);
+        let tracks = plugin.search_tracks("x", 1).unwrap();
+        assert_eq!(tracks[0]["title"], "aborted");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn mygo_plugin_search_stream_lyrics() {
         let dir = std::env::temp_dir().join(format!("mygo-test-{}", std::process::id()));
         write_plugin(

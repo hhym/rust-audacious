@@ -135,8 +135,18 @@
     }
   }
 
+  function abortError(reason) {
+    if (reason) return reason;
+    var err = new Error("The operation was aborted");
+    err.name = "AbortError";
+    return err;
+  }
+
   function settle(config) {
     // 宿主是同步 HTTP，这里包成 Promise，插件的 await 才能拿到值
+    if (config && config.signal && config.signal.aborted) {
+      return Promise.reject(abortError(config.signal.reason));
+    }
     return new Promise(function (resolve, reject) {
       try {
         resolve(doRequest(config));
@@ -1151,6 +1161,54 @@
     lang: "zh-CN",
     getUserVariables: function () { return {}; },
   };
+
+  // ---------------------------------------------------------------- AbortController
+  // 插件常用它做「请求超时/可取消」。宿主是同步 HTTP，取消只能生效在发起前，
+  // 但至少 abort() / signal.aborted / addEventListener 这套语义是对的。
+  function AbortSignal() {
+    this.aborted = false;
+    this.reason = undefined;
+    this.onabort = null;
+    this.__listeners = [];
+  }
+  AbortSignal.prototype.addEventListener = function (type, fn) {
+    if (type === "abort" && typeof fn === "function") this.__listeners.push(fn);
+  };
+  AbortSignal.prototype.removeEventListener = function (type, fn) {
+    if (type !== "abort") return;
+    this.__listeners = this.__listeners.filter(function (item) { return item !== fn; });
+  };
+  AbortSignal.prototype.throwIfAborted = function () {
+    if (this.aborted) throw this.reason || abortError();
+  };
+  AbortSignal.prototype.__fire = function () {
+    var event = { type: "abort", target: this };
+    if (typeof this.onabort === "function") {
+      try { this.onabort(event); } catch (e) { __log("onabort 出错: " + e); }
+    }
+    this.__listeners.slice().forEach(function (fn) {
+      try { fn(event); } catch (e) { __log("abort 监听器出错: " + e); }
+    });
+  };
+  AbortSignal.abort = function (reason) {
+    var signal = new AbortSignal();
+    signal.aborted = true;
+    signal.reason = reason || abortError();
+    return signal;
+  };
+
+  function AbortController() {
+    this.signal = new AbortSignal();
+  }
+  AbortController.prototype.abort = function (reason) {
+    if (this.signal.aborted) return;
+    this.signal.aborted = true;
+    this.signal.reason = reason || abortError();
+    this.signal.__fire();
+  };
+
+  global.AbortController = AbortController;
+  global.AbortSignal = AbortSignal;
 
   // MyGo 宿主环境里也需要 CryptoJS（AES-ECB 等），这里顺便暴露成全局
   global.CryptoJS = CryptoJS;

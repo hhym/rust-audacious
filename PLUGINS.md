@@ -146,6 +146,7 @@ export function lyrics({ id }) {
 | `host.crypto.aesEcbEncrypt(key, text)` | AES-ECB + PKCS#7，输出十六进制 |
 | `host.openURL(url)` | 用系统浏览器打开 |
 | `URL` / `URLSearchParams` / `setTimeout` / `setInterval` / `console` | 常规 JS 环境 |
+| `AbortController` / `AbortSignal` | 插件做请求超时/取消时用；宿主是同步 HTTP，`abort()` 只能拦住「还没发起」的请求，但 `signal.aborted` / `reason` / `addEventListener` / `AbortSignal.abort()` / `AbortSignal.timeout()` 都可用 |
 
 `plugin.json` 的 `settings` 会直接显示在「插件」窗口每个插件下面，失焦即保存，
 可以声明 `"type": "password"` 以掩码输入。

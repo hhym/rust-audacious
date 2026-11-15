@@ -1259,6 +1259,28 @@ module.exports = {
         assert!(err.contains("重复声明"));
     }
 
+    const ABORT_PLUGIN: &str = r#"
+module.exports = {
+  platform: "AbortFM",
+  version: "0.1.0",
+  async search() {
+    const controller = new AbortController();
+    if (typeof AbortSignal.timeout !== "undefined") { /* MyGo 才有时基 */ }
+    let fired = false;
+    controller.signal.addEventListener("abort", () => { fired = true; });
+    controller.abort();
+    return { isEnd: true, data: [{ id: "1", title: (controller.signal.aborted && fired) ? "aborted" : "bad" }] };
+  },
+  async getMediaSource() { return { url: "http://example.invalid/a.mp3" }; },
+};
+"#;
+
+    #[test]
+    fn abort_controller_in_polyfill() {
+        let out = call_method(ABORT_PLUGIN, "search", &[]).unwrap();
+        assert_eq!(out["data"][0]["title"], Value::String("aborted".into()));
+    }
+
     #[test]
     fn describes_plugin() {
         let mut ctx = Context::default();

@@ -188,6 +188,66 @@
     return copy;
   };
 
+  function abortError(reason) {
+    if (reason) return reason;
+    var err = new Error("The operation was aborted");
+    err.name = "AbortError";
+    return err;
+  }
+
+  function AbortSignal() {
+    this.aborted = false;
+    this.reason = undefined;
+    this.onabort = null;
+    this.__listeners = [];
+  }
+  AbortSignal.prototype.addEventListener = function (type, fn) {
+    if (type === "abort" && typeof fn === "function") this.__listeners.push(fn);
+  };
+  AbortSignal.prototype.removeEventListener = function (type, fn) {
+    if (type !== "abort") return;
+    this.__listeners = this.__listeners.filter(function (item) { return item !== fn; });
+  };
+  AbortSignal.prototype.throwIfAborted = function () {
+    if (this.aborted) throw this.reason || abortError();
+  };
+  AbortSignal.prototype.__fire = function () {
+    var event = { type: "abort", target: this };
+    if (typeof this.onabort === "function") {
+      try { this.onabort(event); } catch (e) { __log("onabort 出错: " + e); }
+    }
+    this.__listeners.slice().forEach(function (fn) {
+      try { fn(event); } catch (e) { __log("abort 监听器出错: " + e); }
+    });
+  };
+  AbortSignal.abort = function (reason) {
+    var signal = new AbortSignal();
+    signal.aborted = true;
+    signal.reason = reason || abortError();
+    return signal;
+  };
+  AbortSignal.timeout = function (ms) {
+    var signal = new AbortSignal();
+    setTimeout(function () {
+      if (!signal.aborted) {
+        signal.aborted = true;
+        signal.reason = abortError(new Error("TimeoutError"));
+        signal.__fire();
+      }
+    }, ms || 0);
+    return signal;
+  };
+
+  function AbortController() {
+    this.signal = new AbortSignal();
+  }
+  AbortController.prototype.abort = function (reason) {
+    if (this.signal.aborted) return;
+    this.signal.aborted = true;
+    this.signal.reason = reason || abortError();
+    this.signal.__fire();
+  };
+
   function fetch(input, init) {
     init = init || {};
     var urlText = typeof input === "string" ? input : input && input.url ? String(input.url) : String(input);
@@ -203,6 +263,10 @@
           "fetch: 网络权限没有允许 " + parsed.hostname + "（在 plugin.json 的 permissions.network 里加上它）"
         )
       );
+    }
+
+    if (init.signal && init.signal.aborted) {
+      return Promise.reject(abortError(init.signal.reason));
     }
 
     var headers = init.headers || {};
@@ -299,6 +363,8 @@
   globalThis.host = host;
   globalThis.fetch = fetch;
   globalThis.Headers = Headers;
+  globalThis.AbortController = AbortController;
+  globalThis.AbortSignal = AbortSignal;
   globalThis.URL = URL;
   globalThis.URLSearchParams = UrlSearchParams;
   globalThis.setTimeout = setTimeout;
