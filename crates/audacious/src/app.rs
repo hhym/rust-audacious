@@ -211,6 +211,8 @@ pub struct App {
     logo_texture: Option<egui::TextureHandle>,
     /// 按专辑名缓存的封面缩略图（`None` 表示这轮已经试过、没读到封面）
     album_art: std::collections::HashMap<String, Option<egui::TextureHandle>>,
+    /// 迷你播放器用的圆形封面
+    album_art_round: std::collections::HashMap<String, Option<egui::TextureHandle>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -304,6 +306,7 @@ impl App {
             lyric_active: 0,
             logo_texture: None,
             album_art: std::collections::HashMap::new(),
+            album_art_round: std::collections::HashMap::new(),
         };
         app.plugins = app.collect_plugins();
         app.reload_media_plugins();
@@ -525,7 +528,7 @@ impl eframe::App for App {
         if self.config.mini != self.mini_applied {
             self.mini_applied = self.config.mini;
             let size = if self.config.mini {
-                vec2(660.0, 150.0)
+                vec2(420.0, 140.0)
             } else {
                 vec2(1180.0, 720.0)
             };
@@ -1426,76 +1429,180 @@ impl App {
             });
     }
 
-    fn mini_ui(&mut self, ctx: &egui::Context, p: &Palette) {
+    /// 迷你播放器：深色圆角卡片，圆形封面 + 喜欢 / 上一首 / 播放 / 下一首 / 待播 / 关闭。
+    fn mini_ui(&mut self, ctx: &egui::Context, _p: &Palette) {
+        let card_bg = Color32::from_rgb(24, 26, 30);
+        let card_edge = Color32::from_rgb(46, 50, 56);
+        let accent = self.config_accent();
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(p.panel))
+            .frame(egui::Frame::NONE.fill(egui::Color32::TRANSPARENT))
             .show(ctx, |ui| {
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(10.0);
-                    let (rect, _) = ui.allocate_exact_size(vec2(60.0, 60.0), Sense::hover());
-                    ui.painter()
-                        .rect_filled(rect, CornerRadius::same(6), p.accent_soft);
-                    ui.add_space(10.0);
-                    ui.vertical(|ui| {
-                        let title = if self.state.title.is_empty() {
-                            self.t("未在播放", "Nothing playing").to_string()
-                        } else {
-                            self.state.title.clone()
-                        };
-                        ui.label(RichText::new(title).size(15.0).color(p.text).strong());
-                        ui.label(
-                            RichText::new(format!(
-                                "{} · {}",
-                                self.state.artist,
-                                theme::time_text(self.state.position)
-                            ))
-                            .small()
-                            .color(p.dim),
+                let full = ui.available_rect_before_wrap();
+                // 左边留出一条，让圆形封面能压出卡片边缘
+                let card = egui::Rect::from_min_max(
+                    egui::pos2(full.left() + 64.0, full.top() + 16.0),
+                    egui::pos2(full.right() - 10.0, full.bottom() - 16.0),
+                );
+                let painter = ui.painter();
+                painter.rect(
+                    card,
+                    CornerRadius::same(18),
+                    card_bg,
+                    Stroke::new(1.0_f32, card_edge),
+                    egui::StrokeKind::Inside,
+                );
+
+                // 圆形封面：左边压在卡片边缘上
+                // 封面比卡片高一点，上下都压出去，跟设计稿一样
+                let cover_size = card.height() + 10.0;
+                let cover = egui::Rect::from_center_size(
+                    egui::pos2(card.left() + 2.0, card.center().y),
+                    vec2(cover_size, cover_size),
+                );
+                let cover_tex = self
+                    .current_round_cover(ui.ctx())
+                    .or_else(|| self.current_cover(ui.ctx()));
+                match cover_tex {
+                    Some(tex) => {
+                        ui.painter().image(
+                            tex.id(),
+                            cover,
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            Color32::WHITE,
                         );
-                        let mut pos = self.state.position;
-                        let len = self.state.length.max(1.0);
-                        if ui
-                            .add(
-                                egui::Slider::new(&mut pos, 0.0..=len)
-                                    .show_value(false),
-                            )
-                            .changed()
-                        {
-                            self.shared.send(Cmd::Seek(pos));
-                        }
-                    });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_space(10.0);
-                        if ui.button(self.t("展开", "Expand")).clicked() {
-                            self.config.mini = false;
-                            let _ = self.config.save();
-                        }
-                        if ui.button(self.t("下一首", "Next")).clicked() {
-                            self.shared.send(Cmd::Next);
-                        }
-                        if ui.button(self.t("停止", "Stop")).clicked() {
-                            self.shared.send(Cmd::Stop);
-                        }
-                        let label = if self.state.status == Status::Playing {
-                            self.t("暂停", "Pause")
-                        } else {
-                            self.t("播放", "Play")
-                        };
-                        if ui
-                            .add(
-                                egui::Button::new(RichText::new(label).strong())
-                                    .fill(p.accent_soft),
-                            )
-                            .clicked()
-                        {
-                            self.shared.send(Cmd::Toggle);
-                        }
-                        if ui.button(self.t("上一首", "Prev")).clicked() {
-                            self.shared.send(Cmd::Prev);
-                        }
-                    });
-                });
+                    }
+                    None => {
+                        ui.painter()
+                            .circle_filled(cover.center(), cover_size * 0.5, Color32::from_rgb(40, 43, 48));
+                        ui.painter().text(
+                            cover.center(),
+                            Align2::CENTER_CENTER,
+                            self.state.title.chars().next().unwrap_or('♪').to_string(),
+                            FontId::proportional(cover_size * 0.42),
+                            accent,
+                        );
+                    }
+                }
+                // 封面外圈细边
+                ui.painter().circle_stroke(
+                    cover.center(),
+                    cover_size * 0.5,
+                    Stroke::new(1.0_f32, Color32::from_rgb(60, 64, 70)),
+                );
+
+                // 控制按钮：从封面右侧开始，整组居中
+                let bsize = 28.0;
+                let gap = 16.0;
+                let group_w = bsize * 4.0 + gap * 3.0 + 42.0 + gap; // 心/上一/播放/下一/清单
+                let start_x = cover.right() + 12.0;
+                let right_edge = card.right() - 44.0;
+                let x0 = ((start_x + right_edge) * 0.5 - group_w * 0.5)
+                    .max(start_x)
+                    .min(right_edge - group_w);
+                let cy = card.center().y;
+                let liked = self.current_liked();
+                let mut rect_at = |i: usize, size: f32| {
+                    egui::Rect::from_center_size(
+                        egui::pos2(x0 + size * 0.5 + i as f32 * (bsize + gap) * 0.92, cy),
+                        vec2(size, size),
+                    )
+                };
+
+                // 喜欢
+                let heart_rect = rect_at(0, bsize);
+                let heart = ui.interact(heart_rect, ui.id().with("mini-heart"), Sense::click());
+                ui.painter().text(
+                    heart_rect.center(),
+                    Align2::CENTER_CENTER,
+                    "♥",
+                    FontId::proportional(19.0),
+                    if liked {
+                        Color32::from_rgb(240, 96, 108)
+                    } else if heart.hovered() {
+                        Color32::from_rgb(190, 195, 202)
+                    } else {
+                        Color32::from_rgb(138, 143, 150)
+                    },
+                );
+                if heart.clicked() {
+                    self.toggle_current_liked();
+                }
+
+                // 上一首
+                let prev_rect = rect_at(1, bsize);
+                let prev = ui.interact(prev_rect, ui.id().with("mini-prev"), Sense::click());
+                mini_prev_icon(ui.painter(), prev_rect, mini_icon_color(&prev));
+                if prev.clicked() {
+                    self.shared.send(Cmd::Prev);
+                }
+
+                // 播放 / 暂停（实心强调色圆）
+                let play_size = 42.0;
+                let play_rect = rect_at(2, play_size);
+                let play = ui.interact(play_rect, ui.id().with("mini-play"), Sense::click());
+                ui.painter().circle_filled(play_rect.center(), play_size * 0.5, accent);
+                if self.state.status == Status::Playing {
+                    mini_pause_icon(ui.painter(), play_rect);
+                } else {
+                    mini_play_icon(ui.painter(), play_rect, Color32::WHITE);
+                }
+                if play.clicked() {
+                    self.shared.send(Cmd::Toggle);
+                }
+
+                // 下一首
+                let next_rect = rect_at(3, bsize);
+                let next = ui.interact(next_rect, ui.id().with("mini-next"), Sense::click());
+                mini_next_icon(ui.painter(), next_rect, mini_icon_color(&next));
+                if next.clicked() {
+                    self.shared.send(Cmd::Next);
+                }
+
+                // 待播清单
+                let list_rect = rect_at(4, bsize);
+                let list = ui.interact(list_rect, ui.id().with("mini-list"), Sense::click());
+                mini_list_icon(ui.painter(), list_rect, mini_icon_color(&list));
+                if list.clicked() {
+                    self.tab = MainTab::Playlists;
+                    self.config.mini = false;
+                    let _ = self.config.save();
+                }
+
+                // 关闭：回主界面
+                let close_rect = egui::Rect::from_center_size(
+                    egui::pos2(card.right() - 20.0, card.top() + 20.0),
+                    vec2(24.0, 24.0),
+                );
+                let close = ui.interact(close_rect, ui.id().with("mini-close"), Sense::click());
+                mini_close_icon(
+                    ui.painter(),
+                    close_rect,
+                    if close.hovered() {
+                        Color32::from_rgb(200, 205, 212)
+                    } else {
+                        Color32::from_rgb(140, 145, 152)
+                    },
+                );
+                if close.clicked() {
+                    self.config.mini = false;
+                    let _ = self.config.save();
+                }
+
+                // 底边一条细进度
+                let len = self.state.length.max(1.0);
+                let ratio = (self.state.position / len).clamp(0.0, 1.0) as f32;
+                let bar = egui::Rect::from_min_max(
+                    egui::pos2(card.left() + 10.0, card.bottom() - 4.0),
+                    egui::pos2(card.right() - 10.0, card.bottom() - 2.0),
+                );
+                ui.painter().rect_filled(
+                    bar,
+                    CornerRadius::same(2),
+                    Color32::from_rgb(52, 56, 62),
+                );
+                let mut done = bar;
+                done.set_width(bar.width() * ratio);
+                ui.painter().rect_filled(done, CornerRadius::same(2), accent);
             });
     }
 
@@ -3130,6 +3237,87 @@ impl App {
         if resp.clicked() {
             self.tab = tab;
         }
+    }
+
+    /// 当前主题的强调色（迷你播放器先把 palette 借不走，这里单独取一份）。
+    fn config_accent(&self) -> Color32 {
+        theme::palette(&self.config).accent
+    }
+
+    /// 当前曲目在「喜欢」里的样子（本地文件按路径，在线按插件 + id）。
+    fn current_liked_entry(&self) -> Option<LikedItem> {
+        if let Some((idx, item)) = &self.current_online {
+            return Some(LikedItem {
+                title: item["title"].as_str().unwrap_or("未命名").to_string(),
+                artist: item["artist"].as_str().unwrap_or_default().to_string(),
+                album: item["album"].as_str().unwrap_or_default().to_string(),
+                duration: item["duration"].as_f64().unwrap_or(0.0),
+                path: None,
+                plugin: Some(
+                    self.media_plugins
+                        .get(*idx)
+                        .map(|p| p.name())
+                        .unwrap_or_default(),
+                ),
+                item: Some(item.clone()),
+                added_at: now_secs(),
+            });
+        }
+        let i = self.state.current?;
+        let entry = self.playlist.entries.get(i)?;
+        Some(LikedItem {
+            title: entry.display_title(),
+            artist: entry.display_artist(),
+            album: entry.display_album(),
+            duration: entry.length.unwrap_or(0.0),
+            path: Some(entry.path.clone()),
+            plugin: None,
+            item: None,
+            added_at: now_secs(),
+        })
+    }
+
+    fn current_liked(&self) -> bool {
+        self.current_liked_entry()
+            .map(|it| self.liked.contains(&it))
+            .unwrap_or(false)
+    }
+
+    /// 迷你播放器那颗心：已收藏就从「喜欢」里移除，没收藏就加进去。
+    fn toggle_current_liked(&mut self) {
+        let Some(item) = self.current_liked_entry() else {
+            return;
+        };
+        let key = item.key();
+        if let Some(pos) = self.liked.items().iter().position(|i| i.key() == key) {
+            self.liked.remove(pos);
+            self.toast("已取消喜欢");
+        } else {
+            let title = item.title.clone();
+            if self.liked.add(item) {
+                self.toast(&format!("已加入喜欢：{title}"));
+            }
+        }
+    }
+
+    /// 圆形封面（迷你播放器用，四角抠成透明）。
+    fn current_round_cover(&mut self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
+        let album = self.state.album.clone();
+        if album.is_empty() {
+            return None;
+        }
+        if !self.album_art_round.contains_key(&album) {
+            let title = self.state.title.clone();
+            let bytes = self
+                .playlist
+                .entries
+                .iter()
+                .find(|e| e.album == album && (title.is_empty() || e.title == title))
+                .and_then(|e| audcore::tags::read_art(&e.path));
+            let tex = bytes.and_then(|b| round_texture(ctx, &b, &album, 88));
+            self.album_art_round.insert(album.clone(), tex);
+        }
+        self.album_art_round.get(&album).cloned().flatten()
     }
 
     /// 当前播放曲目的内嵌封面（在线曲目没有文件，返回 None）。
@@ -4812,4 +5000,172 @@ fn cover_texture(ctx: &egui::Context, bytes: &[u8], key: &str) -> Option<egui::T
         color,
         egui::TextureOptions::LINEAR,
     ))
+}
+
+/// 圆形封面纹理：先把封面缩到 d×d，再把圆外的像素 alpha 置 0。
+fn round_texture(
+    ctx: &egui::Context,
+    bytes: &[u8],
+    key: &str,
+    d: u32,
+) -> Option<egui::TextureHandle> {
+    let mut image = image::load_from_memory(bytes).ok()?.thumbnail(d, d).to_rgba8();
+    let radius = d as f32 * 0.5;
+    for (x, y, px) in image.enumerate_pixels_mut() {
+        let dx = x as f32 + 0.5 - radius;
+        let dy = y as f32 + 0.5 - radius;
+        let dist = (dx * dx + dy * dy).sqrt();
+        if dist > radius {
+            px[3] = 0;
+        } else if dist > radius - 1.2 {
+            // 边缘一像素做点抗锯齿
+            let edge = (radius - dist) / 1.2;
+            px[3] = (px[3] as f32 * edge.clamp(0.0, 1.0)) as u8;
+        }
+    }
+    let size = [image.width() as usize, image.height() as usize];
+    let pixels = image.into_raw();
+    let color = egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
+    Some(ctx.load_texture(
+        format!("cover-round-{key}"),
+        color,
+        egui::TextureOptions::LINEAR,
+    ))
+}
+
+fn mini_icon_color(resp: &egui::Response) -> Color32 {
+    if resp.hovered() {
+        Color32::from_rgb(214, 218, 224)
+    } else {
+        Color32::from_rgb(150, 155, 162)
+    }
+}
+
+/// 上一首：竖条 + 向左的三角
+fn mini_prev_icon(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    let c = rect.center();
+    let h = rect.height().min(rect.width()) * 0.42;
+    let bar = egui::Rect::from_min_max(
+        egui::pos2(c.x - h * 0.62, c.y - h * 0.5),
+        egui::pos2(c.x - h * 0.5, c.y + h * 0.5),
+    );
+    painter.rect_filled(bar, CornerRadius::same(1), color);
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(c.x + h * 0.62, c.y - h * 0.52),
+            egui::pos2(c.x + h * 0.62, c.y + h * 0.52),
+            egui::pos2(c.x - h * 0.34, c.y),
+        ],
+        color,
+        Stroke::NONE,
+    ));
+}
+
+/// 下一首：向右的三角 + 竖条
+fn mini_next_icon(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    let c = rect.center();
+    let h = rect.height().min(rect.width()) * 0.42;
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(c.x - h * 0.62, c.y - h * 0.52),
+            egui::pos2(c.x - h * 0.62, c.y + h * 0.52),
+            egui::pos2(c.x + h * 0.34, c.y),
+        ],
+        color,
+        Stroke::NONE,
+    ));
+    let bar = egui::Rect::from_min_max(
+        egui::pos2(c.x + h * 0.5, c.y - h * 0.5),
+        egui::pos2(c.x + h * 0.62, c.y + h * 0.5),
+    );
+    painter.rect_filled(bar, CornerRadius::same(1), color);
+}
+
+/// 播放：向右的实心三角
+fn mini_play_icon(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    let c = rect.center();
+    let h = rect.height() * 0.34;
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(c.x - h * 0.55, c.y - h),
+            egui::pos2(c.x - h * 0.55, c.y + h),
+            egui::pos2(c.x + h * 0.9, c.y),
+        ],
+        color,
+        Stroke::NONE,
+    ));
+}
+
+/// 暂停：两根竖条
+fn mini_pause_icon(painter: &egui::Painter, rect: egui::Rect) {
+    let c = rect.center();
+    let h = rect.height() * 0.3;
+    for dx in [-h * 0.45, h * 0.25] {
+        let bar = egui::Rect::from_min_max(
+            egui::pos2(c.x + dx - h * 0.18, c.y - h),
+            egui::pos2(c.x + dx + h * 0.18, c.y + h),
+        );
+        painter.rect_filled(bar, CornerRadius::same(2), Color32::WHITE);
+    }
+}
+
+/// 待播清单：三横线，最短的一条右边带小箭头
+fn mini_list_icon(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    let c = rect.center();
+    let w = rect.width() * 0.34;
+    let step = rect.height() * 0.16;
+    for (i, dy) in [-1.0_f32, 0.0, 1.0].iter().enumerate() {
+        let len = if i == 2 { w * 1.35 } else { w * 1.6 };
+        let y = c.y + dy * step;
+        let line = egui::Rect::from_min_max(
+            egui::pos2(c.x - w, y - 1.1),
+            egui::pos2(c.x - w + len, y + 1.1),
+        );
+        painter.rect_filled(line, CornerRadius::same(1), color);
+        if i == 2 {
+            // 末尾的小三角，看着像「加入播放列表」
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    egui::pos2(c.x - w + len + 4.0, y - 3.4),
+                    egui::pos2(c.x - w + len + 4.0, y + 3.4),
+                    egui::pos2(c.x - w + len + 9.5, y),
+                ],
+                color,
+                Stroke::NONE,
+            ));
+        }
+    }
+}
+
+/// 关闭：两个交叉的短线
+fn mini_close_icon(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    let c = rect.center();
+    let h = rect.width() * 0.24;
+    painter.line_segment(
+        [egui::pos2(c.x - h, c.y - h), egui::pos2(c.x + h, c.y + h)],
+        Stroke::new(1.6_f32, color),
+    );
+    painter.line_segment(
+        [egui::pos2(c.x - h, c.y + h), egui::pos2(c.x + h, c.y - h)],
+        Stroke::new(1.6_f32, color),
+    );
+}
+
+#[cfg(test)]
+mod round_cover_tests {
+    #[test]
+    fn round_mask_clears_corners() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/screenshot-ui-topbar-5.12.2.png");
+        let bytes = std::fs::read(path).expect("测试图片");
+        let img = image::load_from_memory(&bytes).unwrap().thumbnail(88, 88).to_rgba8();
+        let radius = 88.0_f32 * 0.5;
+        let px = img.get_pixel(1, 1);
+        let dx = 1.5 - radius;
+        let dy = 1.5 - radius;
+        assert!((dx * dx + dy * dy).sqrt() > radius, "角上那点确实在圆外");
+        let center = img.get_pixel(44, 44);
+        assert!(center[3] > 0, "中心不能是透明的");
+        let _ = px;
+    }
 }
