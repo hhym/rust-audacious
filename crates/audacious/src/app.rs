@@ -153,6 +153,8 @@ pub struct App {
     plugins: Vec<audcore::plugin::PluginInfo>,
     /// 在线插件（MusicFree 标准）
     media_plugins: Vec<audplugins::OnlinePlugin>,
+    /// 待确认删除的插件：(显示名, 文件或目录)
+    plugin_delete: Option<(String, std::path::PathBuf)>,
     /// 后台扫描插件用的接收端（扫描不阻塞界面）
     scan_rx: Option<std::sync::mpsc::Receiver<Vec<audplugins::OnlinePlugin>>>,
     show_search: bool,
@@ -277,6 +279,7 @@ impl App {
             theme_button_rect: None,
             plugins: Vec::new(),
             media_plugins: Vec::new(),
+            plugin_delete: None,
             scan_rx: None,
             show_search: false,
             search_plugin: 0,
@@ -2564,6 +2567,22 @@ impl App {
                             if pl.supports("getLyric") || pl.supports("lyrics") {
                                 ui.label(RichText::new("歌词").small().color(p.dim));
                             }
+                            // 删除按钮靠右，点了先弹确认，避免误删
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui
+                                    .small_button(self.t("删除", "Delete"))
+                                    .on_hover_text(self.t(
+                                        "从插件目录移除这个插件（会先让你确认）",
+                                        "Remove this plugin from the plugins folder (asks first)",
+                                    ))
+                                    .clicked()
+                                {
+                                    self.plugin_delete = Some((
+                                        pl.name().to_string(),
+                                        pl.path().to_path_buf(),
+                                    ));
+                                }
+                            });
                         });
                         if let Some(err) = pl.error() {
                             ui.label(
@@ -2642,6 +2661,80 @@ impl App {
                 });
             });
         self.show_plugins = open;
+
+        // 删除插件确认框
+        if let Some((name, path)) = self.plugin_delete.clone() {
+            let mut confirmed = false;
+            let mut cancelled = false;
+            egui::Window::new(self.t("删除插件", "Delete plugin"))
+                .collapsible(false)
+                .resizable(false)
+                .default_width(460.0)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(ctx, |ui| {
+                    ui.label(
+                        RichText::new(self.t("要删除这个插件吗？", "Delete this plugin?"))
+                            .strong()
+                            .color(p.text),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(name.clone()).color(p.text));
+                    ui.label(
+                        RichText::new(path.display().to_string())
+                            .monospace()
+                            .small()
+                            .color(p.dim),
+                    );
+                    ui.add_space(4.0);
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(self.t(
+                                "只删除插件本体（文件夹或 .js 文件），登录态和设置保存在别处，不会一起删。",
+                                "Only the plugin itself (folder or .js file) is removed; login state and settings stay.",
+                            ))
+                            .small()
+                            .color(p.dim),
+                        )
+                        .wrap(),
+                    );
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(RichText::new(self.t("删除", "Delete")).color(egui::Color32::from_rgb(200, 80, 80)))
+                            .clicked()
+                        {
+                            confirmed = true;
+                        }
+                        if ui.button(self.t("取消", "Cancel")).clicked() {
+                            cancelled = true;
+                        }
+                    });
+                });
+            if confirmed {
+                let result = if path.is_dir() {
+                    std::fs::remove_dir_all(&path)
+                } else {
+                    std::fs::remove_file(&path)
+                };
+                match result {
+                    Ok(()) => {
+                        log::info!("已删除插件 {} ({})", name, path.display());
+                        self.toast(&format!(
+                            "已删除插件：{}",
+                            name
+                        ));
+                        self.plugin_delete = None;
+                        self.reload_media_plugins();
+                    }
+                    Err(err) => {
+                        self.toast(&format!("删除失败：{err}"));
+                        self.plugin_delete = None;
+                    }
+                }
+            } else if cancelled {
+                self.plugin_delete = None;
+            }
+        }
     }
 
     fn about_ui(&mut self, ctx: &egui::Context, p: &Palette) {
