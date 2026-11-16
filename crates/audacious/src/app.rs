@@ -456,6 +456,62 @@ impl App {
         painter.rect_filled(rect, 0.0, egui::Color32::BLACK);
         skin.sprite(&painter, "main.bmp", 0.0, 0.0, MAIN_W, MAIN_H, main_rect, egui::Color32::WHITE);
 
+        // 频谱条（main.bmp 的分析器区：24,43 起 76×36）
+        {
+            use egui::Color32;
+            let area = place(24.0, 43.0, 76.0, 36.0);
+            let bars = 16usize;
+            let slot = area.width() / bars as f32;
+            let bar_w = (slot * 0.72).max(1.0);
+            let accent = self.config.accent;
+            let top = Color32::from_rgb(accent[0], accent[1], accent[2]);
+            let bottom = Color32::from_rgb(
+                (accent[0] as u16 * 55 / 100) as u8,
+                (accent[1] as u16 * 28 / 100) as u8,
+                (accent[2] as u16 * 20 / 100) as u8,
+            );
+            let clip = painter.with_clip_rect(area);
+            for i in 0..bars {
+                let v = self.spectrum.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+                if v <= 0.01 {
+                    continue;
+                }
+                let h = area.height() * v;
+                let x = area.min.x + slot * i as f32 + (slot - bar_w) / 2.0;
+                let r = egui::Rect::from_min_max(
+                    egui::pos2(x, area.max.y - h),
+                    egui::pos2(x + bar_w, area.max.y),
+                );
+                // 上亮下暗的竖向渐变，模仿经典皮肤那种发光条
+                clip.add(egui::Shape::mesh({
+                    let mut mesh = egui::epaint::Mesh::default();
+                    let idx = mesh.vertices.len() as u32;
+                    mesh.vertices.push(egui::epaint::Vertex {
+                        pos: r.left_top(),
+                        uv: egui::epaint::WHITE_UV,
+                        color: top,
+                    });
+                    mesh.vertices.push(egui::epaint::Vertex {
+                        pos: r.right_top(),
+                        uv: egui::epaint::WHITE_UV,
+                        color: top,
+                    });
+                    mesh.vertices.push(egui::epaint::Vertex {
+                        pos: r.right_bottom(),
+                        uv: egui::epaint::WHITE_UV,
+                        color: bottom,
+                    });
+                    mesh.vertices.push(egui::epaint::Vertex {
+                        pos: r.left_bottom(),
+                        uv: egui::epaint::WHITE_UV,
+                        color: bottom,
+                    });
+                    mesh.indices.extend_from_slice(&[idx, idx + 1, idx + 2, idx, idx + 2, idx + 3]);
+                    mesh
+                }));
+            }
+        }
+
         // 播放状态指示灯（playpaus.bmp：0 播放 / 9 暂停 / 18 停止）
         let (lx, sheet_x) = match status {
             crate::engine::Status::Playing => (24.0, 0.0),
