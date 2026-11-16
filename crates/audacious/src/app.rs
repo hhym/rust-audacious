@@ -153,6 +153,10 @@ pub struct App {
     plugins: Vec<audcore::plugin::PluginInfo>,
     /// 在线插件（MusicFree 标准）
     media_plugins: Vec<audplugins::OnlinePlugin>,
+    /// 待确认删除的插件：(显示名, 文件或目录, 插件 id)
+    plugin_delete: Option<(String, std::path::PathBuf, Option<String>)>,
+    /// 删除时是否连登录数据一起清
+    plugin_delete_clear: bool,
     /// 后台扫描插件用的接收端（扫描不阻塞界面）
     scan_rx: Option<std::sync::mpsc::Receiver<Vec<audplugins::OnlinePlugin>>>,
     show_search: bool,
@@ -277,6 +281,8 @@ impl App {
             theme_button_rect: None,
             plugins: Vec::new(),
             media_plugins: Vec::new(),
+            plugin_delete: None,
+            plugin_delete_clear: false,
             scan_rx: None,
             show_search: false,
             search_plugin: 0,
@@ -2546,6 +2552,26 @@ impl App {
                             if pl.supports("getLyric") || pl.supports("lyrics") {
                                 ui.label(RichText::new("歌词").small().color(p.dim));
                             }
+                            // 删除按钮靠右，点了先弹确认，避免误删
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui
+                                    .small_button(self.t("删除", "Delete"))
+                                    .on_hover_text(self.t(
+                                        "从插件目录移除这个插件（会先让你确认）",
+                                        "Remove this plugin from the plugins folder (asks first)",
+                                    ))
+                                    .clicked()
+                                {
+                                    self.plugin_delete = Some((
+                                        pl.name().to_string(),
+                                        pl.path().to_path_buf(),
+                                        pl.as_mygo()
+                                            .map(|m| m.manifest.id.clone())
+                                            .or_else(|| Some(pl.name().split(" · ").next()?.to_string())),
+                                    ));
+                                    self.plugin_delete_clear = false;
+                                }
+                            });
                         });
                         if let Some(err) = pl.error() {
                             ui.label(
@@ -2623,6 +2649,96 @@ impl App {
                 });
             });
         self.show_plugins = open;
+
+        // 删除插件确认框
+        if let Some((name, path, id)) = self.plugin_delete.clone() {
+            let mut confirmed = false;
+            let mut cancelled = false;
+            egui::Window::new(self.t("删除插件", "Delete plugin"))
+                .collapsible(false)
+                .resizable(false)
+                .default_width(460.0)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(ctx, |ui| {
+                    ui.label(
+                        RichText::new(self.t("要删除这个插件吗？", "Delete this plugin?"))
+                            .strong()
+                            .color(p.text),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(name.clone()).color(p.text));
+                    ui.label(
+                        RichText::new(path.display().to_string())
+                            .monospace()
+                            .small()
+                            .color(p.dim),
+                    );
+                    ui.add_space(4.0);
+                    let mut clear = self.plugin_delete_clear;
+                    if ui
+                        .checkbox(
+                            &mut clear,
+                            self.t("同时清除登录数据（登录态、缓存歌单）", "Also clear login data and caches"),
+                        )
+                        .changed()
+                    {
+                        self.plugin_delete_clear = clear;
+                    }
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(self.t(
+                                "勾选后清掉 plugin-storage.json 里该插件的键和 mygo-data/<id>；不勾只删插件本体。",
+                                "Checked: removes this plugin's keys in plugin-storage.json and mygo-data/<id>. Unchecked: plugin files only.",
+                            ))
+                            .small()
+                            .color(p.dim),
+                        )
+                        .wrap(),
+                    );
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(RichText::new(self.t("删除", "Delete")).color(egui::Color32::from_rgb(200, 80, 80)))
+                            .clicked()
+                        {
+                            confirmed = true;
+                        }
+                        if ui.button(self.t("取消", "Cancel")).clicked() {
+                            cancelled = true;
+                        }
+                    });
+                });
+            if confirmed {
+                let result = if path.is_dir() {
+                    std::fs::remove_dir_all(&path)
+                } else {
+                    std::fs::remove_file(&path)
+                };
+                match result {
+                    Ok(()) => {
+                        log::info!("已删除插件 {} ({})", name, path.display());
+                        if self.plugin_delete_clear {
+                            if let Some(id) = &id {
+                                audplugins::purge_plugin_data(id);
+                                log::info!("已清除插件数据 {}", id);
+                            }
+                        }
+                        self.toast(&format!(
+                            "已删除插件：{}",
+                            name
+                        ));
+                        self.plugin_delete = None;
+                        self.reload_media_plugins();
+                    }
+                    Err(err) => {
+                        self.toast(&format!("删除失败：{err}"));
+                        self.plugin_delete = None;
+                    }
+                }
+            } else if cancelled {
+                self.plugin_delete = None;
+            }
+        }
     }
 
     fn about_ui(&mut self, ctx: &egui::Context, p: &Palette) {

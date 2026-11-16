@@ -1355,6 +1355,39 @@ fn storage_path() -> PathBuf {
         .join("plugin-storage.json")
 }
 
+/// 删除插件时可选调用：清掉 `plugin-storage.json` 里属于它的键，
+/// 以及 MyGo 的 `mygo-data/<id>`（歌单缓存、登录后拉的数据）。
+pub fn purge_plugin_data(id: &str) {
+    if id.trim().is_empty() {
+        return;
+    }
+    let path = storage_path();
+    let mut map: serde_json::Map<String, Value> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    let prefixes = [
+        format!("mygo/{id}/"),
+        format!("mygo/{id}"),
+        format!("{id}/"),
+        format!("musicfree/{id}/"),
+    ];
+    let before = map.len();
+    map.retain(|k, _| !prefixes.iter().any(|p| k.starts_with(p.as_str())));
+    if map.len() != before {
+        let _ = std::fs::write(&path, serde_json::to_string_pretty(&map).unwrap_or_default());
+    }
+
+    let data_dir = dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(audcore::APP_NAME)
+        .join("mygo-data")
+        .join(id);
+    if data_dir.is_dir() {
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+}
+
 pub(crate) fn storage_access(key: &str, value: Option<&str>) -> String {
     static LOCK: Mutex<()> = Mutex::new(());
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
