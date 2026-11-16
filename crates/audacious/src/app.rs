@@ -2280,7 +2280,10 @@ impl App {
         let mut open = self.show_plugins;
         egui::Window::new(self.t("插件", "Plugins"))
             .open(&mut open)
-            .default_width(520.0)
+            .default_width(560.0)
+            .default_height(720.0)
+            .max_height(820.0)
+            .resizable(true)
             .show(ctx, |ui| {
                 // 后台下载安装的结果
                 let installed = self.install_rx.as_ref().and_then(|rx| rx.try_recv().ok());
@@ -2304,6 +2307,15 @@ impl App {
                     }
                 }
 
+                // 插件列表很长（在线插件可能几十个），整窗套一层滚动条。
+                // 滚动条样式要在 ScrollArea 之前设，否则画的还是外层 ui 的样式。
+                ui.spacing_mut().scroll.floating = false;
+                ui.spacing_mut().scroll.bar_width = 9.0;
+                ui.spacing_mut().scroll.bar_inner_margin = 3.0;
+                ui.spacing_mut().scroll.bar_outer_margin = 4.0;
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
                 let title = self.t("安装插件", "Install plugin");
                 let desc = self.t(
                     "只支持 MyGo Music 规范：一个插件目录，里面有 plugin.json 和 index.js（ESM 导出 search / stream / lyrics，可用全局 host 和 fetch）。「选 zip」直接挑打包好的插件压缩包，「选文件夹」直接挑插件目录；也可以在下面填 .zip 的下载地址，或者干脆把 .zip / 插件文件夹直接拖进窗口，拖进来就装好了。",
@@ -2586,6 +2598,7 @@ impl App {
                         }
                     }
                 }
+                });
             });
         self.show_plugins = open;
     }
