@@ -2552,7 +2552,8 @@ impl App {
                                 RichText::new(format!("  加载失败：{err}"))
                                     .small()
                                     .color(egui::Color32::from_rgb(200, 80, 80)),
-                            );
+                            )
+                            .on_hover_text(err);
                         }
 
                         // MyGo 插件声明的设置项，直接在这里填

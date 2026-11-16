@@ -256,7 +256,15 @@
   }
   ResponseBody.prototype.arrayBuffer = function () {
     this.bodyUsed = true;
-    var bytes = this.__b64 ? bytesFromBase64(this.__b64) : new Uint8Array(0);
+    if (!this.__b64) {
+      // 拿不到二进制时直接说清楚，免得插件自己解图片时报 “unknown JPEG marker 0”
+      var why = "arrayBuffer: 响应里没有二进制内容";
+      if (this.status === 0) why += "（请求没有拿到响应，检查 permissions.network 和登录态）";
+      else if (!this.ok) why += "（HTTP " + this.status + "）";
+      else if (this.__body) why += "（服务端返回的是文本，不是图片；可能需要登录 Cookie 或 Referer）";
+      return Promise.reject(new Error(why + "，URL: " + this.url));
+    }
+    var bytes = bytesFromBase64(this.__b64);
     return Promise.resolve(bytes.buffer);
   };
   ResponseBody.prototype.bytes = function () {
