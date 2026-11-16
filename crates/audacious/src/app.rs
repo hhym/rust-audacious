@@ -157,6 +157,8 @@ pub struct App {
     plugin_delete: Option<(String, std::path::PathBuf, Option<String>)>,
     /// 删除时是否连登录数据一起清
     plugin_delete_clear: bool,
+    /// 正在检测的插件：(显示名, 结果接收端)
+    plugin_check: Option<(String, std::sync::mpsc::Receiver<Result<String, String>>)>,
     /// 后台扫描插件用的接收端（扫描不阻塞界面）
     scan_rx: Option<std::sync::mpsc::Receiver<Vec<audplugins::OnlinePlugin>>>,
     show_search: bool,
@@ -283,6 +285,7 @@ impl App {
             media_plugins: Vec::new(),
             plugin_delete: None,
             plugin_delete_clear: false,
+            plugin_check: None,
             scan_rx: None,
             show_search: false,
             search_plugin: 0,
@@ -535,6 +538,11 @@ impl eframe::App for App {
         self.sync();
         self.refresh_cover_accent();
         self.poll_media_channels();
+        self.poll_plugin_check();
+        if self.plugin_check.is_some() {
+            // 检测在后台线程跑，界面要持续重绘才能刷出 spinner 并在完成时立刻弹 toast
+            ctx.request_repaint();
+        }
         self.poll_home();
         self.login.tick(ctx);
 
@@ -2016,6 +2024,30 @@ impl App {
         self.scan_rx = Some(audplugins::scan_async(dir));
     }
 
+    /// 插件「检测」按钮：后台线程跑完一次搜索后把结果转成 toast。
+    fn poll_plugin_check(&mut self) {
+        let Some((name, rx)) = &self.plugin_check else {
+            return;
+        };
+        let outcome = match rx.try_recv() {
+            Ok(outcome) => Some(outcome),
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Some(Err("检测线程意外退出".to_string()))
+            }
+        };
+        let name = name.clone();
+        self.plugin_check = None;
+        match outcome {
+            Some(Ok(detail)) => self.toast(format!("{} 检测通过：{}", name, detail)),
+            Some(Err(err)) => {
+                let brief: String = err.lines().next().unwrap_or("").chars().take(110).collect();
+                self.toast(format!("{} 检测失败：{}", name, brief))
+            }
+            None => {}
+        }
+    }
+
     fn poll_media_channels(&mut self) {
         if let Some(rx) = &self.scan_rx {
             match rx.try_recv() {
@@ -2562,6 +2594,44 @@ impl App {
                             }
                             // 删除按钮靠右，点了先弹确认，避免误删
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.add_space(4.0);
+                                let checking = self
+                                    .plugin_check
+                                    .as_ref()
+                                    .is_some_and(|(n, _)| n == &pl.name());
+                                if checking {
+                                    ui.spinner();
+                                } else if ui
+                                    .small_button(self.t("检测", "Test"))
+                                    .on_hover_text(self.t(
+                                        "用关键词 test 跑一次搜索，确认加载、权限和网络都正常",
+                                        "Runs one search with the keyword \"test\" to check load, permissions and network",
+                                    ))
+                                    .clicked()
+                                {
+                                    let name = pl.name().to_string();
+                                    let plugin = pl.clone();
+                                    let (tx, rx) = std::sync::mpsc::channel();
+                                    std::thread::spawn(move || {
+                                        let started = std::time::Instant::now();
+                                        let result = plugin.search_tracks("test", 1);
+                                        let msg = match result {
+                                            Ok(tracks) => {
+                                                let count = tracks.len();
+                                                let ms = started.elapsed().as_millis();
+                                                Ok(if count == 0 {
+                                                    format!("0 条（test 未匹配）· {ms}ms")
+                                                } else {
+                                                    format!("{count} 条 · {ms}ms")
+                                                })
+                                            }
+                                            Err(err) => Err(audplugins::friendly_error(&err.to_string())),
+                                        };
+                                        let _ = tx.send(msg);
+                                    });
+                                    self.plugin_check = Some((name, rx));
+                                    ctx.request_repaint();
+                                }
                                 if ui
                                     .small_button(self.t("删除", "Delete"))
                                     .on_hover_text(self.t(
