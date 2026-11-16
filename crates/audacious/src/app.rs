@@ -234,6 +234,10 @@ pub struct App {
     eq_auto: bool,
     /// EQ 预设菜单是否展开
     eq_presets_open: bool,
+    /// Auto 模式记下的预设（0 平直 / 1 重低音 / 2 人声）
+    eq_auto_preset: u8,
+    /// 上一帧的曲目索引，用来发现换曲
+    last_track: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -243,6 +247,15 @@ enum LyricState {
     Lines(Vec<(f64, String)>),
     Plain(String),
     Error(String),
+}
+
+/// EQ 的内建预设（0 平直 / 1 重低音 / 2 人声）
+fn preset_gains(kind: u8) -> [f32; 10] {
+    match kind {
+        1 => [6.0, 5.0, 3.0, 1.0, -1.0, -2.0, -2.0, -1.0, 0.0, 0.0],
+        2 => [-3.0, -2.0, 0.0, 2.0, 4.0, 4.0, 3.0, 2.0, 0.0, -1.0],
+        _ => [0.0; 10],
+    }
 }
 
 /// 经典皮肤的交互结果，画完统一处理（避免绘制时借用冲突）
@@ -270,6 +283,7 @@ enum ClassicAction {
     PlaylistSelectAll,
     PlaylistInvert,
     PlaylistToggleSel(usize),
+    PlaylistRemoveAt(usize),
     EqPreset(u8),
     ToggleEqAuto,
 }
@@ -368,6 +382,8 @@ impl App {
             pl_select: std::collections::BTreeSet::new(),
             eq_auto: false,
             eq_presets_open: false,
+            eq_auto_preset: 0,
+            last_track: None,
         };
         app.plugins = app.collect_plugins();
         app.reload_media_plugins();
@@ -1091,6 +1107,21 @@ impl App {
                             if resp.secondary_clicked() {
                                 actions.push(ClassicAction::PlaylistToggleSel(*idx));
                             }
+                            let idx_now = *idx;
+                            resp.context_menu(|ui| {
+                                if ui.button("播放这首").clicked() {
+                                    actions.push(ClassicAction::PlayAt(idx_now));
+                                    ui.close_menu();
+                                }
+                                if ui.button("加入选中").clicked() {
+                                    actions.push(ClassicAction::PlaylistToggleSel(idx_now));
+                                    ui.close_menu();
+                                }
+                                if ui.button("删除这首").clicked() {
+                                    actions.push(ClassicAction::PlaylistRemoveAt(idx_now));
+                                    ui.close_menu();
+                                }
+                            });
                         }
                     });
             });
@@ -1200,6 +1231,15 @@ impl App {
                     }
                     self.pl_select = next;
                 }
+                ClassicAction::PlaylistRemoveAt(i) => {
+                    if let Ok(mut pl) = shared.playlist.lock() {
+                        if i < pl.len() {
+                            pl.remove(i);
+                        }
+                    }
+                    self.toast = Some(("已移除 1 首".to_string(), Instant::now()));
+                    shared.send(Cmd::Refresh);
+                }
                 ClassicAction::PlaylistRemove => {
                     let mut targets: Vec<usize> = self.pl_select.iter().copied().collect();
                     if targets.is_empty() {
@@ -1221,11 +1261,8 @@ impl App {
                     shared.send(Cmd::Refresh);
                 }
                 ClassicAction::EqPreset(kind) => {
-                    let preset: [f32; 10] = match kind {
-                        1 => [6.0, 5.0, 3.0, 1.0, -1.0, -2.0, -2.0, -1.0, 0.0, 0.0],
-                        2 => [-3.0, -2.0, 0.0, 2.0, 4.0, 4.0, 3.0, 2.0, 0.0, -1.0],
-                        _ => [0.0; 10],
-                    };
+                    let preset = preset_gains(kind);
+                    self.eq_auto_preset = kind;
                     self.config.eq_gains = preset.to_vec();
                     self.config.eq_enabled = true;
                     shared.eq.set_gains(&self.config.eq_gains);
@@ -1371,6 +1408,15 @@ impl App {
 
     fn sync(&mut self) {
         self.state = self.shared.state();
+        // Auto：换曲时自动套用记下的预设（Winamp 的 AUTO 就是这个语义）
+        if self.state.current != self.last_track {
+            self.last_track = self.state.current;
+            if self.eq_auto {
+                let gains = preset_gains(self.eq_auto_preset);
+                self.config.eq_gains = gains.to_vec();
+                self.shared.eq.set_gains(&gains);
+            }
+        }
         self.playlist = self.shared.playlist();
         if self.last_spectrum.elapsed() >= Duration::from_millis(50) {
             self.last_spectrum = Instant::now();
@@ -2839,6 +2885,24 @@ impl App {
                     );
                 }
                 if self.config.classic_skin {
+                    let label_tone = self.t("内建配色", "Built-in tone");
+                    ui.horizontal(|ui| {
+                        ui.label(label_tone);
+                        for (rgb, zh, en) in [
+                            ([235u8, 152, 52], "橙", "Amber"),
+                            ([70u8, 140, 220], "蓝", "Blue"),
+                            ([80u8, 190, 110], "绿", "Green"),
+                        ] {
+                            let selected = self.config.accent == rgb;
+                            if ui
+                                .selectable_label(selected, self.t(zh, en))
+                                .clicked()
+                            {
+                                self.config.accent = rgb;
+                                changed = true;
+                            }
+                        }
+                    });
                     let label_eq = self.t("显示均衡器", "Equalizer");
                     let label_ly = self.t("显示歌词", "Lyrics");
                     let label_pl = self.t("显示列表", "Playlist");
