@@ -251,6 +251,8 @@ enum ClassicAction {
     ToggleEqWindow,
     TogglePlaylistWindow,
     PlayAt(usize),
+    EqSet(usize, f32),
+    ToggleEqEnabled,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -417,18 +419,23 @@ impl App {
         let shared = self.shared.clone();
         let mut actions: Vec<ClassicAction> = Vec::new();
 
-        // 主窗口下面紧贴播放列表，剩下的高度给列表
-        let pl_h = ((ui.available_height() / scale) - MAIN_H).clamp(140.0, 420.0);
+        // 竖向堆叠：主窗口 → 均衡器 → 播放列表，剩下的高度给列表
+        let eq_h = if self.show_eq { 116.0 } else { 0.0 };
+        let pl_h = ((ui.available_height() / scale) - MAIN_H - eq_h).clamp(140.0, 420.0);
         let (rect, _) = ui.allocate_exact_size(
-            egui::vec2(MAIN_W * scale, (MAIN_H + pl_h) * scale),
+            egui::vec2(MAIN_W * scale, (MAIN_H + eq_h + pl_h) * scale),
             egui::Sense::hover(),
         );
         let main_rect = egui::Rect::from_min_size(
             rect.min,
             egui::vec2(MAIN_W * scale, MAIN_H * scale),
         );
-        let pl_rect = egui::Rect::from_min_size(
+        let eq_rect = egui::Rect::from_min_size(
             main_rect.min + egui::vec2(0.0, MAIN_H * scale),
+            egui::vec2(MAIN_W * scale, eq_h * scale),
+        );
+        let pl_rect = egui::Rect::from_min_size(
+            main_rect.min + egui::vec2(0.0, (MAIN_H + eq_h) * scale),
             egui::vec2(MAIN_W * scale, pl_h * scale),
         );
         let painter = ui.painter_at(rect);
@@ -551,8 +558,13 @@ impl App {
         // EQ / 播放列表开关（shufrep.bmp 的 46×12 区）
         let eqb = place(219.0, 58.0, 23.0, 12.0);
         let eq_resp = ui.interact(eqb, ui.id().with("classic_eq"), egui::Sense::click());
-        let eq_on = self.config.eq_enabled;
-        let eq_y = if eq_resp.is_pointer_button_down_on() { 73.0 } else if eq_on { 61.0 } else { 0.0 };
+        let eq_y = if eq_resp.is_pointer_button_down_on() {
+            73.0
+        } else if self.show_eq {
+            61.0
+        } else {
+            0.0
+        };
         skin.sprite(&painter, "shufrep.bmp", 0.0, eq_y, 23.0, 12.0, eqb, egui::Color32::WHITE);
         if eq_resp.clicked() {
             actions.push(ClassicAction::ToggleEqWindow);
@@ -569,6 +581,109 @@ impl App {
         skin.sprite(&painter, "shufrep.bmp", 23.0, pl_y, 23.0, 12.0, plb, egui::Color32::WHITE);
         if pl_resp.clicked() {
             actions.push(ClassicAction::TogglePlaylistWindow);
+        }
+
+        // ---- 均衡器窗口（eqmain.bmp：背景里已经带滑轨，只叠滑块/按钮） ----
+        if self.show_eq && skin.has("eqmain.bmp") {
+            use egui::Color32;
+            let white = Color32::WHITE;
+            let er = eq_rect;
+            let ep = |x: f32, y: f32, w: f32, h: f32| {
+                egui::Rect::from_min_size(er.min + egui::vec2(x, y) * scale, egui::vec2(w, h) * scale)
+            };
+            skin.sprite(&painter, "eqmain.bmp", 0.0, 0.0, 275.0, 116.0, er, white);
+
+            // 滑块行程：y 38 → +12dB，y 101 → -12dB
+            let thumb_at = |gain: f32, x: f32| {
+                let t = ((12.0 - gain.clamp(-12.0, 12.0)) / 24.0).clamp(0.0, 1.0);
+                (38.0 + t * 52.0, x)
+            };
+            // 前置放大（暂不落库，固定 0dB）
+            let (py, px) = thumb_at(0.0, 21.0);
+            skin.sprite(&painter, "eqmain.bmp", 0.0, 164.0, 11.0, 11.0, ep(px, py, 11.0, 11.0), white);
+
+            // 十段推子
+            let gains: Vec<f32> = self.config.eq_gains.clone();
+            let enabled = self.config.eq_enabled;
+            for (i, gain) in gains.iter().take(10).enumerate() {
+                let bx = 78.0 + 18.0 * i as f32;
+                let track = ep(bx, 33.0, 22.0, 70.0);
+                let resp = ui.interact(
+                    track,
+                    ui.id().with(("eq_band", i)),
+                    egui::Sense::click_and_drag(),
+                );
+                let (ty, tx) = thumb_at(*gain, bx);
+                let th = ep(tx, ty, 11.0, 11.0);
+                let sel = resp.is_pointer_button_down_on();
+                let tint = if enabled { white } else { Color32::from_gray(190) };
+                skin.sprite(
+                    &painter,
+                    "eqmain.bmp",
+                    0.0,
+                    if sel { 176.0 } else { 164.0 },
+                    11.0,
+                    11.0,
+                    th,
+                    tint,
+                );
+                if (resp.clicked() || resp.dragged()) && enabled {
+                    if let Some(pos) = resp.interact_pointer_pos() {
+                        let rel = ((pos.y - er.min.y) / scale - 38.0).clamp(0.0, 52.0);
+                        let g = 12.0 - rel / 52.0 * 24.0;
+                        actions.push(ClassicAction::EqSet(i, g));
+                    }
+                }
+            }
+
+            // 频谱图区（eqmain 背景里是空的，这里用 pledit 的绿色画一条折线示意）
+            let graph = ep(86.0, 17.0, 113.0, 19.0);
+            painter.rect_filled(graph, 0.0, Color32::from_black_alpha(0));
+            let mut pts: Vec<egui::Pos2> = Vec::new();
+            let n = gains.len().min(10);
+            for i in 0..n {
+                let g = gains[i].clamp(-12.0, 12.0);
+                let x = graph.min.x + graph.width() * i as f32 / (n.max(2) - 1) as f32;
+                let y = graph.min.y + graph.height() * (12.0 - g) / 24.0;
+                pts.push(egui::pos2(x, y));
+            }
+            painter.add(egui::Shape::line(
+                pts,
+                egui::Stroke::new(1.0, skin.pledit.normal),
+            ));
+
+            // On / Auto / Presets 按钮
+            let on_btn = ep(14.0, 18.0, 26.0, 12.0);
+            let on_resp = ui.interact(on_btn, ui.id().with("eq_on"), egui::Sense::click());
+            let on_sx = if on_resp.is_pointer_button_down_on() { 128.0 } else if enabled { 69.0 } else { 10.0 };
+            skin.sprite(&painter, "eqmain.bmp", on_sx, 119.0, 26.0, 12.0, on_btn, white);
+            if on_resp.clicked() {
+                actions.push(ClassicAction::ToggleEqEnabled);
+            }
+
+            let auto_btn = ep(40.0, 18.0, 32.0, 12.0);
+            skin.sprite(&painter, "eqmain.bmp", 36.0, 119.0, 32.0, 12.0, auto_btn, white);
+
+            let presets = ep(217.0, 18.0, 44.0, 12.0);
+            let pres_resp = ui.interact(presets, ui.id().with("eq_presets"), egui::Sense::click());
+            skin.sprite(
+                &painter,
+                "eqmain.bmp",
+                224.0,
+                if pres_resp.is_pointer_button_down_on() { 176.0 } else { 164.0 },
+                44.0,
+                12.0,
+                presets,
+                white,
+            );
+
+            // 关闭按钮
+            let close = ep(264.0, 3.0, 9.0, 9.0);
+            let close_resp = ui.interact(close, ui.id().with("eq_close"), egui::Sense::click());
+            skin.sprite(&painter, "eqmain.bmp", 0.0, if close_resp.is_pointer_button_down_on() { 125.0 } else { 116.0 }, 9.0, 9.0, close, white);
+            if close_resp.clicked() {
+                actions.push(ClassicAction::ToggleEqWindow);
+            }
         }
 
         // ---- 播放列表窗口（pledit.bmp 边框 + pledit.txt 配色） ----
@@ -731,7 +846,19 @@ impl App {
                 ClassicAction::TogglePlaylistWindow => {
                     self.show_playlist = !self.show_playlist;
                 }
-                ClassicAction::PlayAt(i) => { shared.send(Cmd::PlayIndex(i)); }
+                ClassicAction::PlayAt(i) => {
+                    shared.send(Cmd::PlayIndex(i));
+                }
+                ClassicAction::EqSet(i, g) => {
+                    if let Some(slot) = self.config.eq_gains.get_mut(i) {
+                        *slot = g;
+                    }
+                    shared.eq.set_gains(&self.config.eq_gains);
+                }
+                ClassicAction::ToggleEqEnabled => {
+                    self.config.eq_enabled = !self.config.eq_enabled;
+                    shared.eq.set_enabled(self.config.eq_enabled);
+                }
             }
         }
     }
