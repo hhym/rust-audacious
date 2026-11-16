@@ -1322,17 +1322,21 @@ impl App {
                     let liked = self.current_liked();
                     let (heart_rect, heart) =
                         ui.allocate_exact_size(vec2(30.0, 30.0), Sense::click());
-                    heart_icon(
-                        ui.painter(),
-                        heart_rect,
-                        if liked {
-                            Color32::from_rgb(240, 96, 108)
-                        } else if heart.hovered() {
-                            p.text
-                        } else {
-                            p.dim
-                        },
-                    );
+                    if liked {
+                        tabler(
+                            ui.painter(),
+                            heart_rect,
+                            "filled-heart",
+                            Color32::from_rgb(240, 96, 108),
+                        );
+                    } else {
+                        tabler(
+                            ui.painter(),
+                            heart_rect,
+                            "heart",
+                            if heart.hovered() { p.text } else { p.dim },
+                        );
+                    }
                     if heart
                         .on_hover_text(self.t("喜欢", "Like"))
                         .clicked()
@@ -2917,29 +2921,7 @@ fn paint_shirt(
     color: egui::Color32,
     collar: egui::Color32,
 ) {
-    let r = rect.shrink(4.0);
-    let p = |fx: f32, fy: f32| egui::pos2(r.left() + r.width() * fx, r.top() + r.height() * fy);
-
-    // 身体
-    painter.rect_filled(
-        egui::Rect::from_min_max(p(0.34, 0.28), p(0.66, 0.92)),
-        egui::CornerRadius::same(2),
-        color,
-    );
-    // 左右袖子（梯形）
-    painter.add(egui::Shape::convex_polygon(
-        vec![p(0.35, 0.28), p(0.12, 0.38), p(0.18, 0.56), p(0.35, 0.48)],
-        color,
-        Stroke::NONE,
-    ));
-    painter.add(egui::Shape::convex_polygon(
-        vec![p(0.65, 0.28), p(0.88, 0.38), p(0.82, 0.56), p(0.65, 0.48)],
-        color,
-        Stroke::NONE,
-    ));
-    // 领口：两条斜线勾出 V 形
-    painter.line_segment([p(0.42, 0.28), p(0.50, 0.42)], Stroke::new(1.5_f32, collar));
-    painter.line_segment([p(0.58, 0.28), p(0.50, 0.42)], Stroke::new(1.5_f32, collar));
+    tabler(painter, rect, "palette", color);
 }
 
 /// 由搜索到的歌曲 JSON 和播放地址构造播放列表条目。
@@ -5166,136 +5148,39 @@ fn mini_icon_color(resp: &egui::Response) -> Color32 {
 
 /// 心：两个圆 + 一个朝下的三角拼成，顶上留出中间的凹口。
 fn mini_heart_icon(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
-    let c = rect.center();
-    let w = rect.width();
-    let h = rect.height();
-    let r = w * 0.215;
-    let dx = w * 0.195;
-    let cy = c.y - h * 0.11;
-    painter.circle_filled(egui::pos2(c.x - dx, cy), r, color);
-    painter.circle_filled(egui::pos2(c.x + dx, cy), r, color);
-    // 倒三角：上沿压在两个圆的腰部，尖落在心口，中间那段自然形成凹口
-    painter.add(egui::Shape::convex_polygon(
-        vec![
-            egui::pos2(c.x - w * 0.355, c.y - h * 0.015),
-            egui::pos2(c.x + w * 0.355, c.y - h * 0.015),
-            egui::pos2(c.x, c.y + h * 0.40),
-        ],
-        color,
-        Stroke::NONE,
-    ));
+    tabler(painter, rect, "heart", color);
 }
 
 /// 上一首：靠左一根竖条 + 朝左的三角（条和三角尖贴着）。
 fn mini_prev_icon(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
-    let c = rect.center();
-    let h = rect.height() * 0.36;
-    let w = rect.width() * 0.32;
-    let bar = egui::Rect::from_min_max(
-        egui::pos2(c.x - w, c.y - h * 0.95),
-        egui::pos2(c.x - w * 0.78, c.y + h * 0.95),
-    );
-    painter.rect_filled(bar, CornerRadius::same(1), color);
-    painter.add(egui::Shape::convex_polygon(
-        vec![
-            egui::pos2(c.x - w * 0.74, c.y),
-            egui::pos2(c.x + w, c.y - h * 0.95),
-            egui::pos2(c.x + w, c.y + h * 0.95),
-        ],
-        color,
-        Stroke::NONE,
-    ));
+    tabler(painter, rect, "player-skip-back", color);
 }
 
 /// 下一首：朝右的三角 + 靠右的竖条。
 fn mini_next_icon(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
-    let c = rect.center();
-    let h = rect.height() * 0.36;
-    let w = rect.width() * 0.32;
-    painter.add(egui::Shape::convex_polygon(
-        vec![
-            egui::pos2(c.x - w, c.y - h * 0.95),
-            egui::pos2(c.x - w, c.y + h * 0.95),
-            egui::pos2(c.x + w * 0.74, c.y),
-        ],
-        color,
-        Stroke::NONE,
-    ));
-    let bar = egui::Rect::from_min_max(
-        egui::pos2(c.x + w * 0.78, c.y - h * 0.95),
-        egui::pos2(c.x + w, c.y + h * 0.95),
-    );
-    painter.rect_filled(bar, CornerRadius::same(1), color);
+    tabler(painter, rect, "player-skip-forward", color);
 }
 
 /// 播放：白色实心三角，底边略短、尖端略钝，跟设计稿的圆内三角一致。
 fn mini_play_icon(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
-    let c = rect.center();
-    let h = rect.height() * 0.34;
-    painter.add(egui::Shape::convex_polygon(
-        vec![
-            egui::pos2(c.x - h * 0.62, c.y - h),
-            egui::pos2(c.x - h * 0.62, c.y + h),
-            egui::pos2(c.x + h * 1.02, c.y),
-        ],
-        color,
-        Stroke::NONE,
-    ));
+    let inner = rect.shrink(rect.width() * 0.20);
+    tabler(painter, inner, "filled-player-play", color);
 }
 
 /// 暂停：两根白竖条
 fn mini_pause_icon(painter: &egui::Painter, rect: egui::Rect) {
-    let c = rect.center();
-    let h = rect.height() * 0.28;
-    for dx in [-h * 0.5, h * 0.5] {
-        let bar = egui::Rect::from_min_max(
-            egui::pos2(c.x + dx - h * 0.16, c.y - h),
-            egui::pos2(c.x + dx + h * 0.16, c.y + h),
-        );
-        painter.rect_filled(bar, CornerRadius::same(2), Color32::WHITE);
-    }
+    let inner = rect.shrink(rect.width() * 0.20);
+    tabler(painter, inner, "filled-player-pause", Color32::WHITE);
 }
 
 /// 待播清单：三条横线，最后一条末尾带个指向右下的小箭头（看齐设计稿那个「队列」图标）。
 fn mini_list_icon(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
-    let c = rect.center();
-    let w = rect.width() * 0.30;
-    let step = rect.height() * 0.19;
-    for (i, dy) in [-1.0_f32, 0.0, 1.0].iter().enumerate() {
-        let y = c.y + dy * step;
-        let len = if i == 2 { w * 1.15 } else { w * 1.75 };
-        let line = egui::Rect::from_min_max(
-            egui::pos2(c.x - w, y - 1.4),
-            egui::pos2(c.x - w + len, y + 1.4),
-        );
-        painter.rect_filled(line, CornerRadius::same(1), color);
-        if i == 2 {
-            // 末端箭头：两条短线组成「↘」
-            let tip = egui::pos2(c.x - w + len + 7.0, y + 2.0);
-            painter.line_segment(
-                [tip + vec2(-4.0, -0.5), tip],
-                Stroke::new(1.6_f32, color),
-            );
-            painter.line_segment(
-                [tip + vec2(-0.5, -4.0), tip],
-                Stroke::new(1.6_f32, color),
-            );
-        }
-    }
+    tabler(painter, rect, "playlist", color);
 }
 
 /// 关闭：两个交叉的短线
 fn mini_close_icon(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
-    let c = rect.center();
-    let h = rect.width() * 0.24;
-    painter.line_segment(
-        [egui::pos2(c.x - h, c.y - h), egui::pos2(c.x + h, c.y + h)],
-        Stroke::new(1.6_f32, color),
-    );
-    painter.line_segment(
-        [egui::pos2(c.x - h, c.y + h), egui::pos2(c.x + h, c.y - h)],
-        Stroke::new(1.6_f32, color),
-    );
+    tabler(painter, rect, "x", color);
 }
 
 #[cfg(test)]
@@ -5319,19 +5204,7 @@ mod round_cover_tests {
 
 /// 喜欢：实心心形（两个圆 + 一个尖角三角），跟迷你卡片里那颗心同一套画法。
 fn heart_icon(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
-    let c = rect.center();
-    let s = rect.width().min(rect.height()) * 0.42;
-    painter.circle_filled(c + vec2(-s * 0.5, -s * 0.28), s * 0.62, color);
-    painter.circle_filled(c + vec2(s * 0.5, -s * 0.28), s * 0.62, color);
-    painter.add(egui::Shape::convex_polygon(
-        vec![
-            egui::pos2(c.x - s * 1.05, c.y - s * 0.05),
-            egui::pos2(c.x + s * 1.05, c.y - s * 0.05),
-            egui::pos2(c.x, c.y + s * 1.15),
-        ],
-        color,
-        Stroke::NONE,
-    ));
+    tabler(painter, rect, "heart", color);
 }
 
 /// 工具栏上的图标按钮：30×30，悬停变亮 + 淡淡底色，带 tooltip。
@@ -5366,143 +5239,125 @@ fn transport_button(ui: &mut egui::Ui, p: &crate::theme::Palette, tip: &str, pla
 
 /// 文件：圆角文档轮廓 + 右下角加号。
 fn icon_file_add(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
-    let doc = egui::Rect::from_center_size(rect.center() + vec2(-1.0, 0.0), vec2(13.0, 17.0));
-    painter.rect_stroke(
-        doc,
-        CornerRadius::same(2),
-        Stroke::new(1.4_f32, color),
-        egui::StrokeKind::Inside,
-    );
-    let c = rect.center() + vec2(7.0, 6.0);
-    painter.line_segment([c + vec2(-4.0, 0.0), c + vec2(4.0, 0.0)], Stroke::new(1.8_f32, color));
-    painter.line_segment([c + vec2(0.0, -4.0), c + vec2(0.0, 4.0)], Stroke::new(1.8_f32, color));
+    tabler(painter, rect, "file-plus", color);
 }
 
 /// 目录：文件夹轮廓 + 加号。
 fn icon_folder_add(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
-    let body = egui::Rect::from_center_size(rect.center() + vec2(-1.0, 1.0), vec2(16.0, 11.0));
-    painter.rect_stroke(
-        body,
-        CornerRadius::same(2),
-        Stroke::new(1.4_f32, color),
-        egui::StrokeKind::Inside,
-    );
-    let tab = egui::Rect::from_min_size(body.left_top() + vec2(1.0, -3.0), vec2(7.0, 4.0));
-    painter.rect_stroke(
-        tab,
-        CornerRadius::same(1),
-        Stroke::new(1.4_f32, color),
-        egui::StrokeKind::Inside,
-    );
-    let c = rect.center() + vec2(7.0, 7.0);
-    painter.line_segment([c + vec2(-3.5, 0.0), c + vec2(3.5, 0.0)], Stroke::new(1.8_f32, color));
-    painter.line_segment([c + vec2(0.0, -3.5), c + vec2(0.0, 3.5)], Stroke::new(1.8_f32, color));
+    tabler(painter, rect, "folder-plus", color);
 }
 
 /// 保存列表：三条横线 + 底下一个向下箭头。
 fn icon_save_list(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
-    let c = rect.center();
-    for i in 0..3 {
-        let y = c.y - 8.0 + i as f32 * 5.0;
-        let w = if i == 2 { 5.0 } else { 7.0 };
-        painter.line_segment(
-            [egui::pos2(c.x - 7.0, y), egui::pos2(c.x - 7.0 + w * 2.0, y)],
-            Stroke::new(1.4_f32, color),
-        );
-    }
-    painter.line_segment(
-        [egui::pos2(c.x, c.y + 2.0), egui::pos2(c.x, c.y + 11.0)],
-        Stroke::new(1.6_f32, color),
-    );
-    painter.add(egui::Shape::convex_polygon(
-        vec![
-            egui::pos2(c.x - 4.0, c.y + 7.0),
-            egui::pos2(c.x + 4.0, c.y + 7.0),
-            egui::pos2(c.x, c.y + 12.5),
-        ],
-        color,
-        Stroke::NONE,
-    ));
+    tabler(painter, rect, "device-floppy", color);
 }
 
 /// 均衡器：三根竖线 + 三个滑块点。
 fn icon_eq(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
-    let c = rect.center();
-    for (dx, dy) in [(-7.0_f32, -4.0_f32), (0.0, 3.0), (7.0, -1.0)] {
-        painter.line_segment(
-            [
-                egui::pos2(c.x + dx, c.y - 9.0),
-                egui::pos2(c.x + dx, c.y + 9.0),
-            ],
-            Stroke::new(1.3_f32, color),
-        );
-        painter.circle_filled(egui::pos2(c.x + dx, c.y + dy), 2.6, color);
-    }
+    tabler(painter, rect, "adjustments-horizontal", color);
 }
 
 /// 插件：2×2 的小方块。
 fn icon_plugins(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
-    let c = rect.center();
-    for (dx, dy) in [(-4.5_f32, -4.5_f32), (4.5, -4.5), (-4.5, 4.5), (4.5, 4.5)] {
-        painter.rect_filled(
-            egui::Rect::from_center_size(egui::pos2(c.x + dx, c.y + dy), vec2(6.0, 6.0)),
-            CornerRadius::same(2),
-            color,
-        );
-    }
+    tabler(painter, rect, "puzzle", color);
 }
 
 /// 设置：齿轮（圆 + 外侧四个短齿）。
 fn icon_settings(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
-    let c = rect.center();
-    painter.circle_stroke(c, 5.6, Stroke::new(1.4_f32, color));
-    painter.circle_filled(c, 2.0, color);
-    for (dx, dy) in [(0.0_f32, -9.0_f32), (0.0, 9.0), (-9.0, 0.0), (9.0, 0.0)] {
-        painter.line_segment(
-            [
-                egui::pos2(c.x + dx * 0.72, c.y + dy * 0.72),
-                egui::pos2(c.x + dx, c.y + dy),
-            ],
-            Stroke::new(2.0_f32, color),
-        );
-    }
+    tabler(painter, rect, "settings", color);
 }
 
 /// 迷你：一个小圆角窗口 + 里面一条细进度。
 fn icon_mini(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
-    let c = rect.center();
-    let win = egui::Rect::from_center_size(c, vec2(17.0, 11.0));
-    painter.rect_stroke(
-        win,
-        CornerRadius::same(3),
-        Stroke::new(1.3_f32, color),
-        egui::StrokeKind::Inside,
-    );
-    painter.line_segment(
-        [
-            egui::pos2(win.left() + 4.0, win.bottom() - 3.0),
-            egui::pos2(win.right() - 4.0, win.bottom() - 3.0),
-        ],
-        Stroke::new(1.3_f32, color),
-    );
+    tabler(painter, rect, "picture-in-picture", color);
 }
 
 /// 关于：圆圈里一个 i。
 fn icon_info(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
-    let c = rect.center();
-    painter.circle_stroke(c, 8.0, Stroke::new(1.3_f32, color));
-    painter.circle_filled(egui::pos2(c.x, c.y - 4.0), 1.3, color);
-    painter.line_segment(
-        [egui::pos2(c.x, c.y - 0.5), egui::pos2(c.x, c.y + 4.5)],
-        Stroke::new(1.6_f32, color),
-    );
+    tabler(painter, rect, "info-circle", color);
 }
 
 /// 停止：一个小方块。
 fn icon_stop(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
-    painter.rect_filled(
-        egui::Rect::from_center_size(rect.center(), vec2(10.0, 10.0)),
-        CornerRadius::same(2),
-        color,
-    );
+    tabler(painter, rect, "filled-player-stop", color);
+}
+
+/// Tabler 图标：白像素 + alpha 的 PNG，绘制时用 tint 上色。
+fn tabler_bytes(name: &str) -> Option<&'static [u8]> {
+    Some(match name {
+        "file-plus" => include_bytes!("../assets/tabler/file-plus.png"),
+        "folder-plus" => include_bytes!("../assets/tabler/folder-plus.png"),
+        "device-floppy" => include_bytes!("../assets/tabler/device-floppy.png"),
+        "adjustments-horizontal" => include_bytes!("../assets/tabler/adjustments-horizontal.png"),
+        "puzzle" => include_bytes!("../assets/tabler/puzzle.png"),
+        "settings" => include_bytes!("../assets/tabler/settings.png"),
+        "picture-in-picture" => include_bytes!("../assets/tabler/picture-in-picture.png"),
+        "info-circle" => include_bytes!("../assets/tabler/info-circle.png"),
+        "heart" => include_bytes!("../assets/tabler/heart.png"),
+        "filled-heart" => include_bytes!("../assets/tabler/filled-heart.png"),
+        "player-skip-back" => include_bytes!("../assets/tabler/player-skip-back.png"),
+        "player-skip-forward" => include_bytes!("../assets/tabler/player-skip-forward.png"),
+        "filled-player-play" => include_bytes!("../assets/tabler/filled-player-play.png"),
+        "filled-player-pause" => include_bytes!("../assets/tabler/filled-player-pause.png"),
+        "filled-player-skip-back" => include_bytes!("../assets/tabler/filled-player-skip-back.png"),
+        "filled-player-skip-forward" => include_bytes!("../assets/tabler/filled-player-skip-forward.png"),
+        "filled-player-stop" => include_bytes!("../assets/tabler/filled-player-stop.png"),
+        "playlist" => include_bytes!("../assets/tabler/playlist.png"),
+        "x" => include_bytes!("../assets/tabler/x.png"),
+        "palette" => include_bytes!("../assets/tabler/palette.png"),
+        "search" => include_bytes!("../assets/tabler/search.png"),
+        "arrows-shuffle" => include_bytes!("../assets/tabler/arrows-shuffle.png"),
+        "repeat" => include_bytes!("../assets/tabler/repeat.png"),
+        "repeat-once" => include_bytes!("../assets/tabler/repeat-once.png"),
+        "volume-2" => include_bytes!("../assets/tabler/volume-2.png"),
+        "volume-off" => include_bytes!("../assets/tabler/volume-off.png"),
+        "music" => include_bytes!("../assets/tabler/music.png"),
+        "trash" => include_bytes!("../assets/tabler/trash.png"),
+        "refresh" => include_bytes!("../assets/tabler/refresh.png"),
+        "check" => include_bytes!("../assets/tabler/check.png"),
+        "chevron-down" => include_bytes!("../assets/tabler/chevron-down.png"),
+        "plus" => include_bytes!("../assets/tabler/plus.png"),
+        "waveform" => include_bytes!("../assets/tabler/waveform.png"),
+        "disc" => include_bytes!("../assets/tabler/disc.png"),
+        "plug" => include_bytes!("../assets/tabler/plug.png"),
+        "file-music" => include_bytes!("../assets/tabler/file-music.png"),
+        "loader-2" => include_bytes!("../assets/tabler/loader-2.png"),
+        "checkbox" => include_bytes!("../assets/tabler/checkbox.png"),
+        "arrow-up" => include_bytes!("../assets/tabler/arrow-up.png"),
+        "arrow-down" => include_bytes!("../assets/tabler/arrow-down.png"),
+        "color-picker" => include_bytes!("../assets/tabler/color-picker.png"),
+        "playlist-add" => include_bytes!("../assets/tabler/playlist-add.png"),
+        "home" => include_bytes!("../assets/tabler/home.png"),
+        _ => return None,
+    })
+}
+
+/// 图标纹理按名字缓存到 ctx 的临时数据里，只解码一次。
+fn tabler_texture(ctx: &egui::Context, name: &str) -> Option<egui::TextureHandle> {
+    let id = egui::Id::new(("tabler-icon", name));
+    if let Some(tex) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
+        return Some(tex);
+    }
+    let bytes = tabler_bytes(name)?;
+    let img = image::load_from_memory(bytes).ok()?.to_rgba8();
+    let (w, h) = img.dimensions();
+    let color = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &img.into_raw());
+    let tex = ctx.load_texture(format!("tabler-{name}"), color, egui::TextureOptions::LINEAR);
+    ctx.data_mut(|d| d.insert_temp(id, tex.clone()));
+    Some(tex)
+}
+
+/// 在 rect 里画一个 Tabler 图标，按 color 上色（图标本身是白的）。
+fn tabler(painter: &egui::Painter, rect: egui::Rect, name: &str, color: Color32) {
+    if let Some(tex) = tabler_texture(painter.ctx(), name) {
+        // Tabler 的 24 网格留白较大，画的时候放大一点才和字号视觉重量匹配
+        let side = rect.width().min(rect.height()) * 1.12;
+        let r = egui::Rect::from_center_size(rect.center(), vec2(side, side));
+        painter.image(
+            tex.id(),
+            r,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            color,
+        );
+    }
 }
