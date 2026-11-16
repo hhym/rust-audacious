@@ -306,6 +306,251 @@ fn parse_hex_color(s: &str) -> Option<Color32> {
     Some(Color32::from_rgb(r, g, b))
 }
 
+/// 绘制通道：装了 .wsz 就切精灵图，没装就按内建经典配色用几何图形画。
+/// 这样「经典界面」不依赖用户先导入皮肤。
+pub struct Chrome<'a> {
+    pub skin: Option<&'a Skin>,
+    pub accent: [u8; 3],
+}
+
+impl<'a> Chrome<'a> {
+    pub fn new(skin: Option<&'a Skin>, accent: [u8; 3]) -> Self {
+        Chrome { skin, accent }
+    }
+
+    pub fn has(&self, sheet: &str) -> bool {
+        self.skin.map(|s| s.has(sheet)).unwrap_or(false)
+    }
+
+    pub fn skin(&self) -> Option<&'a Skin> {
+        self.skin
+    }
+
+    /// 内建配色的播放列表色板（没皮肤时用橙色系）
+    pub fn pledit(&self) -> Pledit {
+        match self.skin {
+            Some(s) => s.pledit.clone(),
+            None => Pledit {
+                normal: Color32::from_rgb(255, 170, 80),
+                current: Color32::from_rgb(255, 235, 190),
+                normal_bg: Color32::from_rgb(26, 14, 8),
+                selected_bg: Color32::from_rgb(96, 44, 12),
+                text: Color32::from_rgb(255, 170, 80),
+            },
+        }
+    }
+
+    fn panel(&self, k: f32) -> Color32 {
+        let c = self.accent;
+        Color32::from_rgb(
+            ((c[0] as f32) * k) as u8,
+            ((c[1] as f32) * k) as u8,
+            ((c[2] as f32) * k) as u8,
+        )
+    }
+
+    /// 按源矩形切片；没皮肤时按图块语义画几何形状。
+    #[allow(clippy::too_many_arguments)]
+    pub fn sprite(
+        &self,
+        painter: &Painter,
+        sheet: &str,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        dst: Rect,
+        tint: Color32,
+    ) {
+        if let Some(skin) = self.skin {
+            skin.sprite(painter, sheet, x, y, w, h, dst, tint);
+            return;
+        }
+        match sheet {
+            "main.bmp" => {
+                painter.rect_filled(dst, 0.0, self.panel(0.10));
+                // 顶部标题条
+                let top = Rect::from_min_size(dst.min, egui::vec2(dst.width(), 14.0 / 116.0 * dst.height()));
+                painter.rect_filled(top, 0.0, self.panel(0.55));
+                // 显示区/分析器底
+                let well = |rx: f32, ry: f32, rw: f32, rh: f32, k: f32| {
+                    let r = Rect::from_min_size(
+                        dst.min + egui::vec2(rx / 275.0 * dst.width(), ry / 116.0 * dst.height()),
+                        egui::vec2(rw / 275.0 * dst.width(), rh / 116.0 * dst.height()),
+                    );
+                    painter.rect_filled(r, 0.0, self.panel(k));
+                };
+                well(24.0, 43.0, 76.0, 36.0, 0.06);
+                well(39.0, 25.0, 59.0, 14.0, 0.06);
+                well(111.0, 23.0, 154.0, 7.0, 0.06);
+                well(111.0, 42.0, 66.0, 8.0, 0.06);
+                // 进度条 / 音量槽
+                well(16.0, 72.0, 248.0, 10.0, 0.05);
+                well(107.0, 57.0, 68.0, 13.0, 0.05);
+                well(177.0, 57.0, 38.0, 13.0, 0.05);
+            }
+            "titlebar.bmp" => {
+                painter.rect_filled(dst, 0.0, self.panel(if y == 0.0 { 0.7 } else { 0.55 }));
+            }
+            "cbuttons.bmp" => {
+                let face = self.panel(if y >= 18.0 { 0.62 } else { 0.40 });
+                painter.rect_filled(dst.shrink(0.5), 1.0, face);
+                let c = self.panel(1.0);
+                let stroke = egui::Stroke::new(1.5, c);
+                let cx = dst.center();
+                let s = dst.height() * 0.32;
+                match x as i32 {
+                    0 => { // 上一首
+                        painter.add(egui::Shape::convex_polygon(
+                            vec![
+                                egui::pos2(cx.x - s, cx.y),
+                                egui::pos2(cx.x, cx.y - s),
+                                egui::pos2(cx.x, cx.y + s),
+                            ],
+                            c, stroke,
+                        ));
+                        painter.rect_filled(
+                            Rect::from_min_size(egui::pos2(cx.x + 1.0, cx.y - s), egui::vec2(s * 0.35, s * 2.0)),
+                            0.0,
+                            c,
+                        );
+                    }
+                    23 => { // 播放
+                        painter.add(egui::Shape::convex_polygon(
+                            vec![
+                                egui::pos2(cx.x - s * 0.8, cx.y - s),
+                                egui::pos2(cx.x + s * 0.9, cx.y),
+                                egui::pos2(cx.x - s * 0.8, cx.y + s),
+                            ],
+                            c, stroke,
+                        ));
+                    }
+                    46 => { // 暂停
+                        for dx in [-s * 0.5, s * 0.5] {
+                            painter.rect_filled(
+                                Rect::from_center_size(cx + egui::vec2(dx, 0.0), egui::vec2(s * 0.5, s * 2.0)),
+                                0.0,
+                                c,
+                            );
+                        }
+                    }
+                    69 => { // 停止
+                        painter.rect_filled(Rect::from_center_size(cx, egui::vec2(s * 1.7, s * 1.7)), 0.0, c);
+                    }
+                    92 => { // 下一首
+                        painter.add(egui::Shape::convex_polygon(
+                            vec![
+                                egui::pos2(cx.x + s, cx.y),
+                                egui::pos2(cx.x, cx.y - s),
+                                egui::pos2(cx.x, cx.y + s),
+                            ],
+                            c, stroke,
+                        ));
+                        painter.rect_filled(
+                            Rect::from_min_size(egui::pos2(cx.x - 1.0 - s * 0.35, cx.y - s), egui::vec2(s * 0.35, s * 2.0)),
+                            0.0,
+                            c,
+                        );
+                    }
+                    _ => { // eject：一个朝上的三角 + 下面一条
+                        painter.add(egui::Shape::convex_polygon(
+                            vec![
+                                egui::pos2(cx.x, cx.y - s),
+                                egui::pos2(cx.x - s, cx.y + s * 0.1),
+                                egui::pos2(cx.x + s, cx.y + s * 0.1),
+                            ],
+                            c, stroke,
+                        ));
+                        painter.rect_filled(
+                            Rect::from_center_size(cx + egui::vec2(0.0, s * 0.55), egui::vec2(s * 2.0, s * 0.3)),
+                            0.0,
+                            c,
+                        );
+                    }
+                }
+            }
+            "playpaus.bmp" => {
+                let c = match x as i32 {
+                    0 => Color32::from_rgb(120, 230, 120),
+                    9 => Color32::from_rgb(240, 200, 90),
+                    _ => Color32::from_rgb(150, 150, 150),
+                };
+                painter.circle_filled(dst.center(), dst.height() * 0.32, c);
+            }
+            "posbar.bmp" => {
+                if x >= 248.0 {
+                    painter.rect_filled(dst, 0.0, self.panel(0.85));
+                } else {
+                    painter.rect_filled(dst, 0.0, self.panel(0.12));
+                }
+            }
+            "volume.bmp" => {
+                if y >= 400.0 {
+                    painter.rect_filled(dst.shrink(0.5), 1.0, self.panel(0.95));
+                } else {
+                    painter.rect_filled(dst, 0.0, self.panel(0.12));
+                    // 已填充的部分按帧号长度示意
+                    let frac = 1.0 - (y / 15.0) / 27.0;
+                    let fill = Rect::from_min_size(dst.min, egui::vec2(dst.width() * frac, dst.height()));
+                    painter.rect_filled(fill, 0.0, self.panel(0.5).gamma_multiply(0.8));
+                }
+            }
+            "shufrep.bmp" => {
+                let on = y >= 30.0;
+                painter.rect_filled(
+                    dst.shrink(0.5),
+                    1.0,
+                    if on { self.panel(0.75) } else { self.panel(0.32) },
+                );
+            }
+            "eqmain.bmp" => {
+                if w <= 12.0 && h <= 12.0 {
+                    painter.rect_filled(dst, 1.0, self.panel(0.95));
+                } else {
+                    painter.rect_filled(dst, 0.0, self.panel(0.14));
+                }
+            }
+            "pledit.bmp" => {
+                let k = if y >= 72.0 { 0.30 } else if y >= 42.0 { 0.22 } else { 0.42 };
+                painter.rect_filled(dst, 0.0, self.panel(k));
+            }
+            _ => {
+                painter.rect_filled(dst, 0.0, self.panel(0.3));
+            }
+        }
+    }
+
+    /// 文字：有皮肤用 text.bmp 字模，没皮肤用系统字体
+    pub fn text(
+        &self,
+        painter: &Painter,
+        s: &str,
+        origin: Pos2,
+        scale: f32,
+        max_x: f32,
+        tint: Color32,
+    ) -> f32 {
+        if let Some(skin) = self.skin {
+            return skin.text(painter, s, origin, scale, max_x, tint);
+        }
+        let font = egui::FontId::new(6.5 * scale.max(0.8), egui::FontFamily::Proportional);
+        let galley = painter.layout_no_wrap(s.to_string(), font, tint);
+        let w = galley.size().x.min(max_x - origin.x);
+        painter.galley(origin, galley, tint);
+        origin.x + w
+    }
+
+    /// 数字：有皮肤用 numbers.bmp，没皮肤用等宽字体
+    pub fn digits(&self, painter: &Painter, s: &str, origin: Pos2, scale: f32, tint: Color32) {
+        if let Some(skin) = self.skin {
+            skin.digits(painter, s, origin, scale, tint);
+            return;
+        }
+        let font = egui::FontId::new(12.5 * scale.max(0.8), egui::FontFamily::Monospace);
+        painter.text(origin, egui::Align2::LEFT_TOP, s, font, tint);
+    }
+}
+
 /// 皮肤目录：`<data_dir>/skins/`，当前生效的是 `current.wsz`。
 pub fn skins_dir() -> std::path::PathBuf {
     audcore::config::data_dir().join("skins")

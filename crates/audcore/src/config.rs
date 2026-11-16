@@ -85,6 +85,11 @@ impl Theme {
     }
 }
 
+/// 新装环境默认值：手机端直接进经典界面，桌面端保持现代布局
+fn default_classic_skin() -> bool {
+    cfg!(target_os = "android")
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     /// 音量 0.0 - 1.0
@@ -117,8 +122,8 @@ pub struct Config {
     /// 歌词模式：false 滚动歌词 / true 卡拉OK
     #[serde(default)]
     pub lyric_karaoke: bool,
-    /// 经典皮肤界面（Winamp 2.x .wsz 风格），Android 上整屏生效
-    #[serde(default)]
+    /// 经典皮肤界面（Winamp 2.x .wsz 风格），Android 上默认开启
+    #[serde(default = "default_classic_skin")]
     pub classic_skin: bool,
 }
 
@@ -138,7 +143,7 @@ impl Default for Config {
             last_dir: dirs::audio_dir().or_else(dirs::home_dir),
             lyric_align: 0,
             lyric_karaoke: false,
-            classic_skin: false,
+            classic_skin: cfg!(target_os = "android"),
         }
     }
 }

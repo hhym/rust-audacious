@@ -226,6 +226,14 @@ pub struct App {
     show_playlist: bool,
     /// 经典模式下是否显示歌词窗口（自绘面板）
     show_lyrics: bool,
+    /// 主窗口折叠成 14px 标题条（Winamp 的 windowshade）
+    classic_shade: bool,
+    /// 播放列表里选中的行
+    pl_select: std::collections::BTreeSet<usize>,
+    /// EQ 的 Auto 开关（占位，暂时只做视觉态）
+    eq_auto: bool,
+    /// EQ 预设菜单是否展开
+    eq_presets_open: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -256,7 +264,14 @@ enum ClassicAction {
     EqSet(usize, f32),
     ToggleEqEnabled,
     ToggleLyricsWindow,
+    ToggleShade,
     OpenSettings,
+    PlaylistRemove,
+    PlaylistSelectAll,
+    PlaylistInvert,
+    PlaylistToggleSel(usize),
+    EqPreset(u8),
+    ToggleEqAuto,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -349,6 +364,10 @@ impl App {
             skin: None,
             show_playlist: true,
             show_lyrics: true,
+            classic_shade: false,
+            pl_select: std::collections::BTreeSet::new(),
+            eq_auto: false,
+            eq_presets_open: false,
         };
         app.plugins = app.collect_plugins();
         app.reload_media_plugins();
@@ -403,14 +422,55 @@ impl App {
 
     /// 经典皮肤模式是否生效（开关打开且确实装上了皮肤）
     fn classic_active(&self) -> bool {
-        self.config.classic_skin && self.skin.is_some()
+        self.config.classic_skin
+    }
+
+    /// 折叠态：只剩 14px 标题条（Winamp 的 windowshade）
+    fn classic_shade_view(&mut self, ui: &mut egui::Ui) {
+        use crate::skin::MAIN_W;
+        let chrome = crate::skin::Chrome::new(self.skin.as_ref(), self.config.accent);
+        let scale = (ui.available_width() / MAIN_W).max(0.5);
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(MAIN_W * scale, 14.0 * scale), egui::Sense::hover());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 0.0, egui::Color32::BLACK);
+        chrome.sprite(&painter, "titlebar.bmp", 27.0, 0.0, MAIN_W, 14.0, rect, egui::Color32::WHITE);
+        let title = if self.state.title.is_empty() {
+            "AUDACIOUS-RS".to_string()
+        } else {
+            format!("{}", self.state.title)
+        };
+        let marq = egui::Rect::from_min_size(rect.min + egui::vec2(60.0, 4.0) * scale, egui::vec2(190.0, 6.0) * scale);
+        chrome.text(&painter.with_clip_rect(marq), &title, marq.min, scale, marq.max.x, chrome.pledit().current);
+        let mut actions: Vec<ClassicAction> = Vec::new();
+        // 还原按钮
+        let expand = egui::Rect::from_min_size(rect.min + egui::vec2(250.0, 3.0) * scale, egui::vec2(9.0, 9.0) * scale);
+        let expand_resp = ui.interact(expand, ui.id().with("shade_expand"), egui::Sense::click());
+        chrome.sprite(&painter, "titlebar.bmp", 0.0, if expand_resp.is_pointer_button_down_on() { 27.0 } else { 18.0 }, 9.0, 9.0, expand, egui::Color32::WHITE);
+        if expand_resp.clicked() {
+            actions.push(ClassicAction::ToggleShade);
+        }
+        // 播放态小灯
+        chrome.sprite(&painter, "playpaus.bmp", 0.0, 0.0, 9.0, 9.0,
+            egui::Rect::from_min_size(rect.min + egui::vec2(48.0, 3.0) * scale, egui::vec2(9.0, 9.0) * scale),
+            egui::Color32::WHITE);
+        for action in actions {
+            if let ClassicAction::ToggleShade = action {
+                self.classic_shade = false;
+            }
+        }
     }
 
     /// 整屏 Winamp 主窗口：275×116 网格按屏宽等比缩放，控件全部用皮肤位图切图绘制。
     fn classic_view(&mut self, ui: &mut egui::Ui) {
         use crate::skin::{MAIN_H, MAIN_W};
 
-        let Some(skin) = self.skin.as_ref() else { return };
+        if self.classic_shade {
+            self.classic_shade_view(ui);
+            return;
+        }
+
+        let chrome = crate::skin::Chrome::new(self.skin.as_ref(), self.config.accent);
+        let pled = chrome.pledit();
         let scale = (ui.available_width() / MAIN_W).max(0.5);
         let pos = self.state.position;
         let len = self.state.length;
@@ -454,7 +514,24 @@ impl App {
         };
 
         painter.rect_filled(rect, 0.0, egui::Color32::BLACK);
-        skin.sprite(&painter, "main.bmp", 0.0, 0.0, MAIN_W, MAIN_H, main_rect, egui::Color32::WHITE);
+        chrome.sprite(&painter, "main.bmp", 0.0, 0.0, MAIN_W, MAIN_H, main_rect, egui::Color32::WHITE);
+
+        // 标题条右侧的小按钮：折叠（windowshade）/ 关闭（收成纯标题条）
+        let shade_btn = place(254.0, 3.0, 9.0, 9.0);
+        let shade_resp = ui.interact(shade_btn, ui.id().with("classic_shade_btn"), egui::Sense::click());
+        chrome.sprite(
+            &painter,
+            "titlebar.bmp",
+            0.0,
+            if shade_resp.is_pointer_button_down_on() { 27.0 } else { 18.0 },
+            9.0,
+            9.0,
+            shade_btn,
+            egui::Color32::WHITE,
+        );
+        if shade_resp.clicked() {
+            actions.push(ClassicAction::ToggleShade);
+        }
 
         // 频谱条（main.bmp 的分析器区：24,43 起 76×36）
         {
@@ -518,27 +595,27 @@ impl App {
             crate::engine::Status::Paused => (26.0, 9.0),
             _ => (26.0, 18.0),
         };
-        skin.sprite(&painter, "playpaus.bmp", sheet_x, 0.0, 9.0, 9.0, place(lx, 28.0, 9.0, 9.0), egui::Color32::WHITE);
+        chrome.sprite(&painter, "playpaus.bmp", sheet_x, 0.0, 9.0, 9.0, place(lx, 28.0, 9.0, 9.0), egui::Color32::WHITE);
 
         // 时间 88:88（numbers.bmp 每字 9×13）
         let cur = pos.max(0.0) as u64;
         let time = format!("{:02}:{:02}", cur / 60, cur % 60);
-        skin.digits(&painter, &time, main_rect.min + egui::vec2(48.0, 26.0) * scale, scale, egui::Color32::from_rgb(0x00, 0xFF, 0x00));
+        chrome.digits(&painter, &time, main_rect.min + egui::vec2(48.0, 26.0) * scale, scale, egui::Color32::from_rgb(0x00, 0xFF, 0x00));
 
         // 曲名跑马灯（text.bmp 5×6 字模，超出裁掉）
         let marq = egui::Rect::from_min_size(main_rect.min + egui::vec2(111.0, 24.0) * scale, egui::vec2(154.0, 6.0) * scale);
         let clipped = painter.with_clip_rect(marq);
-        skin.text(&clipped, &title, marq.min, scale, marq.max.x, egui::Color32::from_rgb(0x00, 0xFF, 0x00));
+        chrome.text(&clipped, &title, marq.min, scale, marq.max.x, egui::Color32::from_rgb(0x00, 0xFF, 0x00));
 
         // 格式 / 采样率
         let info = format!("{} {}kHz", if self.state.format.is_empty() { "MP3" } else { &self.state.format }, self.state.sample_rate / 1000);
-        skin.text(&clipped, "", marq.min, scale, marq.max.x, egui::Color32::WHITE);
+        chrome.text(&clipped, "", marq.min, scale, marq.max.x, egui::Color32::WHITE);
         let kbps = egui::Rect::from_min_size(main_rect.min + egui::vec2(111.0, 43.0) * scale, egui::vec2(100.0, 6.0) * scale);
-        skin.text(&painter.with_clip_rect(kbps), &info, kbps.min, scale, kbps.max.x, egui::Color32::from_rgb(0x00, 0xFF, 0x00));
+        chrome.text(&painter.with_clip_rect(kbps), &info, kbps.min, scale, kbps.max.x, egui::Color32::from_rgb(0x00, 0xFF, 0x00));
 
         // 进度条（posbar.bmp：248×10 背景 + 29×10 滑块）
         let bar = place(16.0, 72.0, 248.0, 10.0);
-        skin.sprite(&painter, "posbar.bmp", 0.0, 0.0, 248.0, 10.0, bar, egui::Color32::WHITE);
+        chrome.sprite(&painter, "posbar.bmp", 0.0, 0.0, 248.0, 10.0, bar, egui::Color32::WHITE);
         let progress = if len > 0.0 {
             (pos / len).clamp(0.0, 1.0) as f32
         } else {
@@ -550,7 +627,7 @@ impl App {
         );
         let bar_resp = ui.interact(bar, ui.id().with("classic_posbar"), egui::Sense::click_and_drag());
         let active = bar_resp.is_pointer_button_down_on();
-        skin.sprite(&painter, "posbar.bmp", if active { 277.0 } else { 248.0 }, 0.0, 29.0, 10.0, thumb, egui::Color32::WHITE);
+        chrome.sprite(&painter, "posbar.bmp", if active { 277.0 } else { 248.0 }, 0.0, 29.0, 10.0, thumb, egui::Color32::WHITE);
         if bar_resp.clicked() || bar_resp.dragged() {
             if let Some(p) = bar_resp.interact_pointer_pos() {
                 let frac = ((p.x - bar.min.x) / bar.width()).clamp(0.0, 1.0) as f64;
@@ -563,13 +640,13 @@ impl App {
         // 音量（volume.bmp：65×13 一帧、28 帧叠在 65×433 里；滑块 14×11）
         let vol = place(107.0, 57.0, 68.0, 13.0);
         let frame = ((1.0 - volume.clamp(0.0, 1.0)) * 27.0).round() as f32;
-        skin.sprite(&painter, "volume.bmp", 0.0, frame * 15.0, 68.0, 13.0, vol, egui::Color32::WHITE);
+        chrome.sprite(&painter, "volume.bmp", 0.0, frame * 15.0, 68.0, 13.0, vol, egui::Color32::WHITE);
         let vt = egui::Rect::from_min_size(
             vol.min + egui::vec2((68.0 - 14.0) * volume.clamp(0.0, 1.0), 1.0) * scale,
             egui::vec2(14.0, 11.0) * scale,
         );
         let vol_resp = ui.interact(vol, ui.id().with("classic_vol"), egui::Sense::click_and_drag());
-        skin.sprite(&painter, "volume.bmp", if vol_resp.is_pointer_button_down_on() { 0.0 } else { 15.0 }, 422.0, 14.0, 11.0, vt, egui::Color32::WHITE);
+        chrome.sprite(&painter, "volume.bmp", if vol_resp.is_pointer_button_down_on() { 0.0 } else { 15.0 }, 422.0, 14.0, 11.0, vt, egui::Color32::WHITE);
         if vol_resp.clicked() || vol_resp.dragged() {
             if let Some(p) = vol_resp.interact_pointer_pos() {
                 let v = ((p.x - vol.min.x) / vol.width()).clamp(0.0, 1.0);
@@ -589,7 +666,7 @@ impl App {
             let r = place(*x, 88.0, *w, 18.0);
             let resp = ui.interact(r, ui.id().with(("classic_btn", i)), egui::Sense::click());
             let down = resp.is_pointer_button_down_on();
-            skin.sprite(&painter, "cbuttons.bmp", *sx, if down { 18.0 } else { 0.0 }, *w, 18.0, r, egui::Color32::WHITE);
+            chrome.sprite(&painter, "cbuttons.bmp", *sx, if down { 18.0 } else { 0.0 }, *w, 18.0, r, egui::Color32::WHITE);
             if resp.clicked() {
                 actions.push(*action);
             }
@@ -598,7 +675,7 @@ impl App {
         // Eject（22×16）
         let ej = place(136.0, 89.0, 22.0, 16.0);
         let ejr = ui.interact(ej, ui.id().with("classic_eject"), egui::Sense::click());
-        skin.sprite(&painter, "cbuttons.bmp", 114.0, if ejr.is_pointer_button_down_on() { 16.0 } else { 0.0 }, 22.0, 16.0, ej, egui::Color32::WHITE);
+        chrome.sprite(&painter, "cbuttons.bmp", 114.0, if ejr.is_pointer_button_down_on() { 16.0 } else { 0.0 }, 22.0, 16.0, ej, egui::Color32::WHITE);
         if ejr.clicked() {
             actions.push(ClassicAction::Eject);
         }
@@ -608,7 +685,7 @@ impl App {
         let shuf_on = self.config.shuffle;
         let shuf_resp = ui.interact(shuf, ui.id().with("classic_shuffle"), egui::Sense::click());
         let shuf_y = if shuf_resp.is_pointer_button_down_on() { 45.0 } else if shuf_on { 30.0 } else { 0.0 };
-        skin.sprite(&painter, "shufrep.bmp", 28.0, shuf_y, 47.0, 15.0, shuf, egui::Color32::WHITE);
+        chrome.sprite(&painter, "shufrep.bmp", 28.0, shuf_y, 47.0, 15.0, shuf, egui::Color32::WHITE);
         if shuf_resp.clicked() {
             actions.push(ClassicAction::ToggleShuffle);
         }
@@ -616,7 +693,7 @@ impl App {
         let rep_on = self.config.repeat != audcore::RepeatMode::Off;
         let rep_resp = ui.interact(rep, ui.id().with("classic_repeat"), egui::Sense::click());
         let rep_y = if rep_resp.is_pointer_button_down_on() { 45.0 } else if rep_on { 30.0 } else { 0.0 };
-        skin.sprite(&painter, "shufrep.bmp", 0.0, rep_y, 28.0, 15.0, rep, egui::Color32::WHITE);
+        chrome.sprite(&painter, "shufrep.bmp", 0.0, rep_y, 28.0, 15.0, rep, egui::Color32::WHITE);
         if rep_resp.clicked() {
             actions.push(ClassicAction::ToggleRepeat);
         }
@@ -631,7 +708,7 @@ impl App {
         } else {
             0.0
         };
-        skin.sprite(&painter, "shufrep.bmp", 0.0, eq_y, 23.0, 12.0, eqb, egui::Color32::WHITE);
+        chrome.sprite(&painter, "shufrep.bmp", 0.0, eq_y, 23.0, 12.0, eqb, egui::Color32::WHITE);
         if eq_resp.clicked() {
             actions.push(ClassicAction::ToggleEqWindow);
         }
@@ -644,20 +721,20 @@ impl App {
         } else {
             0.0
         };
-        skin.sprite(&painter, "shufrep.bmp", 23.0, pl_y, 23.0, 12.0, plb, egui::Color32::WHITE);
+        chrome.sprite(&painter, "shufrep.bmp", 23.0, pl_y, 23.0, 12.0, plb, egui::Color32::WHITE);
         if pl_resp.clicked() {
             actions.push(ClassicAction::TogglePlaylistWindow);
         }
 
         // ---- 均衡器窗口（eqmain.bmp：背景里已经带滑轨，只叠滑块/按钮） ----
-        if self.show_eq && skin.has("eqmain.bmp") {
+        if self.show_eq {
             use egui::Color32;
             let white = Color32::WHITE;
             let er = eq_rect;
             let ep = |x: f32, y: f32, w: f32, h: f32| {
                 egui::Rect::from_min_size(er.min + egui::vec2(x, y) * scale, egui::vec2(w, h) * scale)
             };
-            skin.sprite(&painter, "eqmain.bmp", 0.0, 0.0, 275.0, 116.0, er, white);
+            chrome.sprite(&painter, "eqmain.bmp", 0.0, 0.0, 275.0, 116.0, er, white);
 
             // 滑块行程：y 38 → +12dB，y 101 → -12dB
             let thumb_at = |gain: f32, x: f32| {
@@ -666,7 +743,7 @@ impl App {
             };
             // 前置放大（暂不落库，固定 0dB）
             let (py, px) = thumb_at(0.0, 21.0);
-            skin.sprite(&painter, "eqmain.bmp", 0.0, 164.0, 11.0, 11.0, ep(px, py, 11.0, 11.0), white);
+            chrome.sprite(&painter, "eqmain.bmp", 0.0, 164.0, 11.0, 11.0, ep(px, py, 11.0, 11.0), white);
 
             // 十段推子
             let gains: Vec<f32> = self.config.eq_gains.clone();
@@ -683,7 +760,7 @@ impl App {
                 let th = ep(tx, ty, 11.0, 11.0);
                 let sel = resp.is_pointer_button_down_on();
                 let tint = if enabled { white } else { Color32::from_gray(190) };
-                skin.sprite(
+                chrome.sprite(
                     &painter,
                     "eqmain.bmp",
                     0.0,
@@ -715,24 +792,35 @@ impl App {
             }
             painter.add(egui::Shape::line(
                 pts,
-                egui::Stroke::new(1.0, skin.pledit.normal),
+                egui::Stroke::new(1.0, pled.normal),
             ));
 
             // On / Auto / Presets 按钮
             let on_btn = ep(14.0, 18.0, 26.0, 12.0);
             let on_resp = ui.interact(on_btn, ui.id().with("eq_on"), egui::Sense::click());
             let on_sx = if on_resp.is_pointer_button_down_on() { 128.0 } else if enabled { 69.0 } else { 10.0 };
-            skin.sprite(&painter, "eqmain.bmp", on_sx, 119.0, 26.0, 12.0, on_btn, white);
+            chrome.sprite(&painter, "eqmain.bmp", on_sx, 119.0, 26.0, 12.0, on_btn, white);
             if on_resp.clicked() {
                 actions.push(ClassicAction::ToggleEqEnabled);
             }
 
             let auto_btn = ep(40.0, 18.0, 32.0, 12.0);
-            skin.sprite(&painter, "eqmain.bmp", 36.0, 119.0, 32.0, 12.0, auto_btn, white);
+            let auto_resp = ui.interact(auto_btn, ui.id().with("eq_auto"), egui::Sense::click());
+            let auto_sx = if auto_resp.is_pointer_button_down_on() {
+                154.0
+            } else if self.eq_auto {
+                95.0
+            } else {
+                36.0
+            };
+            chrome.sprite(&painter, "eqmain.bmp", auto_sx, 119.0, 32.0, 12.0, auto_btn, white);
+            if auto_resp.clicked() {
+                actions.push(ClassicAction::ToggleEqAuto);
+            }
 
             let presets = ep(217.0, 18.0, 44.0, 12.0);
             let pres_resp = ui.interact(presets, ui.id().with("eq_presets"), egui::Sense::click());
-            skin.sprite(
+            chrome.sprite(
                 &painter,
                 "eqmain.bmp",
                 224.0,
@@ -742,11 +830,29 @@ impl App {
                 presets,
                 white,
             );
+            if pres_resp.clicked() {
+                self.eq_presets_open = !self.eq_presets_open;
+            }
+            if self.eq_presets_open {
+                egui::Area::new(egui::Id::new("eq_presets_menu"))
+                    .fixed_pos(presets.left_top())
+                    .order(egui::Order::Foreground)
+                    .show(ui.ctx(), |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.set_min_width(96.0);
+                            for (i, label) in ["平直", "重低音", "人声"].iter().enumerate() {
+                                if ui.button(*label).clicked() {
+                                    actions.push(ClassicAction::EqPreset(i as u8));
+                                }
+                            }
+                        });
+                    });
+            }
 
             // 关闭按钮
             let close = ep(264.0, 3.0, 9.0, 9.0);
             let close_resp = ui.interact(close, ui.id().with("eq_close"), egui::Sense::click());
-            skin.sprite(&painter, "eqmain.bmp", 0.0, if close_resp.is_pointer_button_down_on() { 125.0 } else { 116.0 }, 9.0, 9.0, close, white);
+            chrome.sprite(&painter, "eqmain.bmp", 0.0, if close_resp.is_pointer_button_down_on() { 125.0 } else { 116.0 }, 9.0, 9.0, close, white);
             if close_resp.clicked() {
                 actions.push(ClassicAction::ToggleEqWindow);
             }
@@ -761,24 +867,24 @@ impl App {
                 egui::Rect::from_min_size(lr.min + egui::vec2(x, y) * scale, egui::vec2(w, h) * scale)
             };
             // 底色取 pledit 的列表底色压暗，跟皮肤同一套配色
-            let bg = skin.pledit.normal_bg.gamma_multiply(0.85);
+            let bg = pled.normal_bg.gamma_multiply(0.85);
             painter.rect_filled(lr, 0.0, bg);
-            painter.rect_stroke(lr, 0.0, egui::Stroke::new(1.0, skin.pledit.normal_bg), egui::StrokeKind::Inside);
+            painter.rect_stroke(lr, 0.0, egui::Stroke::new(1.0, pled.normal_bg), egui::StrokeKind::Inside);
 
             // 标题条：titlebar.bmp 的 275x14 平铺（皮肤没有就退化成纯色条）
             let top = lp(0.0, 0.0, MAIN_W, 14.0);
-            if skin.has("titlebar.bmp") {
-                skin.sprite(&painter, "titlebar.bmp", 27.0, 15.0, MAIN_W, 14.0, top, white);
+            if chrome.has("titlebar.bmp") {
+                chrome.sprite(&painter, "titlebar.bmp", 27.0, 15.0, MAIN_W, 14.0, top, white);
             } else {
-                painter.rect_filled(top, 0.0, skin.pledit.selected_bg);
+                painter.rect_filled(top, 0.0, pled.selected_bg);
             }
-            skin.text(&painter, "LYRIC", top.min + egui::vec2(6.0, 4.0) * scale, scale, top.max.x, white);
+            chrome.text(&painter, "LYRIC", top.min + egui::vec2(6.0, 4.0) * scale, scale, top.max.x, white);
 
             // 关闭按钮（titlebar 的 close 切片）
             let close = lp(264.0, 3.0, 9.0, 9.0);
             let close_resp = ui.interact(close, ui.id().with("ly_close"), egui::Sense::click());
-            if skin.has("titlebar.bmp") {
-                skin.sprite(
+            if chrome.has("titlebar.bmp") {
+                chrome.sprite(
                     &painter,
                     "titlebar.bmp",
                     18.0,
@@ -815,7 +921,7 @@ impl App {
                     egui::Align2::CENTER_CENTER,
                     msg,
                     egui::FontId::new(11.0 * scale, egui::FontFamily::Proportional),
-                    skin.pledit.normal.gamma_multiply(0.7),
+                    pled.normal.gamma_multiply(0.7),
                 );
             } else {
                 // 当前行：时间 <= 播放位置的最后一行
@@ -837,9 +943,9 @@ impl App {
                     );
                     let is_cur = i == cur;
                     let color = if is_cur {
-                        skin.pledit.current
+                        pled.current
                     } else {
-                        skin.pledit.normal.gamma_multiply(0.65)
+                        pled.normal.gamma_multiply(0.65)
                     };
                     let resp = ui.interact(r, ui.id().with(("ly", i)), egui::Sense::click());
                     let galley = painter.layout_no_wrap(
@@ -863,12 +969,12 @@ impl App {
             // 底部收边
             painter.line_segment(
                 [lp(0.0, ly_h - 1.0, 1.0, 1.0).min, lp(MAIN_W, ly_h - 1.0, 1.0, 1.0).min],
-                egui::Stroke::new(1.0, skin.pledit.normal_bg),
+                egui::Stroke::new(1.0, pled.normal_bg),
             );
         }
 
         // ---- 播放列表窗口（pledit.bmp 边框 + pledit.txt 配色） ----
-        if self.show_playlist && skin.has("pledit.bmp") {
+        if self.show_playlist {
             use egui::Color32;
             let white = Color32::WHITE;
             let pr = pl_rect;
@@ -877,50 +983,57 @@ impl App {
             };
 
             // 顶部 20px：左角 + 平铺 + 标题条 + 右角
-            skin.sprite(&painter, "pledit.bmp", 0.0, 21.0, 25.0, 20.0, pp(0.0, 0.0, 25.0, 20.0), white);
-            let (tw, th) = skin.size("pledit.bmp").unwrap_or((280, 186));
+            chrome.sprite(&painter, "pledit.bmp", 0.0, 21.0, 25.0, 20.0, pp(0.0, 0.0, 25.0, 20.0), white);
             let mut x = 25.0;
             while x < MAIN_W - 25.0 {
                 let w = (MAIN_W - 25.0 - x).min(25.0);
-                skin.sprite(&painter, "pledit.bmp", 127.0, 21.0, w, 20.0, pp(x, 0.0, w, 20.0), white);
+                chrome.sprite(&painter, "pledit.bmp", 127.0, 21.0, w, 20.0, pp(x, 0.0, w, 20.0), white);
                 x += 25.0;
             }
-            skin.sprite(&painter, "pledit.bmp", 26.0, 21.0, 100.0, 20.0, pp((MAIN_W - 100.0) / 2.0, 0.0, 100.0, 20.0), white);
-            skin.sprite(&painter, "pledit.bmp", 153.0, 21.0, 25.0, 20.0, pp(MAIN_W - 25.0, 0.0, 25.0, 20.0), white);
-            skin.text(&painter, "PLAYLIST", pp((MAIN_W - 100.0) / 2.0 + 22.0, 7.0, 1.0, 1.0).min, scale, pr.max.x, white);
+            chrome.sprite(&painter, "pledit.bmp", 26.0, 21.0, 100.0, 20.0, pp((MAIN_W - 100.0) / 2.0, 0.0, 100.0, 20.0), white);
+            chrome.sprite(&painter, "pledit.bmp", 153.0, 21.0, 25.0, 20.0, pp(MAIN_W - 25.0, 0.0, 25.0, 20.0), white);
+            chrome.text(&painter, "PLAYLIST", pp((MAIN_W - 100.0) / 2.0 + 22.0, 7.0, 1.0, 1.0).min, scale, pr.max.x, white);
 
             // 左右边框平铺（左 12、右 20 宽）
             let mut y = 20.0;
             while y < pl_h - 38.0 {
                 let h = (pl_h - 38.0 - y).min(29.0);
-                skin.sprite(&painter, "pledit.bmp", 0.0, 42.0, 12.0, h, pp(0.0, y, 12.0, h), white);
-                skin.sprite(&painter, "pledit.bmp", 31.0, 42.0, 20.0, h, pp(MAIN_W - 20.0, y, 20.0, h), white);
+                chrome.sprite(&painter, "pledit.bmp", 0.0, 42.0, 12.0, h, pp(0.0, y, 12.0, h), white);
+                chrome.sprite(&painter, "pledit.bmp", 31.0, 42.0, 20.0, h, pp(MAIN_W - 20.0, y, 20.0, h), white);
                 y += 29.0;
             }
 
             // 列表区域背景
             let list = pp(12.0, 20.0, MAIN_W - 32.0, pl_h - 58.0);
-            painter.rect_filled(list, 0.0, skin.pledit.normal_bg);
+            painter.rect_filled(list, 0.0, pled.normal_bg);
 
             // 底部 38px
             let by = pl_h - 38.0;
-            skin.sprite(&painter, "pledit.bmp", 0.0, 72.0, 125.0, 38.0, pp(0.0, by, 125.0, 38.0), white);
-            skin.sprite(&painter, "pledit.bmp", 126.0, 72.0, 150.0, 38.0, pp(MAIN_W - 150.0, by, 150.0, 38.0), white);
+            chrome.sprite(&painter, "pledit.bmp", 0.0, 72.0, 125.0, 38.0, pp(0.0, by, 125.0, 38.0), white);
+            chrome.sprite(&painter, "pledit.bmp", 126.0, 72.0, 150.0, 38.0, pp(MAIN_W - 150.0, by, 150.0, 38.0), white);
             // 底部按钮：加歌 / 删除 / 选择 / 杂项 / 列表选项
-            let (bl, br) = (skin.pledit.normal_bg, skin.pledit.current);
+            let (bl, br) = (pled.normal_bg, pled.current);
             let menu_btn = |x: f32, sx: f32, sy: f32, id: &str| {
                 let r = pp(x, by + 8.0, 22.0, 18.0);
                 let resp = ui.interact(r, ui.id().with(id), egui::Sense::click());
-                skin.sprite(&painter, "pledit.bmp", sx, if resp.is_pointer_button_down_on() { sy + 19.0 } else { sy }, 22.0, 18.0, r, white);
+                chrome.sprite(&painter, "pledit.bmp", sx, if resp.is_pointer_button_down_on() { sy + 19.0 } else { sy }, 22.0, 18.0, r, white);
                 resp.clicked()
             };
             if menu_btn(14.0, 0.0, 149.0, "pl_add") {
                 actions.push(ClassicAction::Eject);
             }
-            let _ = menu_btn(43.0, 54.0, 111.0, "pl_rem");
-            let _ = menu_btn(72.0, 54.0, 130.0, "pl_sel");
-            let _ = menu_btn(101.0, 54.0, 149.0, "pl_misc");
-            let _ = menu_btn(MAIN_W - 44.0, 0.0, 111.0, "pl_menu");
+            if menu_btn(43.0, 54.0, 111.0, "pl_rem") {
+                actions.push(ClassicAction::PlaylistRemove);
+            }
+            if menu_btn(72.0, 54.0, 130.0, "pl_sel") {
+                actions.push(ClassicAction::PlaylistSelectAll);
+            }
+            if menu_btn(101.0, 54.0, 149.0, "pl_misc") {
+                actions.push(ClassicAction::PlaylistInvert);
+            }
+            if menu_btn(MAIN_W - 44.0, 0.0, 111.0, "pl_menu") {
+                actions.push(ClassicAction::TogglePlaylistWindow);
+            }
 
             // 行（用系统字体，能显示中文；颜色取 pledit.txt）
             let rows: Vec<(String, String, Option<f64>, usize)> = {
@@ -943,8 +1056,11 @@ impl App {
                             let (w, h) = (ui.available_width(), row_h);
                             let (r, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
                             let is_cur = current == Some(*idx);
+                            let is_sel = self.pl_select.contains(idx);
                             if is_cur {
-                                ui.painter().rect_filled(r, 0.0, skin.pledit.selected_bg);
+                                ui.painter().rect_filled(r, 0.0, pled.selected_bg);
+                            } else if is_sel {
+                                ui.painter().rect_filled(r, 0.0, pled.selected_bg.gamma_multiply(0.6));
                             }
                             let color = if is_cur { br } else { bl };
                             let label = if artist.is_empty() {
@@ -972,10 +1088,12 @@ impl App {
                             if resp.clicked() {
                                 actions.push(ClassicAction::PlayAt(*idx));
                             }
+                            if resp.secondary_clicked() {
+                                actions.push(ClassicAction::PlaylistToggleSel(*idx));
+                            }
                         }
                     });
             });
-            let _ = (tw, th);
         }
 
         // 右上角一个低调的齿轮：经典模式下也要能进设置（换肤 / 歌词开关）
@@ -1058,6 +1176,67 @@ impl App {
                 }
                 ClassicAction::ToggleLyricsWindow => {
                     self.show_lyrics = !self.show_lyrics;
+                }
+                ClassicAction::PlaylistToggleSel(i) => {
+                    if !self.pl_select.remove(&i) {
+                        self.pl_select.insert(i);
+                    }
+                }
+                ClassicAction::PlaylistSelectAll => {
+                    let n = shared.playlist.lock().map(|p| p.len()).unwrap_or(0);
+                    if self.pl_select.len() == n && n > 0 {
+                        self.pl_select.clear();
+                    } else {
+                        self.pl_select = (0..n).collect();
+                    }
+                }
+                ClassicAction::PlaylistInvert => {
+                    let n = shared.playlist.lock().map(|p| p.len()).unwrap_or(0);
+                    let mut next = std::collections::BTreeSet::new();
+                    for i in 0..n {
+                        if !self.pl_select.contains(&i) {
+                            next.insert(i);
+                        }
+                    }
+                    self.pl_select = next;
+                }
+                ClassicAction::PlaylistRemove => {
+                    let mut targets: Vec<usize> = self.pl_select.iter().copied().collect();
+                    if targets.is_empty() {
+                        if let Some(cur) = self.state.current {
+                            targets.push(cur);
+                        }
+                    }
+                    if let Ok(mut pl) = shared.playlist.lock() {
+                        targets.sort_unstable_by(|a, b| b.cmp(a));
+                        let n = targets.len();
+                        for i in targets {
+                            if i < pl.len() {
+                                pl.remove(i);
+                            }
+                        }
+                        self.pl_select.clear();
+                        self.toast = Some((format!("已移除 {n} 首"), Instant::now()));
+                    }
+                    shared.send(Cmd::Refresh);
+                }
+                ClassicAction::EqPreset(kind) => {
+                    let preset: [f32; 10] = match kind {
+                        1 => [6.0, 5.0, 3.0, 1.0, -1.0, -2.0, -2.0, -1.0, 0.0, 0.0],
+                        2 => [-3.0, -2.0, 0.0, 2.0, 4.0, 4.0, 3.0, 2.0, 0.0, -1.0],
+                        _ => [0.0; 10],
+                    };
+                    self.config.eq_gains = preset.to_vec();
+                    self.config.eq_enabled = true;
+                    shared.eq.set_gains(&self.config.eq_gains);
+                    shared.eq.set_enabled(true);
+                    self.eq_presets_open = false;
+                }
+                ClassicAction::ToggleEqAuto => {
+                    self.eq_auto = !self.eq_auto;
+                }
+                ClassicAction::ToggleShade => {
+                    self.classic_shade = !self.classic_shade;
                 }
                 ClassicAction::OpenSettings => {
                     self.show_settings = true;

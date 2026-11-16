@@ -53,7 +53,7 @@ export JAVA_HOME=/path/to/jdk17                # keytool / apksigner 需要 JDK 
 | APK 清单 | `android/AndroidManifest.xml` | `NativeActivity` + `android.app.lib_name=audacious_rs`、`uses-sdk 26/34`、媒体权限 |
 | 图标 | `android/res/mipmap-*` | 由 `crates/audacious/assets/icon.png` 缩放出的 5 档 launcher 图标 |
 | CJK 字体 | `theme::cjk_candidates()` | 已带 `/system/fonts/NotoSansCJK-Regular.ttc` 等 Android 路径 |
-| 经典皮肤 | `skin.rs` + `app.rs::classic_view` | 解析 Winamp 2.x `.wsz`（zip 里的位图 + `pledit.txt`），按 275×116 主窗口网格切精灵绘制：背景、进度条、音量、五键控制、随机/循环、EQ/列表开关、`numbers.bmp` 时间、`text.bmp` 文字。设置 → 外观里可开「经典皮肤」并导入 `.wsz`（Android 走 SAF 单文件选择器，桌面把文件放到 `<data>/skins/current.wsz`） |
+| 经典皮肤 | `skin.rs`（含 `Chrome` 双通道）+ `app.rs::classic_view` | 解析 Winamp 2.x `.wsz`（zip 里的位图 + `pledit.txt`），按 275×116 主窗口网格切精灵绘制：背景、进度条、音量、五键控制、随机/循环、EQ/列表开关、`numbers.bmp` 时间、`text.bmp` 文字。设置 → 外观里可开「经典皮肤」并导入 `.wsz`（Android 走 SAF 单文件选择器，桌面把文件放到 `<data>/skins/current.wsz`）。**没装皮肤时走内建橙色经典配色**（`Chrome` 用几何图形画窗口/按钮/槽），手机端默认就进经典界面；另有 windowshade 折叠态、EQ 预设弹层、列表选择/删除/反选 |
 | SAF 选文件 | `android.rs` + `android/java/.../MainActivity.java` | 「添加文件」在 Android 上拉起 `ACTION_OPEN_DOCUMENT`（多选音频）；Java 壳把 `onActivityResult` 转给 JNI；回调只做「查文件名 + `openFileDescriptor` + `detachFd`」，真实的读盘拷贝交给 `saf-import` 后台线程，落到 `files/imported/` 后由 UI 取走入列；导入中底部浮层显示百分比 |
 | 手机布局 | `app.rs::mobile_mode / mobile_command_bar / mobile_play_bar` | 侧栏变顶部可横滑导航（40px 高），菜单栏/工具栏/状态栏收成一条命令条，播放条换封面+三键+满宽进度；窄屏列表只留 序号/标题/时长 三列、行高 34px；`config.mobile_layout` 或窗口 <700px 自动生效 |
 
