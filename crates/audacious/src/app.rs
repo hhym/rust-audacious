@@ -224,6 +224,8 @@ pub struct App {
     skin: Option<crate::skin::Skin>,
     /// 经典模式下是否显示播放列表窗口
     show_playlist: bool,
+    /// 经典模式下是否显示歌词窗口（自绘面板）
+    show_lyrics: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -253,6 +255,8 @@ enum ClassicAction {
     PlayAt(usize),
     EqSet(usize, f32),
     ToggleEqEnabled,
+    ToggleLyricsWindow,
+    OpenSettings,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -344,6 +348,7 @@ impl App {
             cover_accent_rgb: None,
             skin: None,
             show_playlist: true,
+            show_lyrics: true,
         };
         app.plugins = app.collect_plugins();
         app.reload_media_plugins();
@@ -421,9 +426,10 @@ impl App {
 
         // 竖向堆叠：主窗口 → 均衡器 → 播放列表，剩下的高度给列表
         let eq_h = if self.show_eq { 116.0 } else { 0.0 };
-        let pl_h = ((ui.available_height() / scale) - MAIN_H - eq_h).clamp(140.0, 420.0);
+        let ly_h = if self.show_lyrics { 108.0 } else { 0.0 };
+        let pl_h = ((ui.available_height() / scale) - MAIN_H - eq_h - ly_h).clamp(120.0, 420.0);
         let (rect, _) = ui.allocate_exact_size(
-            egui::vec2(MAIN_W * scale, (MAIN_H + eq_h + pl_h) * scale),
+            egui::vec2(MAIN_W * scale, (MAIN_H + eq_h + ly_h + pl_h) * scale),
             egui::Sense::hover(),
         );
         let main_rect = egui::Rect::from_min_size(
@@ -434,8 +440,12 @@ impl App {
             main_rect.min + egui::vec2(0.0, MAIN_H * scale),
             egui::vec2(MAIN_W * scale, eq_h * scale),
         );
-        let pl_rect = egui::Rect::from_min_size(
+        let ly_rect = egui::Rect::from_min_size(
             main_rect.min + egui::vec2(0.0, (MAIN_H + eq_h) * scale),
+            egui::vec2(MAIN_W * scale, ly_h * scale),
+        );
+        let pl_rect = egui::Rect::from_min_size(
+            main_rect.min + egui::vec2(0.0, (MAIN_H + eq_h + ly_h) * scale),
             egui::vec2(MAIN_W * scale, pl_h * scale),
         );
         let painter = ui.painter_at(rect);
@@ -686,6 +696,121 @@ impl App {
             }
         }
 
+        // ---- 歌词窗口（Winamp 没有原生歌词窗，这里按皮肤色自绘一扇） ----
+        if self.show_lyrics {
+            use egui::Color32;
+            let white = Color32::WHITE;
+            let lr = ly_rect;
+            let lp = |x: f32, y: f32, w: f32, h: f32| {
+                egui::Rect::from_min_size(lr.min + egui::vec2(x, y) * scale, egui::vec2(w, h) * scale)
+            };
+            // 底色取 pledit 的列表底色压暗，跟皮肤同一套配色
+            let bg = skin.pledit.normal_bg.gamma_multiply(0.85);
+            painter.rect_filled(lr, 0.0, bg);
+            painter.rect_stroke(lr, 0.0, egui::Stroke::new(1.0, skin.pledit.normal_bg), egui::StrokeKind::Inside);
+
+            // 标题条：titlebar.bmp 的 275x14 平铺（皮肤没有就退化成纯色条）
+            let top = lp(0.0, 0.0, MAIN_W, 14.0);
+            if skin.has("titlebar.bmp") {
+                skin.sprite(&painter, "titlebar.bmp", 27.0, 15.0, MAIN_W, 14.0, top, white);
+            } else {
+                painter.rect_filled(top, 0.0, skin.pledit.selected_bg);
+            }
+            skin.text(&painter, "LYRIC", top.min + egui::vec2(6.0, 4.0) * scale, scale, top.max.x, white);
+
+            // 关闭按钮（titlebar 的 close 切片）
+            let close = lp(264.0, 3.0, 9.0, 9.0);
+            let close_resp = ui.interact(close, ui.id().with("ly_close"), egui::Sense::click());
+            if skin.has("titlebar.bmp") {
+                skin.sprite(
+                    &painter,
+                    "titlebar.bmp",
+                    18.0,
+                    if close_resp.is_pointer_button_down_on() { 9.0 } else { 0.0 },
+                    9.0,
+                    9.0,
+                    close,
+                    white,
+                );
+            }
+            if close_resp.clicked() {
+                actions.push(ClassicAction::ToggleLyricsWindow);
+            }
+
+            // 歌词正文
+            let body = lp(1.0, 15.0, MAIN_W - 2.0, ly_h - 16.0);
+            let lines: Vec<(f64, String)> = match &self.lyric_state {
+                LyricState::Lines(v) => v.clone(),
+                LyricState::Plain(text) => text
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .map(|l| (0.0, l.trim().to_string()))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            if lines.is_empty() {
+                let msg = match &self.lyric_state {
+                    LyricState::Loading => "歌词加载中…",
+                    LyricState::Error(_) => "歌词加载失败",
+                    _ => "暂无歌词",
+                };
+                painter.text(
+                    body.center(),
+                    egui::Align2::CENTER_CENTER,
+                    msg,
+                    egui::FontId::new(11.0 * scale, egui::FontFamily::Proportional),
+                    skin.pledit.normal.gamma_multiply(0.7),
+                );
+            } else {
+                // 当前行：时间 <= 播放位置的最后一行
+                let cur = lines
+                    .iter()
+                    .rposition(|(t, _)| *t <= pos + 0.05)
+                    .unwrap_or(0);
+                let row_h = 17.0 * scale;
+                let visible = (body.height() / row_h).floor().max(1.0) as usize;
+                let half = visible / 2;
+                let start = cur.saturating_sub(half);
+                let font_cur = egui::FontId::new(12.5 * scale, egui::FontFamily::Proportional);
+                let font = egui::FontId::new(11.0 * scale, egui::FontFamily::Proportional);
+                let mut y = body.min.y + 2.0;
+                for (i, (t, text)) in lines.iter().enumerate().skip(start).take(visible) {
+                    let r = egui::Rect::from_min_size(
+                        egui::pos2(body.min.x, y),
+                        egui::vec2(body.width(), row_h),
+                    );
+                    let is_cur = i == cur;
+                    let color = if is_cur {
+                        skin.pledit.current
+                    } else {
+                        skin.pledit.normal.gamma_multiply(0.65)
+                    };
+                    let resp = ui.interact(r, ui.id().with(("ly", i)), egui::Sense::click());
+                    let galley = painter.layout_no_wrap(
+                        text.clone(),
+                        if is_cur { font_cur.clone() } else { font.clone() },
+                        color,
+                    );
+                    let x = r.center().x - galley.size().x / 2.0;
+                    painter.galley(
+                        egui::pos2(x.max(r.min.x + 2.0), r.center().y - galley.size().y / 2.0),
+                        galley,
+                        color,
+                    );
+                    if resp.clicked() && *t > 0.0 {
+                        actions.push(ClassicAction::Seek(*t));
+                    }
+                    y += row_h;
+                }
+            }
+
+            // 底部收边
+            painter.line_segment(
+                [lp(0.0, ly_h - 1.0, 1.0, 1.0).min, lp(MAIN_W, ly_h - 1.0, 1.0, 1.0).min],
+                egui::Stroke::new(1.0, skin.pledit.normal_bg),
+            );
+        }
+
         // ---- 播放列表窗口（pledit.bmp 边框 + pledit.txt 配色） ----
         if self.show_playlist && skin.has("pledit.bmp") {
             use egui::Color32;
@@ -797,6 +922,26 @@ impl App {
             let _ = (tw, th);
         }
 
+        // 右上角一个低调的齿轮：经典模式下也要能进设置（换肤 / 歌词开关）
+        let gear = egui::Rect::from_min_size(
+            main_rect.max - egui::vec2(20.0, 2.0),
+            egui::vec2(18.0, 18.0),
+        );
+        let gear_resp = ui.interact(gear, ui.id().with("classic_gear"), egui::Sense::click());
+        if gear_resp.hovered() {
+            painter.circle_filled(gear.center(), 8.0, egui::Color32::from_black_alpha(120));
+        }
+        painter.text(
+            gear.center(),
+            egui::Align2::CENTER_CENTER,
+            "⚙",
+            egui::FontId::proportional(12.0),
+            egui::Color32::from_white_alpha(if gear_resp.hovered() { 220 } else { 140 }),
+        );
+        if gear_resp.clicked() {
+            actions.push(ClassicAction::OpenSettings);
+        }
+
         drop(painter);
 
         for action in actions {
@@ -854,6 +999,12 @@ impl App {
                         *slot = g;
                     }
                     shared.eq.set_gains(&self.config.eq_gains);
+                }
+                ClassicAction::ToggleLyricsWindow => {
+                    self.show_lyrics = !self.show_lyrics;
+                }
+                ClassicAction::OpenSettings => {
+                    self.show_settings = true;
                 }
                 ClassicAction::ToggleEqEnabled => {
                     self.config.eq_enabled = !self.config.eq_enabled;
@@ -1119,6 +1270,10 @@ impl eframe::App for App {
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE.fill(egui::Color32::BLACK))
                 .show(ctx, |ui| self.classic_view(ui));
+            if self.show_settings {
+                let p = self.pal();
+                self.settings_ui(ctx, &p);
+            }
             return;
         }
 
@@ -2447,6 +2602,16 @@ impl App {
                             .small()
                             .weak(),
                     );
+                }
+                if self.config.classic_skin {
+                    let label_eq = self.t("显示均衡器", "Equalizer");
+                    let label_ly = self.t("显示歌词", "Lyrics");
+                    let label_pl = self.t("显示列表", "Playlist");
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut self.show_eq, label_eq);
+                        ui.checkbox(&mut self.show_lyrics, label_ly);
+                        ui.checkbox(&mut self.show_playlist, label_pl);
+                    });
                 }
 
                 let mut eq = self.config.eq_enabled;
