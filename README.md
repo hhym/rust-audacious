@@ -151,11 +151,12 @@ MyGo 插件的 ES 模块改写/搜索/取地址/歌词/设置项。共 32 个用
 
 ## 版本
 
-版本号统一在 `Cargo.toml` 的 `workspace.package.version` 维护，按习惯从 **5.0** 起标，当前 **5.26.0-exp.2**（实验分支，不随主线发布）：
+版本号统一在 `Cargo.toml` 的 `workspace.package.version` 维护，按习惯从 **5.0** 起标，当前 **5.26.0-exp.3**（实验分支，不随主线发布）：
 
 - 5.0.0 首个可运行版本
 - 5.0.1 修掉 Windows 发布版弹出控制台窗口的问题，日志改写到 `%APPDATA%\audacious-rs\app.log`
 - 5.1.0 三套主题（橘黄 / 浅色 / 深色）与工具栏换肤按钮，默认橘黄
+- 5.26.0-exp.3（实验）把界面图标从 Tabler 换成 Bootstrap Icons 1.11.3：43 个 SVG 用 cairosvg 栅格成 96px 白像素 PNG 放 `crates/audacious/assets/bootstrap-icons/`；零改动调用点——加了一层 `bi_name()` 别名表（`tabler(...)` 那套名字 → bootstrap 名字），`tabler_bytes()` 改为读 bootstrap 资源；网格 16×16 不用再放大 1.12 倍，`tabler()` 里改为 1:1
 - 5.26.0-exp.2（实验）三个弹窗（插件 / 设置 / 均衡器）的滚动条统一收进 `scroll_style()`：轨道用面板色（原来非浮动轨道是近黑的 `extreme_bg_color`，浅色主题下一根黑棒）、手柄走文字色、9px；设置窗恢复 400×520 默认高度；顺手清掉这段样式在多处重复的问题
 - 5.26.0-exp.1（实验）插件排错增强：`friendly_error` 新增「残留 export」专条（带行号 + 处理建议）；`ResponseBody.arrayBuffer()` 拿不到二进制时直接抛出可读原因（HTTP 状态 / 需要 Cookie / 网络权限），不再让插件解图时报 `unknown JPEG marker 0`；插件列表的错误行支持 hover 看完整原始错误
 - 5.25.0 设置窗口、均衡器窗口统一成「可拉伸 + 内容溢出时滚动」：两窗都套 `ScrollArea`（滚动条样式同插件窗口：常驻、9px、手柄最短长度），`resizable(true)`，设置默认 400×520（最高 760）、均衡器 560×320（最高 700）；内容不多时不出滚动条，缩窗或以后加主题/加设置项才出现
