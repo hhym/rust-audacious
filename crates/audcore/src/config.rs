@@ -122,6 +122,9 @@ pub struct Config {
     /// 歌词模式：false 滚动歌词 / true 卡拉OK
     #[serde(default)]
     pub lyric_karaoke: bool,
+    /// 用户保存的 EQ 自定义预设（每条 10 段增益）
+    #[serde(default)]
+    pub eq_custom: Vec<Vec<f32>>,
     /// 经典皮肤界面（Winamp 2.x .wsz 风格），Android 上默认开启
     #[serde(default = "default_classic_skin")]
     pub classic_skin: bool,
@@ -143,6 +146,7 @@ impl Default for Config {
             last_dir: dirs::audio_dir().or_else(dirs::home_dir),
             lyric_align: 0,
             lyric_karaoke: false,
+            eq_custom: Vec::new(),
             classic_skin: cfg!(target_os = "android"),
         }
     }

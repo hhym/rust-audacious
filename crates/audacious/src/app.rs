@@ -238,6 +238,10 @@ pub struct App {
     eq_auto_preset: u8,
     /// 上一帧的曲目索引，用来发现换曲
     last_track: Option<usize>,
+    /// 长按探测：按下的行 + 按下时刻
+    pl_press: Option<(usize, Instant)>,
+    /// 长按弹出的行菜单：行号 + 弹出位置
+    pl_menu: Option<(usize, egui::Pos2)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -285,6 +289,7 @@ enum ClassicAction {
     PlaylistToggleSel(usize),
     PlaylistRemoveAt(usize),
     EqPreset(u8),
+    EqCustomAt(usize),
     ToggleEqAuto,
 }
 
@@ -384,6 +389,8 @@ impl App {
             eq_presets_open: false,
             eq_auto_preset: 0,
             last_track: None,
+            pl_press: None,
+            pl_menu: None,
         };
         app.plugins = app.collect_plugins();
         app.reload_media_plugins();
@@ -861,6 +868,15 @@ impl App {
                                     actions.push(ClassicAction::EqPreset(i as u8));
                                 }
                             }
+                            if !self.config.eq_custom.is_empty() {
+                                ui.separator();
+                                let n = self.config.eq_custom.len();
+                                for i in 0..n {
+                                    if ui.button(format!("自定义 {}", i + 1)).clicked() {
+                                        actions.push(ClassicAction::EqCustomAt(i));
+                                    }
+                                }
+                            }
                         });
                     });
             }
@@ -1061,8 +1077,10 @@ impl App {
                     .collect()
             };
             let current = self.state.current;
-            let font = egui::FontId::new(11.0 * scale.max(1.0), egui::FontFamily::Proportional);
-            let row_h = 14.0 * scale.max(1.0);
+            // 字号跟着屏宽缩放，但设上下限，避免小屏字太小、大屏字太大
+            let font_px = (11.0 * scale).clamp(9.5, 17.0);
+            let font = egui::FontId::new(font_px, egui::FontFamily::Proportional);
+            let row_h = font_px * 1.35;
 
             ui.scope_builder(egui::UiBuilder::new().max_rect(list), |ui| {
                 egui::ScrollArea::vertical()
@@ -1104,27 +1122,65 @@ impl App {
                             if resp.clicked() {
                                 actions.push(ClassicAction::PlayAt(*idx));
                             }
-                            if resp.secondary_clicked() {
-                                actions.push(ClassicAction::PlaylistToggleSel(*idx));
-                            }
                             let idx_now = *idx;
-                            resp.context_menu(|ui| {
-                                if ui.button("播放这首").clicked() {
-                                    actions.push(ClassicAction::PlayAt(idx_now));
-                                    ui.close_menu();
+                            // 长按 550ms 弹自绘菜单（手机上没有「右键」，只能自己计时）
+                            if resp.is_pointer_button_down_on() {
+                                match self.pl_press {
+                                    Some((p_idx, t0)) if p_idx == idx_now => {
+                                        if t0.elapsed() >= Duration::from_millis(550)
+                                            && self.pl_menu.is_none()
+                                        {
+                                            if let Some(p) = resp.interact_pointer_pos() {
+                                                self.pl_menu = Some((idx_now, p));
+                                            }
+                                        }
+                                    }
+                                    _ => self.pl_press = Some((idx_now, Instant::now())),
                                 }
-                                if ui.button("加入选中").clicked() {
-                                    actions.push(ClassicAction::PlaylistToggleSel(idx_now));
-                                    ui.close_menu();
-                                }
-                                if ui.button("删除这首").clicked() {
-                                    actions.push(ClassicAction::PlaylistRemoveAt(idx_now));
-                                    ui.close_menu();
-                                }
-                            });
+                            } else if matches!(self.pl_press, Some((p_idx, _)) if p_idx == idx_now) {
+                                self.pl_press = None;
+                            }
+                            if resp.secondary_clicked() {
+                                actions.push(ClassicAction::PlaylistToggleSel(idx_now));
+                            }
                         }
                     });
             });
+        }
+
+        // 长按弹出的行菜单
+        if let Some((ti, pos)) = self.pl_menu {
+            let mut close = false;
+            egui::Area::new(egui::Id::new("pl_row_menu"))
+                .fixed_pos(pos)
+                .order(egui::Order::Foreground)
+                .show(ui.ctx(), |ui| {
+                    let resp = egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.set_min_width(110.0);
+                        if ui.button("播放这首").clicked() {
+                            actions.push(ClassicAction::PlayAt(ti));
+                            close = true;
+                        }
+                        if ui.button("加入选中").clicked() {
+                            actions.push(ClassicAction::PlaylistToggleSel(ti));
+                            close = true;
+                        }
+                        if ui.button("删除这首").clicked() {
+                            actions.push(ClassicAction::PlaylistRemoveAt(ti));
+                            close = true;
+                        }
+                    });
+                    if ui.ctx().input(|i| i.pointer.any_click()) {
+                        if let Some(p) = ui.ctx().input(|i| i.pointer.interact_pos()) {
+                            if !resp.response.rect.contains(p) {
+                                close = true;
+                            }
+                        }
+                    }
+                });
+            if close {
+                self.pl_menu = None;
+            }
         }
 
         // 右上角一个低调的齿轮：经典模式下也要能进设置（换肤 / 歌词开关）
@@ -1267,6 +1323,15 @@ impl App {
                     self.config.eq_enabled = true;
                     shared.eq.set_gains(&self.config.eq_gains);
                     shared.eq.set_enabled(true);
+                    self.eq_presets_open = false;
+                }
+                ClassicAction::EqCustomAt(i) => {
+                    if let Some(g) = self.config.eq_custom.get(i).cloned() {
+                        self.config.eq_gains = g.clone();
+                        self.config.eq_enabled = true;
+                        shared.eq.set_gains(&g);
+                        shared.eq.set_enabled(true);
+                    }
                     self.eq_presets_open = false;
                 }
                 ClassicAction::ToggleEqAuto => {
@@ -2911,6 +2976,18 @@ impl App {
                         ui.checkbox(&mut self.show_lyrics, label_ly);
                         ui.checkbox(&mut self.show_playlist, label_pl);
                     });
+                }
+
+                // 保存当前 EQ 增益为自定义预设
+                if ui
+                    .button(self.t("保存当前 EQ 为自定义预设", "Save current EQ preset"))
+                    .clicked()
+                {
+                    if self.config.eq_custom.len() >= 5 {
+                        self.config.eq_custom.remove(0);
+                    }
+                    self.config.eq_custom.push(self.config.eq_gains.clone());
+                    changed = true;
                 }
 
                 let mut eq = self.config.eq_enabled;
