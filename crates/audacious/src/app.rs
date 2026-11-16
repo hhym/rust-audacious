@@ -1790,9 +1790,19 @@ impl App {
         let mut changed = false;
         egui::Window::new(self.t("设置", "Settings"))
             .open(&mut open)
-            .default_width(380.0)
-            .resizable(false)
+            .default_width(400.0)
+            .default_height(520.0)
+            .max_height(760.0)
+            .resizable(true)
             .show(ctx, |ui| {
+                // 内容变多时（主题、插件设置项）整窗可滚，滚动条常驻
+                ui.spacing_mut().scroll.floating = false;
+                ui.spacing_mut().scroll.bar_width = 9.0;
+                ui.spacing_mut().scroll.bar_inner_margin = 3.0;
+                ui.spacing_mut().scroll.bar_outer_margin = 4.0;
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
                 ui.add_space(4.0);
                 ui.label(RichText::new(self.t("播放", "Playback")).strong().color(p.accent));
                 ui.horizontal(|ui| {
@@ -1902,6 +1912,7 @@ impl App {
                 if ui.button(self.t("保存配置", "Save config")).clicked() {
                     changed = true;
                 }
+                });
             });
         self.show_settings = open;
         if changed {
@@ -1917,8 +1928,18 @@ impl App {
         egui::Window::new(self.t("十段均衡器", "Equalizer"))
             .open(&mut open)
             .default_width(560.0)
-            .resizable(false)
+            .default_height(320.0)
+            .max_height(700.0)
+            .resizable(true)
             .show(ctx, |ui| {
+                // 内容变多时（主题、插件设置项）整窗可滚，滚动条常驻
+                ui.spacing_mut().scroll.floating = false;
+                ui.spacing_mut().scroll.bar_width = 9.0;
+                ui.spacing_mut().scroll.bar_inner_margin = 3.0;
+                ui.spacing_mut().scroll.bar_outer_margin = 4.0;
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
                 let mut enabled = self.config.eq_enabled;
                 if ui
                     .checkbox(&mut enabled, self.t("启用", "Enable"))
@@ -1964,6 +1985,7 @@ impl App {
                     self.config.eq_gains = vec![0.0; audcore::EQ_BANDS.len()];
                     changed = true;
                 }
+                });
             });
         self.show_eq = open;
         if changed {
