@@ -360,10 +360,29 @@ impl LoginState {
                     );
                 }
                 Status::Failed(err) => {
+                    // 插件抛出来的错误常常带整段堆栈，界面只显示第一行，其余放进 tooltip
+                    let first = err.lines().next().unwrap_or(err).trim();
+                    let short: String = {
+                        let mut t = first.to_string();
+                        if t.chars().count() > 96 {
+                            t = t.chars().take(92).collect::<String>() + "…";
+                        }
+                        t
+                    };
                     ui.label(
-                        egui::RichText::new(err)
+                        egui::RichText::new(short)
                             .small()
                             .color(egui::Color32::from_rgb(200, 80, 80)),
+                    )
+                    .on_hover_text(err);
+                    ui.label(
+                        egui::RichText::new(if zh {
+                            "插件脚本报错，可点「关闭」后重试，或把上面这行发给插件作者"
+                        } else {
+                            "Plugin script failed; retry, or report the first line to its author"
+                        })
+                        .small()
+                        .color(p.dim),
                     );
                 }
             });

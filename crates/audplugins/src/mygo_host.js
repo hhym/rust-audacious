@@ -340,9 +340,49 @@
     this.signal.__fire();
   };
 
+  function dataUriBody(urlText) {
+    // data:image/png;base64,.... 不走网络，直接给一份 base64 供 arrayBuffer() 用
+    var comma = urlText.indexOf(",");
+    if (comma < 0) return null;
+    var meta = urlText.slice(5, comma);
+    var payload = urlText.slice(comma + 1);
+    var isB64 = /;base64/i.test(meta);
+    var body = isB64 ? payload : base64Encode(decodeURIComponent(payload));
+    return {
+      status: 200,
+      headers: { "content-type": [meta.replace(/;base64/i, "").split(";")[0] || "application/octet-stream"] },
+      body: isB64 ? "" : decodeURIComponent(payload),
+      body_b64: body,
+      url: urlText,
+    };
+  }
+
+  function base64Encode(text) {
+    var bytes = [];
+    for (var i = 0; i < text.length; i++) {
+      var code = text.charCodeAt(i);
+      if (code < 128) bytes.push(code);
+      else if (code < 2048) bytes.push(192 | (code >> 6), 128 | (code & 63));
+      else bytes.push(224 | (code >> 12), 128 | ((code >> 6) & 63), 128 | (code & 63));
+    }
+    var out = "";
+    for (var j = 0; j < bytes.length; j += 3) {
+      var a = bytes[j], b = bytes[j + 1], c2 = bytes[j + 2];
+      out += __B64_CHARS.charAt(a >> 2);
+      out += __B64_CHARS.charAt(((a & 3) << 4) | (b === undefined ? 0 : b >> 4));
+      out += b === undefined ? "=" : __B64_CHARS.charAt(((b & 15) << 2) | (c2 === undefined ? 0 : c2 >> 6));
+      out += c2 === undefined ? "=" : __B64_CHARS.charAt(c2 & 63);
+    }
+    return out;
+  }
+
   function fetch(input, init) {
     init = init || {};
     var urlText = typeof input === "string" ? input : input && input.url ? String(input.url) : String(input);
+    if (/^data:/i.test(urlText)) {
+      var inline = dataUriBody(urlText);
+      if (inline) return Promise.resolve(new ResponseBody(inline));
+    }
     var parsed;
     try {
       parsed = new URL(urlText);

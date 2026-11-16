@@ -575,6 +575,60 @@ fn transform_module(src: &str) -> (String, Vec<(String, String)>) {
         .replace_all(&out, |c: &regex::Captures| format!("require(\"{}\");", &c[1]))
         .into_owned();
 
+    // export { a, b as c } from "mod"：再导出，先于普通 export 清单处理
+    let re_reexport =
+        Regex::new(r#"(?s)export\s*\{(.*?)\}\s*from\s*['"]([^'"]+)['"]\s*;"#).unwrap();
+    out = re_reexport
+        .replace_all(&out, |c: &regex::Captures| {
+            let list = c[1]
+                .split(',')
+                .map(|p| p.trim().replace(" as ", ": "))
+                .filter(|p| !p.is_empty())
+                .collect::<Vec<_>>()
+                .join(", ");
+            for piece in c[1].split(',') {
+                let piece = piece.trim();
+                if piece.is_empty() {
+                    continue;
+                }
+                let parts: Vec<&str> = piece.split(" as ").map(|s| s.trim()).collect();
+                let local = parts[0];
+                let name = if parts.len() == 2 { parts[1] } else { parts[0] };
+                exported.push((name.to_string(), local.to_string()));
+            }
+            format!("const {{ {list} }} = require(\"{}\");", &c[2])
+        })
+        .into_owned();
+
+    // export * as ns from "mod"
+    let re_star_as =
+        Regex::new(r#"(?m)export\s*\*\s*as\s+([A-Za-z_$][\w$]*)\s*from\s*['"]([^'"]+)['"]\s*;"#)
+            .unwrap();
+    out = re_star_as
+        .replace_all(&out, |c: &regex::Captures| {
+            exported.push((c[1].to_string(), c[1].to_string()));
+            format!("const {} = require(\"{}\");", &c[1], &c[2])
+        })
+        .into_owned();
+
+    // export * from "mod"：只把模块跑一遍，不展开导出
+    let re_star_from =
+        Regex::new(r#"(?m)export\s*\*\s*from\s*['"]([^'"]+)['"]\s*;"#).unwrap();
+    out = re_star_from
+        .replace_all(&out, |c: &regex::Captures| format!("require(\"{}\");", &c[1]))
+        .into_owned();
+
+    // export default class NAME
+    let re_default_class =
+        Regex::new(r#"(?m)export\s+default\s+class\s+([A-Za-z_$][\w$]*)"#).unwrap();
+    out = re_default_class
+        .replace_all(&out, |c: &regex::Captures| {
+            exported.push(("default".to_string(), c[1].to_string()));
+            exported.push((c[1].to_string(), c[1].to_string()));
+            format!("class {}", &c[1])
+        })
+        .into_owned();
+
     // export default function NAME / async function NAME
     let re_default_fn = Regex::new(
         r#"(?m)export\s+default\s+(async\s+)?function\s+([A-Za-z_$][\w$]*)"#,
@@ -586,6 +640,21 @@ fn transform_module(src: &str) -> (String, Vec<(String, String)>) {
             exported.push(("default".to_string(), name.clone()));
             exported.push((name.clone(), name.clone()));
             format!("{}function {}", c.get(1).map(|m| m.as_str()).unwrap_or(""), name)
+        })
+        .into_owned();
+
+    // export [async] function* NAME / generator
+    let re_export_gen =
+        Regex::new(r#"(?m)export\s+(async\s+)?function\s*\*\s*([A-Za-z_$][\w$]*)"#).unwrap();
+    out = re_export_gen
+        .replace_all(&out, |c: &regex::Captures| {
+            let name = c[2].to_string();
+            exported.push((name.clone(), name.clone()));
+            format!(
+                "{}function* {}",
+                c.get(1).map(|m| m.as_str()).unwrap_or(""),
+                name
+            )
         })
         .into_owned();
 
@@ -607,6 +676,31 @@ fn transform_module(src: &str) -> (String, Vec<(String, String)>) {
         .replace_all(&out, |c: &regex::Captures| {
             exported.push((c[2].to_string(), c[2].to_string()));
             format!("{} {}", &c[1], &c[2])
+        })
+        .into_owned();
+
+    // export const { a, b: c } = ...（解构导出）
+    let re_export_destr =
+        Regex::new(r#"(?s)export\s+(?:const|let|var)\s*\{(.*?)\}\s*="#).unwrap();
+    out = re_export_destr
+        .replace_all(&out, |c: &regex::Captures| {
+            for piece in c[1].split(',') {
+                let piece = piece.trim();
+                if piece.is_empty() {
+                    continue;
+                }
+                let parts: Vec<&str> = piece.split(':').map(|s| s.trim()).collect();
+                // `{ artist: singer }` 里真正被导出的绑定叫 singer
+                let name = if parts.len() == 2 { parts[1] } else { parts[0] };
+                exported.push((name.to_string(), name.to_string()));
+            }
+            let list = c[1]
+                .split(',')
+                .map(|p| p.trim().replace(" as ", ": "))
+                .filter(|p| !p.is_empty())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("const {{ {list} }} =")
         })
         .into_owned();
 
@@ -677,6 +771,30 @@ mod tests {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join("plugin.json"), manifest).unwrap();
         std::fs::write(dir.join("index.js"), js).unwrap();
+    }
+
+    #[test]
+    fn esm_transform_handles_reexport_and_star() {
+        // 有的插件用再导出 / 星号导出 / 解构导出，之前会留下 `export` 直接语法报错
+        let (body, names) = transform_module(
+            r#"
+export { play as playIt } from "./play.js";
+export * as api from "./api.js";
+export * from "./side.js";
+export default class Player {}
+export function* walk() {}
+export const { title, artist: singer } = CONFIG;
+"#,
+        );
+        assert!(!body.contains("export"), "不应残留 export：{body}");
+        assert!(body.contains("require(\"./play.js\")"), "{body}");
+        assert!(body.contains("const api = require(\"./api.js\")"), "{body}");
+        assert!(body.contains("class Player"), "{body}");
+        assert!(body.contains("function* walk"), "{body}");
+        assert!(names.iter().any(|(k, v)| k == "playIt" && v == "play"));
+        assert!(names.iter().any(|(k, v)| k == "api" && v == "api"));
+        assert!(names.iter().any(|(k, v)| k == "walk" && v == "walk"));
+        assert!(names.iter().any(|(k, v)| k == "singer" && v == "singer"));
     }
 
     #[test]

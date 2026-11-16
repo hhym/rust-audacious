@@ -151,11 +151,12 @@ MyGo 插件的 ES 模块改写/搜索/取地址/歌词/设置项。共 32 个用
 
 ## 版本
 
-版本号统一在 `Cargo.toml` 的 `workspace.package.version` 维护，按习惯从 **5.0** 起标，当前 **5.23.0**：
+版本号统一在 `Cargo.toml` 的 `workspace.package.version` 维护，按习惯从 **5.0** 起标，当前 **5.24.0**：
 
 - 5.0.0 首个可运行版本
 - 5.0.1 修掉 Windows 发布版弹出控制台窗口的问题，日志改写到 `%APPDATA%\audacious-rs\app.log`
 - 5.1.0 三套主题（橘黄 / 浅色 / 深色）与工具栏换肤按钮，默认橘黄
+- 5.24.0 插件加载与扫码登录的健壮性：ES 模块改写补齐再导出 `export { x } from`、`export * from`、`export * as ns from`、`export default class`、`export function*`、解构导出 `export const { a: b }`；`fetch` 支持 `data:` URI（二维码常以 data URI 内嵌，之前会当网络地址失败、拿到空 buffer 报「unknown JPEG marker 0」）；登录窗口的错误只显示第一行并给提示，完整堆栈收进 tooltip，不再把整段 `at parse (unknown...)` 糊在脸上
 - 5.23.0 插件窗口加滚动条：整窗套 `ScrollArea`（在线插件几十个也能滚到底），滚动条 `floating=false` 常驻、宽 9px、手柄最小高度加大，浅色主题下不会淡出看不见；窗口默认 560×720、可拉伸、最高 820
 - 5.22.0 按 `docs/ICON_MAP.md` 接入 Tabler Icons（MIT）：菜单栏 8 个、工具栏 4 个、播放条 5 个、迷你窗 6 个图标全部换成 Tabler 的 SVG 光栅图（白像素 + alpha，绘制时按主题 tint 上色），图标纹理按名字缓存；`assets/tabler/` 附带 LICENSE；Tabler 24 网格留白较大，绘制时统一放大 1.12 倍、圆底里的播放/暂停再内缩 20%，否则视觉偏小
 - 5.21.0 工具栏也换成手绘图标：菜单栏那一排「添加文件 / 添加目录 / 保存列表 / 均衡器 / 插件 / 设置 / 迷你 / 关于」全部改成 30px 图标按钮（悬停变亮加底色 + tooltip），工具栏上的上一首/播放/停止/下一首改用同一套 painter 图标（播放键是强调色圆底）；不再有 `◀◀`/`■` 字符
