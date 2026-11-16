@@ -151,11 +151,12 @@ MyGo 插件的 ES 模块改写/搜索/取地址/歌词/设置项。共 32 个用
 
 ## 版本
 
-版本号统一在 `Cargo.toml` 的 `workspace.package.version` 维护，按习惯从 **5.0** 起标，当前 **5.26.0**：
+版本号统一在 `Cargo.toml` 的 `workspace.package.version` 维护，按习惯从 **5.0** 起标，当前 **5.27.0**：
 
 - 5.0.0 首个可运行版本
 - 5.0.1 修掉 Windows 发布版弹出控制台窗口的问题，日志改写到 `%APPDATA%\audacious-rs\app.log`
 - 5.1.0 三套主题（橘黄 / 浅色 / 深色）与工具栏换肤按钮，默认橘黄
+- 5.27.0 两件事合并：①插件排错可读化——`friendly_error` 新增「残留 export」专条（带行号 + 建议），`ResponseBody.arrayBuffer()` 拿不到二进制时直接抛可读原因（HTTP 状态 / 需要 Cookie / 网络权限），插件错误行可 hover 看全文；②滚动条样式收进 `scroll_style()`——非浮动滚动条的轨道原来用近黑的 `extreme_bg_color` 铺满，浅色主题下一根黑棒，现在轨道用面板色、手柄走文字色，插件/设置/均衡器三窗共用一份
 - 5.26.0 插件页每行加「删除」按钮（右对齐）：点击先弹确认框，显示插件名与真实路径；确认后删掉插件目录或 .js 文件并重新扫描，可选「同时清除登录数据」勾选框（清掉 `plugin-storage.json` 里该插件的键和 `mygo-data/<id>`）
 - 5.25.0 设置窗口、均衡器窗口统一成「可拉伸 + 内容溢出时滚动」：两窗都套 `ScrollArea`（滚动条样式同插件窗口：常驻、9px、手柄最短长度），`resizable(true)`，设置默认 400×520（最高 760）、均衡器 560×320（最高 700）；内容不多时不出滚动条，缩窗或以后加主题/加设置项才出现
 - 5.24.0 插件加载与扫码登录的健壮性：ES 模块改写补齐再导出 `export { x } from`、`export * from`、`export * as ns from`、`export default class`、`export function*`、解构导出 `export const { a: b }`；`fetch` 支持 `data:` URI（二维码常以 data URI 内嵌，之前会当网络地址失败、拿到空 buffer 报「unknown JPEG marker 0」）；登录窗口的错误只显示第一行并给提示，完整堆栈收进 tooltip，不再把整段 `at parse (unknown...)` 糊在脸上

@@ -239,6 +239,16 @@ pub fn friendly_error(raw: &str) -> String {
             "插件源码有语法错误（第 {line} 行）：同名变量在同一作用域里重复声明，该插件在原客户端也会报错"
         );
     }
+    if raw.contains("unexpected token 'export'") || raw.contains("unexpected token \"export\"") {
+        let line = raw
+            .split("at line ")
+            .nth(1)
+            .and_then(|s| s.split([',', ' ']).next())
+            .unwrap_or("?");
+        return format!(
+            "插件第 {line} 行还残留 `export`：宿主已改写常见 ES 模块写法，这里是一种更少见的导出形式。把该行附近 5 行发给插件作者，或在「插件」页点「重新扫描」再试"
+        );
+    }
     if raw.contains("SyntaxError") {
         let line = raw
             .split("at line ")

@@ -1791,6 +1791,18 @@ impl App {
         let _ = self.config.save();
     }
 
+    /// 弹窗统一滚动条样式：非浮动、9px、轨道用面板色、手柄用文字色。
+    /// 必须在 `ScrollArea` 之前、外层 `ui` 上设置，设在 `show` 闭包里无效。
+    fn scroll_style(&self, ui: &mut egui::Ui, p: &Palette) {
+        ui.spacing_mut().scroll.floating = false;
+        ui.spacing_mut().scroll.bar_width = 9.0;
+        ui.spacing_mut().scroll.bar_inner_margin = 3.0;
+        ui.spacing_mut().scroll.bar_outer_margin = 4.0;
+        // 非浮动滚动条的轨道用 extreme_bg_color（默认近黑），换成面板色；手柄走前景色（文字色）
+        ui.visuals_mut().extreme_bg_color = p.panel;
+        ui.spacing_mut().scroll.foreground_color = true;
+    }
+
     fn settings_ui(&mut self, ctx: &egui::Context, p: &Palette) {
         let mut open = self.show_settings;
         let mut changed = false;
@@ -1801,11 +1813,7 @@ impl App {
             .max_height(760.0)
             .resizable(true)
             .show(ctx, |ui| {
-                // 内容变多时（主题、插件设置项）整窗可滚，滚动条常驻
-                ui.spacing_mut().scroll.floating = false;
-                ui.spacing_mut().scroll.bar_width = 9.0;
-                ui.spacing_mut().scroll.bar_inner_margin = 3.0;
-                ui.spacing_mut().scroll.bar_outer_margin = 4.0;
+                self.scroll_style(ui, p);
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -1938,11 +1946,7 @@ impl App {
             .max_height(700.0)
             .resizable(true)
             .show(ctx, |ui| {
-                // 内容变多时（主题、插件设置项）整窗可滚，滚动条常驻
-                ui.spacing_mut().scroll.floating = false;
-                ui.spacing_mut().scroll.bar_width = 9.0;
-                ui.spacing_mut().scroll.bar_inner_margin = 3.0;
-                ui.spacing_mut().scroll.bar_outer_margin = 4.0;
+                self.scroll_style(ui, p);
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -2335,12 +2339,16 @@ impl App {
                     }
                 }
 
-                // 插件列表很长（在线插件可能几十个），整窗套一层滚动条。
-                // 滚动条样式要在 ScrollArea 之前设，否则画的还是外层 ui 的样式。
-                ui.spacing_mut().scroll.floating = false;
-                ui.spacing_mut().scroll.bar_width = 9.0;
-                ui.spacing_mut().scroll.bar_inner_margin = 3.0;
-                ui.spacing_mut().scroll.bar_outer_margin = 4.0;
+                self.scroll_style(ui, p);
+                // 非浮动滚动条的轨道用的是 extreme_bg_color（默认近黑），换成面板色，
+                // 手柄颜色来自 widgets 填充色，这里改用强调色；插件页没有滑杆，不会误伤
+                ui.visuals_mut().widgets.inactive.bg_fill = egui::Color32::from_rgb(255,0,0);
+                ui.visuals_mut().widgets.hovered.bg_fill = p.accent;
+                ui.visuals_mut().widgets.active.bg_fill = p.accent;
+                // 非浮动滚动条的轨道用的是 extreme_bg_color（默认近黑），换成面板色，
+                // 不然浅色主题下整条轨道就是一根黑棒（手柄颜色本身由 widgets 决定，别动）
+                ui.visuals_mut().extreme_bg_color = p.panel;
+                // 手柄改用前景色（文字色）而不是 widgets 的填充色，浅色主题下不至于像纯黑棒
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -2578,7 +2586,8 @@ impl App {
                                 RichText::new(format!("  加载失败：{err}"))
                                     .small()
                                     .color(egui::Color32::from_rgb(200, 80, 80)),
-                            );
+                            )
+                            .on_hover_text(err);
                         }
 
                         // MyGo 插件声明的设置项，直接在这里填
