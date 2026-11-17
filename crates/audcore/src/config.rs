@@ -86,6 +86,10 @@ impl Theme {
 }
 
 /// 新装环境默认值：手机端直接进经典界面，桌面端保持现代布局
+fn default_win_order() -> [u8; 3] {
+    [0, 1, 2]
+}
+
 fn default_win_open() -> bool {
     true
 }
@@ -136,6 +140,9 @@ pub struct Config {
     pub classic_lyrics: bool,
     #[serde(default = "default_win_open")]
     pub classic_list: bool,
+    /// 三扇窗的上下顺序：0 均衡器 / 1 歌词 / 2 列表（拖动标题条可换位）
+    #[serde(default = "default_win_order")]
+    pub classic_order: [u8; 3],
     /// 三扇窗是否折叠成 14px 标题条（叠放布局记忆）
     #[serde(default)]
     pub classic_fold: [bool; 3],
@@ -172,6 +179,7 @@ impl Default for Config {
             classic_eq: true,
             classic_lyrics: true,
             classic_list: true,
+            classic_order: default_win_order(),
             classic_fold: [false; 3],
             classic_shade: false,
             classic_spectrum: true,

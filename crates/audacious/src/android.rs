@@ -107,6 +107,65 @@ pub fn maintain_focus(playing: bool, stopped: bool) {
     }
 }
 
+/// 更新「正在播放」通知（标题 / 艺人 / 是否播放中）。
+pub fn update_notification(title: &str, artist: &str, playing: bool) -> bool {
+    let Some(app) = APP.get() else { return false };
+    let result = with_activity(app, |env, activity| {
+        let t = env.new_string(title)?;
+        let a = env.new_string(artist)?;
+        env.call_method(
+            activity,
+            "updateNotification",
+            "(Ljava/lang/String;Ljava/lang/String;Z)V",
+            &[
+                JValue::Object(&JObject::from(t)),
+                JValue::Object(&JObject::from(a)),
+                JValue::Bool(playing as u8),
+            ],
+        )?;
+        Ok(())
+    });
+    match result {
+        Ok(()) => true,
+        Err(err) => {
+            log::warn!("更新通知失败：{err}");
+            false
+        }
+    }
+}
+
+/// 停止播放时把通知收掉。
+pub fn clear_notification() {
+    let Some(app) = APP.get() else { return };
+    if let Err(err) = call_activity(app, "clearNotification") {
+        log::warn!("清除通知失败：{err}");
+    }
+}
+
+/// Java 侧 `MainActivity.nativeOnNotificationAction` 的实现：
+/// 1 切换播放 / 2 下一首 / 3 上一首。
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "system" fn Java_io_github_hhym_audaciousrs_MainActivity_nativeOnNotificationAction(
+    _env: Env,
+    _class: JClass,
+    action: jint,
+) {
+    let Some(shared) = SHARED.get() else { return };
+    match action {
+        1 => {
+            shared.send(Cmd::Toggle);
+        }
+        2 => {
+            shared.send(Cmd::Next);
+        }
+        3 => {
+            shared.send(Cmd::Prev);
+        }
+        _ => {}
+    }
+}
+
 fn call_activity(app: &android_activity::AndroidApp, method: &str) -> jni::errors::Result<()> {
     with_activity(app, |env, activity| {
         env.call_method(activity, method, "()V", &[])?;

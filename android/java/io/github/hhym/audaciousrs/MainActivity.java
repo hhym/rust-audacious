@@ -1,8 +1,14 @@
 package io.github.hhym.audaciousrs;
 
 import android.app.NativeActivity;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.drawable.Icon;
+import android.os.Build;
 import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
@@ -19,6 +25,106 @@ public class MainActivity extends NativeActivity {
     private AudioManager audioManager;
     private AudioFocusRequest focusRequest;
     private AudioManager.OnAudioFocusChangeListener focusListener;
+    private NotificationManager notifications;
+    private static final String CHANNEL = "playback";
+    private static final int NOTIFY_ID = 1001;
+    /** 通知栏按钮的动作码，和 Rust 侧 nativeOnNotificationAction 对应。 */
+    private static final int ACT_TOGGLE = 1;
+    private static final int ACT_NEXT = 2;
+    private static final int ACT_PREV = 3;
+
+    @Override
+    protected void onCreate(android.os.Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        try {
+            notifications = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                NotificationChannel channel = new NotificationChannel(
+                        CHANNEL, "播放控制", NotificationManager.IMPORTANCE_LOW);
+                channel.setShowBadge(false);
+                notifications.createNotificationChannel(channel);
+            }
+            if (Build.VERSION.SDK_INT >= 33) {
+                requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 100);
+            }
+        } catch (Throwable t) {
+            android.util.Log.w("audacious", "初始化通知栏失败", t);
+        }
+    }
+
+    /** 通知栏按钮回到 Activity（launchMode=singleTop），再转给 native。 */
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        if (intent == null) {
+            return;
+        }
+        int action = intent.getIntExtra("aud_action", 0);
+        if (action != 0) {
+            nativeOnNotificationAction(action);
+        }
+    }
+
+    private PendingIntent actionIntent(int action, int requestCode) {
+        Intent intent = new Intent(this, MainActivity.class);
+        intent.setAction("io.github.hhym.audaciousrs.ACTION");
+        intent.putExtra("aud_action", action);
+        intent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        return PendingIntent.getActivity(
+                this,
+                requestCode,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+    }
+
+    /** Rust 侧每换曲/切状态调一次：更新「正在播放」通知和它的三个按钮。 */
+    public void updateNotification(String title, String artist, boolean playing) {
+        try {
+            if (notifications == null) {
+                notifications = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            }
+            Intent open = new Intent(this, MainActivity.class);
+            open.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            PendingIntent content = PendingIntent.getActivity(
+                    this, 0, open,
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+            String text = (artist == null || artist.isEmpty()) ? (title == null ? "" : title)
+                    : artist + " · " + (title == null ? "" : title);
+            Notification.Builder builder = new Notification.Builder(this, CHANNEL)
+                    .setSmallIcon(android.R.drawable.ic_media_play)
+                    .setContentTitle(title == null ? "" : title)
+                    .setContentText(text)
+                    .setContentIntent(content)
+                    .setOnlyAlertOnce(true)
+                    .setOngoing(playing)
+                    .setShowWhen(false)
+                    .setVisibility(Notification.VISIBILITY_PUBLIC);
+            builder.addAction(new Notification.Action.Builder(
+                    Icon.createWithResource(this, android.R.drawable.ic_media_previous),
+                    "上一首", actionIntent(ACT_PREV, 1)).build());
+            builder.addAction(new Notification.Action.Builder(
+                    Icon.createWithResource(this,
+                            playing ? android.R.drawable.ic_media_pause : android.R.drawable.ic_media_play),
+                    playing ? "暂停" : "播放", actionIntent(ACT_TOGGLE, 2)).build());
+            builder.addAction(new Notification.Action.Builder(
+                    Icon.createWithResource(this, android.R.drawable.ic_media_next),
+                    "下一首", actionIntent(ACT_NEXT, 3)).build());
+            notifications.notify(NOTIFY_ID, builder.build());
+        } catch (Throwable t) {
+            android.util.Log.w("audacious", "更新通知失败", t);
+        }
+    }
+
+    /** 停止播放时把通知收掉。 */
+    public void clearNotification() {
+        try {
+            if (notifications != null) {
+                notifications.cancel(NOTIFY_ID);
+            }
+        } catch (Throwable t) {
+            android.util.Log.w("audacious", "清除通知失败", t);
+        }
+    }
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
@@ -70,4 +176,6 @@ public class MainActivity extends NativeActivity {
     private static native void nativeOnActivityResult(int requestCode, int resultCode, Intent data);
 
     private static native void nativeOnAudioFocusChange(int focusChange);
+
+    private static native void nativeOnNotificationAction(int action);
 }

@@ -244,6 +244,9 @@ pub struct App {
     pl_menu: Option<(usize, egui::Pos2)>,
     /// MISC 按钮弹出的菜单位置（排序/反选）
     pl_misc_menu: Option<egui::Pos2>,
+    /// 上次推给通知栏的内容 + 时间（只在变化或隔一会儿才更新）
+    notif_key: (String, bool),
+    notif_at: Instant,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -293,6 +296,7 @@ enum ClassicAction {
     EqPreset(u8),
     EqCustomAt(usize),
     ToggleFold(u8),
+    ReorderWindow(u8, i8),
     PlaylistSortBy(u8),
     ToggleEqAuto,
 }
@@ -396,6 +400,8 @@ impl App {
             pl_press: None,
             pl_menu: None,
             pl_misc_menu: None,
+            notif_key: (String::new(), false),
+            notif_at: Instant::now(),
         };
         app.plugins = app.collect_plugins();
         app.reload_media_plugins();
@@ -542,18 +548,49 @@ impl App {
             rect.min,
             egui::vec2(MAIN_W * scale, MAIN_H * scale),
         );
-        let eq_rect = egui::Rect::from_min_size(
-            main_rect.min + egui::vec2(0.0, MAIN_H * scale),
-            egui::vec2(MAIN_W * scale, eq_h * scale),
-        );
-        let ly_rect = egui::Rect::from_min_size(
-            main_rect.min + egui::vec2(0.0, (MAIN_H + eq_h) * scale),
-            egui::vec2(MAIN_W * scale, ly_h * scale),
-        );
-        let pl_rect = egui::Rect::from_min_size(
-            main_rect.min + egui::vec2(0.0, (MAIN_H + eq_h + ly_h) * scale),
-            egui::vec2(MAIN_W * scale, pl_h * scale),
-        );
+        // 三扇窗的上下顺序记在配置里（拖动标题条可以换位）
+        let mut eq_rect = egui::Rect::NOTHING;
+        let mut ly_rect = egui::Rect::NOTHING;
+        let mut pl_rect = egui::Rect::NOTHING;
+        {
+            let mut y = MAIN_H * scale;
+            for id in self.config.classic_order {
+                let h = match id {
+                    0 => eq_h,
+                    1 => ly_h,
+                    _ => pl_h,
+                };
+                let r = egui::Rect::from_min_size(
+                    rect.min + egui::vec2(0.0, y),
+                    egui::vec2(MAIN_W * scale, h * scale),
+                );
+                match id {
+                    0 => eq_rect = r,
+                    1 => ly_rect = r,
+                    _ => pl_rect = r,
+                }
+                y += h * scale;
+            }
+            // 顺序表里万一缺项（老配置），退回默认叠放
+            if eq_rect == egui::Rect::NOTHING && self.show_eq {
+                eq_rect = egui::Rect::from_min_size(
+                    rect.min + egui::vec2(0.0, MAIN_H * scale),
+                    egui::vec2(MAIN_W * scale, eq_h * scale),
+                );
+            }
+            if ly_rect == egui::Rect::NOTHING && self.show_lyrics {
+                ly_rect = egui::Rect::from_min_size(
+                    rect.min + egui::vec2(0.0, (MAIN_H + eq_h) * scale),
+                    egui::vec2(MAIN_W * scale, ly_h * scale),
+                );
+            }
+            if pl_rect == egui::Rect::NOTHING && self.show_playlist {
+                pl_rect = egui::Rect::from_min_size(
+                    rect.min + egui::vec2(0.0, (MAIN_H + eq_h + ly_h) * scale),
+                    egui::vec2(MAIN_W * scale, pl_h * scale),
+                );
+            }
+        }
         let painter = ui.painter_at(rect);
         let place = |x: f32, y: f32, w: f32, h: f32| {
             egui::Rect::from_min_size(main_rect.min + egui::vec2(x, y) * scale, egui::vec2(w, h) * scale)
@@ -804,9 +841,20 @@ impl App {
                     eq_rect.min,
                     egui::vec2(150.0, 14.0) * scale,
                 );
-                let tz = ui.interact(zone, ui.id().with("fold_zone_0"), egui::Sense::click());
+                let tz = ui.interact(
+                    zone,
+                    ui.id().with("fold_zone_0"),
+                    egui::Sense::click_and_drag(),
+                );
                 if tz.clicked() {
                     actions.push(ClassicAction::ToggleFold(0));
+                }
+                // 拖标题条换窗口顺序（上/下各挪一格）
+                if tz.drag_stopped() {
+                    let dy = tz.drag_delta().y;
+                    if dy.abs() > 40.0 * scale {
+                        actions.push(ClassicAction::ReorderWindow(0, if dy < 0.0 { -1 } else { 1 }));
+                    }
                 }
 
             use egui::Color32;
@@ -851,7 +899,10 @@ impl App {
                     th,
                     tint,
                 );
-                if (resp.clicked() || resp.dragged()) && enabled {
+                if resp.double_clicked() && enabled {
+                    // 双击把这一段推子归零（Winamp 手感）
+                    actions.push(ClassicAction::EqSet(i, 0.0));
+                } else if (resp.clicked() || resp.dragged()) && enabled {
                     if let Some(pos) = resp.interact_pointer_pos() {
                         let rel = ((pos.y - er.min.y) / scale - 38.0).clamp(0.0, 52.0);
                         let g = 12.0 - rel / 52.0 * 24.0;
@@ -980,9 +1031,20 @@ impl App {
                     ly_rect.min,
                     egui::vec2(150.0, 14.0) * scale,
                 );
-                let tz = ui.interact(zone, ui.id().with("fold_zone_1"), egui::Sense::click());
+                let tz = ui.interact(
+                    zone,
+                    ui.id().with("fold_zone_1"),
+                    egui::Sense::click_and_drag(),
+                );
                 if tz.clicked() {
                     actions.push(ClassicAction::ToggleFold(1));
+                }
+                // 拖标题条换窗口顺序（上/下各挪一格）
+                if tz.drag_stopped() {
+                    let dy = tz.drag_delta().y;
+                    if dy.abs() > 40.0 * scale {
+                        actions.push(ClassicAction::ReorderWindow(1, if dy < 0.0 { -1 } else { 1 }));
+                    }
                 }
 
             use egui::Color32;
@@ -1148,9 +1210,20 @@ impl App {
                     pl_rect.min,
                     egui::vec2(150.0, 14.0) * scale,
                 );
-                let tz = ui.interact(zone, ui.id().with("fold_zone_2"), egui::Sense::click());
+                let tz = ui.interact(
+                    zone,
+                    ui.id().with("fold_zone_2"),
+                    egui::Sense::click_and_drag(),
+                );
                 if tz.clicked() {
                     actions.push(ClassicAction::ToggleFold(2));
+                }
+                // 拖标题条换窗口顺序（上/下各挪一格）
+                if tz.drag_stopped() {
+                    let dy = tz.drag_delta().y;
+                    if dy.abs() > 40.0 * scale {
+                        actions.push(ClassicAction::ReorderWindow(2, if dy < 0.0 { -1 } else { 1 }));
+                    }
                 }
 
             use egui::Color32;
@@ -1567,6 +1640,16 @@ impl App {
                         }
                     }
                 }
+                ClassicAction::ReorderWindow(id, dir) => {
+                    let order = &mut self.config.classic_order;
+                    if let Some(pos) = order.iter().position(|v| *v == id) {
+                        let target = pos as i8 + dir;
+                        if target >= 0 && (target as usize) < order.len() {
+                            order.swap(pos, target as usize);
+                        }
+                    }
+                    let _ = self.config.save();
+                }
                 ClassicAction::ToggleFold(i) => {
                     if let Some(v) = self.config.classic_fold.get_mut(i as usize) {
                         *v = !*v;
@@ -1816,6 +1899,27 @@ impl eframe::App for App {
                 matches!(self.state.status, crate::engine::Status::Playing),
                 matches!(self.state.status, crate::engine::Status::Stopped),
             );
+        }
+
+        // 通知栏：换曲 / 播放状态变了就更新，停止超过一会儿就收掉
+        #[cfg(target_os = "android")]
+        {
+            use crate::engine::Status as St;
+            let playing = matches!(self.state.status, St::Playing | St::Paused);
+            let key = (format!("{}|{}", self.state.title, self.state.artist), playing);
+            if key != self.notif_key && self.notif_at.elapsed() > Duration::from_millis(400) {
+                if self.state.title.is_empty() {
+                    crate::android::clear_notification();
+                } else {
+                    crate::android::update_notification(
+                        &self.state.title,
+                        &self.state.artist,
+                        playing,
+                    );
+                }
+                self.notif_key = key;
+                self.notif_at = Instant::now();
+            }
         }
 
         // SAF 选完的音频由 android.rs 的后台线程落盘，这里每帧取走

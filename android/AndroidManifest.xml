@@ -11,6 +11,8 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- 后台播放的通知栏控制；API 33+ 需要运行时授权 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- 读本地音乐：Android 13 起细分 -->
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
@@ -24,6 +26,7 @@
         <activity
             android:name="io.github.hhym.audaciousrs.MainActivity"
             android:exported="true"
+            android:launchMode="singleTop"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
             android:theme="@android:style/Theme.Material.NoActionBar">
             <meta-data android:name="android.app.lib_name" android:value="audacious_rs" />
