@@ -242,6 +242,8 @@ pub struct App {
     pl_press: Option<(usize, Instant)>,
     /// 长按弹出的行菜单：行号 + 弹出位置
     pl_menu: Option<(usize, egui::Pos2)>,
+    /// MISC 按钮弹出的菜单位置（排序/反选）
+    pl_misc_menu: Option<egui::Pos2>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -290,6 +292,8 @@ enum ClassicAction {
     PlaylistRemoveAt(usize),
     EqPreset(u8),
     EqCustomAt(usize),
+    ToggleFold(u8),
+    PlaylistSortBy(u8),
     ToggleEqAuto,
 }
 
@@ -331,7 +335,6 @@ impl App {
             has_cjk,
             browser: None,
             show_settings: false,
-            show_eq: false,
             show_plugins: false,
             show_about: false,
             toast: None,
@@ -381,9 +384,10 @@ impl App {
             album_accent: std::collections::HashMap::new(),
             cover_accent_rgb: None,
             skin: None,
-            show_playlist: true,
-            show_lyrics: true,
-            classic_shade: false,
+            show_playlist: config.classic_list,
+            show_lyrics: config.classic_lyrics,
+            show_eq: config.classic_eq,
+            classic_shade: config.classic_shade,
             pl_select: std::collections::BTreeSet::new(),
             eq_auto: false,
             eq_presets_open: false,
@@ -391,6 +395,7 @@ impl App {
             last_track: None,
             pl_press: None,
             pl_menu: None,
+            pl_misc_menu: None,
         };
         app.plugins = app.collect_plugins();
         app.reload_media_plugins();
@@ -492,6 +497,12 @@ impl App {
             return;
         }
 
+        // 封面要先取，current_cover 需要 &mut self，得在 chrome 借 skin 之前拿到
+        let cover_tex = if self.config.classic_cover {
+            self.current_cover(ui.ctx())
+        } else {
+            None
+        };
         let chrome = crate::skin::Chrome::new(self.skin.as_ref(), self.config.accent);
         let pled = chrome.pledit();
         let scale = (ui.available_width() / MAIN_W).max(0.5);
@@ -508,9 +519,21 @@ impl App {
         let mut actions: Vec<ClassicAction> = Vec::new();
 
         // 竖向堆叠：主窗口 → 均衡器 → 播放列表，剩下的高度给列表
-        let eq_h = if self.show_eq { 116.0 } else { 0.0 };
-        let ly_h = if self.show_lyrics { 108.0 } else { 0.0 };
-        let pl_h = ((ui.available_height() / scale) - MAIN_H - eq_h - ly_h).clamp(120.0, 420.0);
+        let eq_h = if self.show_eq {
+            if self.config.classic_fold[0] { 14.0 } else { 116.0 }
+        } else {
+            0.0
+        };
+        let ly_h = if self.show_lyrics {
+            if self.config.classic_fold[1] { 14.0 } else { 108.0 }
+        } else {
+            0.0
+        };
+        let pl_h = if self.show_playlist && self.config.classic_fold[2] {
+            20.0
+        } else {
+            ((ui.available_height() / scale) - MAIN_H - eq_h - ly_h).clamp(120.0, 420.0)
+        };
         let (rect, _) = ui.allocate_exact_size(
             egui::vec2(MAIN_W * scale, (MAIN_H + eq_h + ly_h + pl_h) * scale),
             egui::Sense::hover(),
@@ -556,8 +579,8 @@ impl App {
             actions.push(ClassicAction::ToggleShade);
         }
 
-        // 频谱条（main.bmp 的分析器区：24,43 起 76×36）
-        {
+        // 频谱条（main.bmp 的分析器区：24,43 起 76×36），可在设置里关掉
+        if self.config.classic_spectrum {
             use egui::Color32;
             let area = place(24.0, 43.0, 76.0, 36.0);
             let bars = 16usize;
@@ -751,6 +774,41 @@ impl App {
 
         // ---- 均衡器窗口（eqmain.bmp：背景里已经带滑轨，只叠滑块/按钮） ----
         if self.show_eq {
+            if self.config.classic_fold[0] {
+                let bar = eq_rect;
+                painter.rect_filled(bar, 0.0, pled.selected_bg.gamma_multiply(0.92));
+                chrome.text(&painter, "EQUALIZER", bar.min + egui::vec2(6.0, 4.0) * scale, scale, bar.max.x, egui::Color32::WHITE);
+                let expand = egui::Rect::from_min_size(
+                    bar.min + egui::vec2(MAIN_W - 22.0, 3.0) * scale,
+                    egui::vec2(9.0, 9.0) * scale,
+                );
+                let resp = ui.interact(expand, ui.id().with("unfold_0"), egui::Sense::click());
+                if chrome.has("titlebar.bmp") {
+                    chrome.sprite(
+                        &painter,
+                        "titlebar.bmp",
+                        0.0,
+                        if resp.is_pointer_button_down_on() { 27.0 } else { 18.0 },
+                        9.0,
+                        9.0,
+                        expand,
+                        egui::Color32::WHITE,
+                    );
+                }
+                if resp.clicked() {
+                    actions.push(ClassicAction::ToggleFold(0));
+                }
+            } else {
+                // 点标题条把这一扇窗折起来（Winamp 的双击标题条折叠）
+                let zone = egui::Rect::from_min_size(
+                    eq_rect.min,
+                    egui::vec2(150.0, 14.0) * scale,
+                );
+                let tz = ui.interact(zone, ui.id().with("fold_zone_0"), egui::Sense::click());
+                if tz.clicked() {
+                    actions.push(ClassicAction::ToggleFold(0));
+                }
+
             use egui::Color32;
             let white = Color32::WHITE;
             let er = eq_rect;
@@ -888,10 +946,45 @@ impl App {
             if close_resp.clicked() {
                 actions.push(ClassicAction::ToggleEqWindow);
             }
-        }
+                    }}
 
         // ---- 歌词窗口（Winamp 没有原生歌词窗，这里按皮肤色自绘一扇） ----
         if self.show_lyrics {
+            if self.config.classic_fold[1] {
+                let bar = ly_rect;
+                painter.rect_filled(bar, 0.0, pled.selected_bg.gamma_multiply(0.92));
+                chrome.text(&painter, "LYRIC", bar.min + egui::vec2(6.0, 4.0) * scale, scale, bar.max.x, egui::Color32::WHITE);
+                let expand = egui::Rect::from_min_size(
+                    bar.min + egui::vec2(MAIN_W - 22.0, 3.0) * scale,
+                    egui::vec2(9.0, 9.0) * scale,
+                );
+                let resp = ui.interact(expand, ui.id().with("unfold_1"), egui::Sense::click());
+                if chrome.has("titlebar.bmp") {
+                    chrome.sprite(
+                        &painter,
+                        "titlebar.bmp",
+                        0.0,
+                        if resp.is_pointer_button_down_on() { 27.0 } else { 18.0 },
+                        9.0,
+                        9.0,
+                        expand,
+                        egui::Color32::WHITE,
+                    );
+                }
+                if resp.clicked() {
+                    actions.push(ClassicAction::ToggleFold(1));
+                }
+            } else {
+                // 点标题条把这一扇窗折起来（Winamp 的双击标题条折叠）
+                let zone = egui::Rect::from_min_size(
+                    ly_rect.min,
+                    egui::vec2(150.0, 14.0) * scale,
+                );
+                let tz = ui.interact(zone, ui.id().with("fold_zone_1"), egui::Sense::click());
+                if tz.clicked() {
+                    actions.push(ClassicAction::ToggleFold(1));
+                }
+
             use egui::Color32;
             let white = Color32::WHITE;
             let lr = ly_rect;
@@ -931,8 +1024,26 @@ impl App {
                 actions.push(ClassicAction::ToggleLyricsWindow);
             }
 
+            // 封面缩略图（可选），有封面时歌词区右侧让出 46px
+            let mut body_x = 1.0;
+            let mut body_w = MAIN_W - 2.0;
+            if self.config.classic_cover {
+                if let Some(tex) = cover_tex.clone() {
+                    let side = (ly_h - 18.0).min(46.0);
+                    let crect = lp(2.0, 15.0, side, side);
+                    painter.image(
+                        tex.id(),
+                        crect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        white,
+                    );
+                    body_x = 2.0 + side + 3.0;
+                    body_w = MAIN_W - 2.0 - body_x - 1.0;
+                }
+            }
+
             // 歌词正文
-            let body = lp(1.0, 15.0, MAIN_W - 2.0, ly_h - 16.0);
+            let body = lp(body_x, 15.0, body_w, ly_h - 16.0);
             let lines: Vec<(f64, String)> = match &self.lyric_state {
                 LyricState::Lines(v) => v.clone(),
                 LyricState::Plain(text) => text
@@ -1003,10 +1114,45 @@ impl App {
                 [lp(0.0, ly_h - 1.0, 1.0, 1.0).min, lp(MAIN_W, ly_h - 1.0, 1.0, 1.0).min],
                 egui::Stroke::new(1.0, pled.normal_bg),
             );
-        }
+                    }}
 
         // ---- 播放列表窗口（pledit.bmp 边框 + pledit.txt 配色） ----
         if self.show_playlist {
+            if self.config.classic_fold[2] {
+                let bar = pl_rect;
+                painter.rect_filled(bar, 0.0, pled.selected_bg.gamma_multiply(0.92));
+                chrome.text(&painter, "PLAYLIST", bar.min + egui::vec2(6.0, 4.0) * scale, scale, bar.max.x, egui::Color32::WHITE);
+                let expand = egui::Rect::from_min_size(
+                    bar.min + egui::vec2(MAIN_W - 22.0, 3.0) * scale,
+                    egui::vec2(9.0, 9.0) * scale,
+                );
+                let resp = ui.interact(expand, ui.id().with("unfold_2"), egui::Sense::click());
+                if chrome.has("titlebar.bmp") {
+                    chrome.sprite(
+                        &painter,
+                        "titlebar.bmp",
+                        0.0,
+                        if resp.is_pointer_button_down_on() { 27.0 } else { 18.0 },
+                        9.0,
+                        9.0,
+                        expand,
+                        egui::Color32::WHITE,
+                    );
+                }
+                if resp.clicked() {
+                    actions.push(ClassicAction::ToggleFold(2));
+                }
+            } else {
+                // 点标题条把这一扇窗折起来（Winamp 的双击标题条折叠）
+                let zone = egui::Rect::from_min_size(
+                    pl_rect.min,
+                    egui::vec2(150.0, 14.0) * scale,
+                );
+                let tz = ui.interact(zone, ui.id().with("fold_zone_2"), egui::Sense::click());
+                if tz.clicked() {
+                    actions.push(ClassicAction::ToggleFold(2));
+                }
+
             use egui::Color32;
             let white = Color32::WHITE;
             let pr = pl_rect;
@@ -1061,7 +1207,10 @@ impl App {
                 actions.push(ClassicAction::PlaylistSelectAll);
             }
             if menu_btn(101.0, 54.0, 149.0, "pl_misc") {
-                actions.push(ClassicAction::PlaylistInvert);
+                self.pl_misc_menu = Some(egui::pos2(
+                    pl_rect.min.x + 101.0 * scale,
+                    pl_rect.min.y + 56.0 * scale,
+                ));
             }
             if menu_btn(MAIN_W - 44.0, 0.0, 111.0, "pl_menu") {
                 actions.push(ClassicAction::TogglePlaylistWindow);
@@ -1146,7 +1295,7 @@ impl App {
                         }
                     });
             });
-        }
+                    }}
 
         // 长按弹出的行菜单
         if let Some((ti, pos)) = self.pl_menu {
@@ -1180,6 +1329,41 @@ impl App {
                 });
             if close {
                 self.pl_menu = None;
+            }
+        }
+
+        // MISC 弹出菜单：排序 / 反选
+        if let Some(pos) = self.pl_misc_menu {
+            let mut close = false;
+            egui::Area::new(egui::Id::new("pl_misc_menu"))
+                .fixed_pos(pos)
+                .order(egui::Order::Foreground)
+                .show(ui.ctx(), |ui| {
+                    let resp = egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.set_min_width(120.0);
+                        if ui.button("按标题排序").clicked() {
+                            actions.push(ClassicAction::PlaylistSortBy(0));
+                            close = true;
+                        }
+                        if ui.button("按时长排序").clicked() {
+                            actions.push(ClassicAction::PlaylistSortBy(1));
+                            close = true;
+                        }
+                        if ui.button("反选").clicked() {
+                            actions.push(ClassicAction::PlaylistInvert);
+                            close = true;
+                        }
+                    });
+                    if ui.ctx().input(|i| i.pointer.any_click()) {
+                        if let Some(p) = ui.ctx().input(|i| i.pointer.interact_pos()) {
+                            if !resp.response.rect.contains(p) {
+                                close = true;
+                            }
+                        }
+                    }
+                });
+            if close {
+                self.pl_misc_menu = None;
             }
         }
 
@@ -1337,8 +1521,62 @@ impl App {
                 ClassicAction::ToggleEqAuto => {
                     self.eq_auto = !self.eq_auto;
                 }
+                ClassicAction::PlaylistSortBy(kind) => {
+                    let mut new_play: Option<usize> = None;
+                    let playing = !matches!(self.state.status, Status::Stopped);
+                    if let Ok(mut pl) = shared.playlist.lock() {
+                        let cur = pl
+                            .playing
+                            .and_then(|i| pl.entries.get(i))
+                            .map(|e| e.path.clone());
+                        let sel = pl
+                            .selected
+                            .and_then(|i| pl.entries.get(i))
+                            .map(|e| e.path.clone());
+                        if kind == 1 {
+                            pl.entries.sort_by(|a, b| {
+                                let (la, lb) = (a.length.unwrap_or(0.0), b.length.unwrap_or(0.0));
+                                la.partial_cmp(&lb).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                        } else {
+                            pl.entries.sort_by(|a, b| {
+                                a.display_artist()
+                                    .to_lowercase()
+                                    .cmp(&b.display_artist().to_lowercase())
+                                    .then(
+                                        a.display_title()
+                                            .to_lowercase()
+                                            .cmp(&b.display_title().to_lowercase()),
+                                    )
+                            });
+                        }
+                        if let Some(path) = cur {
+                            pl.playing = pl.entries.iter().position(|e| e.path == path);
+                            new_play = pl.playing;
+                        }
+                        if let Some(path) = sel {
+                            pl.selected = pl.entries.iter().position(|e| e.path == path);
+                        }
+                    }
+                    self.pl_select.clear();
+                    shared.send(Cmd::Refresh);
+                    // 正在播的话按新位置重新起播，保证引擎索引和列表对得上
+                    if playing {
+                        if let Some(i) = new_play {
+                            shared.send(Cmd::PlayIndex(i));
+                        }
+                    }
+                }
+                ClassicAction::ToggleFold(i) => {
+                    if let Some(v) = self.config.classic_fold.get_mut(i as usize) {
+                        *v = !*v;
+                    }
+                    let _ = self.config.save();
+                }
                 ClassicAction::ToggleShade => {
                     self.classic_shade = !self.classic_shade;
+                    self.config.classic_shade = self.classic_shade;
+                    let _ = self.config.save();
                 }
                 ClassicAction::OpenSettings => {
                     self.show_settings = true;
@@ -2971,10 +3209,32 @@ impl App {
                     let label_eq = self.t("显示均衡器", "Equalizer");
                     let label_ly = self.t("显示歌词", "Lyrics");
                     let label_pl = self.t("显示列表", "Playlist");
+                    let before = (self.show_eq, self.show_lyrics, self.show_playlist);
                     ui.horizontal(|ui| {
                         ui.checkbox(&mut self.show_eq, label_eq);
                         ui.checkbox(&mut self.show_lyrics, label_ly);
                         ui.checkbox(&mut self.show_playlist, label_pl);
+                    });
+                    // 叠放布局记忆：开关状态跟着配置落盘，下次启动照旧
+                    if (self.show_eq, self.show_lyrics, self.show_playlist) != before {
+                        self.config.classic_eq = self.show_eq;
+                        self.config.classic_lyrics = self.show_lyrics;
+                        self.config.classic_list = self.show_playlist;
+                        changed = true;
+                    }
+                    let label_spec = self.t("主窗频谱", "Spectrum");
+                    let label_cover = self.t("封面缩略图", "Cover art");
+                    let mut spec = self.config.classic_spectrum;
+                    let mut cover = self.config.classic_cover;
+                    ui.horizontal(|ui| {
+                        if ui.checkbox(&mut spec, label_spec).changed() {
+                            self.config.classic_spectrum = spec;
+                            changed = true;
+                        }
+                        if ui.checkbox(&mut cover, label_cover).changed() {
+                            self.config.classic_cover = cover;
+                            changed = true;
+                        }
                     });
                 }
 

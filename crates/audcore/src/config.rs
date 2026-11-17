@@ -86,6 +86,10 @@ impl Theme {
 }
 
 /// 新装环境默认值：手机端直接进经典界面，桌面端保持现代布局
+fn default_win_open() -> bool {
+    true
+}
+
 fn default_classic_skin() -> bool {
     cfg!(target_os = "android")
 }
@@ -125,6 +129,24 @@ pub struct Config {
     /// 用户保存的 EQ 自定义预设（每条 10 段增益）
     #[serde(default)]
     pub eq_custom: Vec<Vec<f32>>,
+    /// 经典界面记忆：均衡器 / 歌词 / 列表三扇窗是否展开
+    #[serde(default = "default_win_open")]
+    pub classic_eq: bool,
+    #[serde(default = "default_win_open")]
+    pub classic_lyrics: bool,
+    #[serde(default = "default_win_open")]
+    pub classic_list: bool,
+    /// 三扇窗是否折叠成 14px 标题条（叠放布局记忆）
+    #[serde(default)]
+    pub classic_fold: [bool; 3],
+    /// 主窗口是否折叠（windowshade）
+    #[serde(default)]
+    pub classic_shade: bool,
+    /// 经典界面是否画频谱 / 封面
+    #[serde(default = "default_win_open")]
+    pub classic_spectrum: bool,
+    #[serde(default = "default_win_open")]
+    pub classic_cover: bool,
     /// 经典皮肤界面（Winamp 2.x .wsz 风格），Android 上默认开启
     #[serde(default = "default_classic_skin")]
     pub classic_skin: bool,
@@ -147,6 +169,13 @@ impl Default for Config {
             lyric_align: 0,
             lyric_karaoke: false,
             eq_custom: Vec::new(),
+            classic_eq: true,
+            classic_lyrics: true,
+            classic_list: true,
+            classic_fold: [false; 3],
+            classic_shade: false,
+            classic_spectrum: true,
+            classic_cover: true,
             classic_skin: cfg!(target_os = "android"),
         }
     }
