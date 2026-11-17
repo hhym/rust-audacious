@@ -134,6 +134,69 @@ pub fn update_notification(title: &str, artist: &str, playing: bool) -> bool {
     }
 }
 
+/// 把「正在播放」写进 MediaSession（锁屏、耳机线控、蓝牙按键都读它）。
+pub fn update_media_session(title: &str, artist: &str, playing: bool, pos: f64, len: f64) {
+    let Some(app) = APP.get() else { return };
+    let result = with_activity(app, |env, activity| {
+        let t = env.new_string(title)?;
+        let a = env.new_string(artist)?;
+        env.call_method(
+            activity,
+            "updateMediaSession",
+            "(Ljava/lang/String;Ljava/lang/String;ZJJ)V",
+            &[
+                JValue::Object(&JObject::from(t)),
+                JValue::Object(&JObject::from(a)),
+                JValue::Bool(playing as u8),
+                JValue::Long((pos * 1000.0) as i64),
+                JValue::Long((len * 1000.0) as i64),
+            ],
+        )?;
+        Ok(())
+    });
+    if let Err(err) = result {
+        log::warn!("更新 MediaSession 失败：{err}");
+    }
+}
+
+/// 锁屏 / 线控的播放控制回调：4 播放 / 5 暂停 / 6 停止。
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "system" fn Java_io_github_hhym_audaciousrs_MainActivity_nativeOnMediaAction(
+    _env: Env,
+    _class: JClass,
+    action: jint,
+) {
+    let Some(shared) = SHARED.get() else { return };
+    match action {
+        4 => {
+            shared.send(Cmd::Play);
+        }
+        5 => {
+            shared.send(Cmd::Pause);
+        }
+        6 => {
+            shared.send(Cmd::Stop);
+        }
+        _ => {}
+    }
+}
+
+/// 锁屏进度条拖动（秒）。
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "system" fn Java_io_github_hhym_audaciousrs_MainActivity_nativeOnMediaSeek(
+    _env: Env,
+    _class: JClass,
+    seconds: jni::sys::jdouble,
+) {
+    if let Some(shared) = SHARED.get() {
+        if seconds >= 0.0 {
+            shared.send(Cmd::Seek(seconds));
+        }
+    }
+}
+
 /// 停止播放时把通知收掉。
 pub fn clear_notification() {
     let Some(app) = APP.get() else { return };

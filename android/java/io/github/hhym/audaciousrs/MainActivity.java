@@ -11,6 +11,9 @@ import android.graphics.drawable.Icon;
 import android.os.Build;
 import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
+import android.media.MediaMetadata;
+import android.media.session.MediaSession;
+import android.media.session.PlaybackState;
 import android.media.AudioManager;
 
 /**
@@ -25,6 +28,7 @@ public class MainActivity extends NativeActivity {
     private AudioManager audioManager;
     private AudioFocusRequest focusRequest;
     private AudioManager.OnAudioFocusChangeListener focusListener;
+    private MediaSession mediaSession;
     private NotificationManager notifications;
     private static final String CHANNEL = "playback";
     private static final int NOTIFY_ID = 1001;
@@ -32,6 +36,9 @@ public class MainActivity extends NativeActivity {
     private static final int ACT_TOGGLE = 1;
     private static final int ACT_NEXT = 2;
     private static final int ACT_PREV = 3;
+    private static final int ACT_PLAY = 4;
+    private static final int ACT_PAUSE = 5;
+    private static final int ACT_STOP = 6;
 
     @Override
     protected void onCreate(android.os.Bundle savedInstanceState) {
@@ -47,6 +54,19 @@ public class MainActivity extends NativeActivity {
             if (Build.VERSION.SDK_INT >= 33) {
                 requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 100);
             }
+            // MediaSession：锁屏 / 耳机线控 / 蓝牙按键统一走这里
+            mediaSession = new MediaSession(this, "audacious-rs");
+            mediaSession.setCallback(new MediaSession.Callback() {
+                @Override public void onPlay() { nativeOnMediaAction(ACT_PLAY); }
+                @Override public void onPause() { nativeOnMediaAction(ACT_PAUSE); }
+                @Override public void onStop() { nativeOnMediaAction(ACT_STOP); }
+                @Override public void onSkipToNext() { nativeOnMediaAction(ACT_NEXT); }
+                @Override public void onSkipToPrevious() { nativeOnMediaAction(ACT_PREV); }
+                @Override public void onSeekTo(long pos) {
+                    nativeOnMediaSeek(pos / 1000.0);
+                }
+            });
+            mediaSession.setActive(true);
         } catch (Throwable t) {
             android.util.Log.w("audacious", "初始化通知栏失败", t);
         }
@@ -109,9 +129,43 @@ public class MainActivity extends NativeActivity {
             builder.addAction(new Notification.Action.Builder(
                     Icon.createWithResource(this, android.R.drawable.ic_media_next),
                     "下一首", actionIntent(ACT_NEXT, 3)).build());
+            if (mediaSession != null) {
+                Notification.MediaStyle style = new Notification.MediaStyle()
+                        .setMediaSession(mediaSession.getSessionToken())
+                        .setShowActionsInCompactView(0, 1, 2);
+                builder.setStyle(style);
+            }
             notifications.notify(NOTIFY_ID, builder.build());
         } catch (Throwable t) {
             android.util.Log.w("audacious", "更新通知失败", t);
+        }
+    }
+
+    /** Rust 侧每换曲调一次：把标题/艺人/时长和播放位置写进 MediaSession。 */
+    public void updateMediaSession(String title, String artist, boolean playing,
+                                   long positionMs, long durationMs) {
+        try {
+            if (mediaSession == null) {
+                return;
+            }
+            MediaMetadata.Builder meta = new MediaMetadata.Builder()
+                    .putString(MediaMetadata.METADATA_KEY_TITLE, title == null ? "" : title)
+                    .putString(MediaMetadata.METADATA_KEY_ARTIST, artist == null ? "" : artist)
+                    .putLong(MediaMetadata.METADATA_KEY_DURATION, durationMs);
+            mediaSession.setMetadata(meta.build());
+            PlaybackState.Builder state = new PlaybackState.Builder()
+                    .setActions(PlaybackState.ACTION_PLAY
+                            | PlaybackState.ACTION_PAUSE
+                            | PlaybackState.ACTION_PLAY_PAUSE
+                            | PlaybackState.ACTION_STOP
+                            | PlaybackState.ACTION_SKIP_TO_NEXT
+                            | PlaybackState.ACTION_SKIP_TO_PREVIOUS
+                            | PlaybackState.ACTION_SEEK_TO)
+                    .setState(playing ? PlaybackState.STATE_PLAYING : PlaybackState.STATE_PAUSED,
+                            positionMs, playing ? 1.0f : 0.0f);
+            mediaSession.setPlaybackState(state.build());
+        } catch (Throwable t) {
+            android.util.Log.w("audacious", "更新 MediaSession 失败", t);
         }
     }
 
@@ -178,4 +232,8 @@ public class MainActivity extends NativeActivity {
     private static native void nativeOnAudioFocusChange(int focusChange);
 
     private static native void nativeOnNotificationAction(int action);
+
+    private static native void nativeOnMediaAction(int action);
+
+    private static native void nativeOnMediaSeek(double seconds);
 }

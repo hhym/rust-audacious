@@ -47,8 +47,16 @@ pub fn run() -> eframe::Result<()> {
         return Ok(());
     }
 
+    // 截图/占用测试用：AUDACIOUS_WINDOW_SIZE=380x820 覆盖默认窗口尺寸
+    let win_size = std::env::var("AUDACIOUS_WINDOW_SIZE")
+        .ok()
+        .and_then(|v| {
+            let (w, h) = v.split_once('x')?;
+            Some([w.trim().parse::<f32>().ok()?, h.trim().parse::<f32>().ok()?])
+        })
+        .unwrap_or([1180.0, 720.0]);
     let viewport = egui::ViewportBuilder::default()
-        .with_inner_size([1180.0, 720.0])
+        .with_inner_size(win_size)
         .with_min_inner_size([520.0, 130.0])
         .with_icon(AppIcon::build())
         .with_title(format!("Audacious RS {}", audcore::VERSION));

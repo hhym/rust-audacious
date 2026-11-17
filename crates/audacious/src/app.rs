@@ -244,6 +244,8 @@ pub struct App {
     pl_menu: Option<(usize, egui::Pos2)>,
     /// MISC 按钮弹出的菜单位置（排序/反选）
     pl_misc_menu: Option<egui::Pos2>,
+    /// 播放列表搜索框内容
+    pl_filter: String,
     /// 上次推给通知栏的内容 + 时间（只在变化或隔一会儿才更新）
     notif_key: (String, bool),
     notif_at: Instant,
@@ -400,6 +402,7 @@ impl App {
             pl_press: None,
             pl_menu: None,
             pl_misc_menu: None,
+            pl_filter: String::new(),
             notif_key: (String::new(), false),
             notif_at: Instant::now(),
         };
@@ -524,6 +527,15 @@ impl App {
         let shared = self.shared.clone();
         let mut actions: Vec<ClassicAction> = Vec::new();
 
+        // 横屏（宽高比 > 1.15）走两列：左列主窗 + 均衡器，右列歌词 + 列表
+        let avail = ui.available_size();
+        let wide = avail.x / avail.y.max(1.0) > 1.15;
+        let scale = if wide {
+            (avail.x / (MAIN_W * 2.0)).max(0.5)
+        } else {
+            (avail.x / MAIN_W).max(0.5)
+        };
+
         // 竖向堆叠：主窗口 → 均衡器 → 播放列表，剩下的高度给列表
         let eq_h = if self.show_eq {
             if self.config.classic_fold[0] { 14.0 } else { 116.0 }
@@ -537,11 +549,19 @@ impl App {
         };
         let pl_h = if self.show_playlist && self.config.classic_fold[2] {
             20.0
+        } else if wide {
+            ((avail.y / scale) - ly_h).clamp(120.0, 520.0)
         } else {
-            ((ui.available_height() / scale) - MAIN_H - eq_h - ly_h).clamp(120.0, 420.0)
+            ((avail.y / scale) - MAIN_H - eq_h - ly_h).clamp(120.0, 420.0)
+        };
+        let total_w = if wide { MAIN_W * 2.0 } else { MAIN_W };
+        let total_h = if wide {
+            (MAIN_H + eq_h).max(ly_h + pl_h)
+        } else {
+            MAIN_H + eq_h + ly_h + pl_h
         };
         let (rect, _) = ui.allocate_exact_size(
-            egui::vec2(MAIN_W * scale, (MAIN_H + eq_h + ly_h + pl_h) * scale),
+            egui::vec2(total_w * scale, total_h * scale),
             egui::Sense::hover(),
         );
         let main_rect = egui::Rect::from_min_size(
@@ -552,7 +572,21 @@ impl App {
         let mut eq_rect = egui::Rect::NOTHING;
         let mut ly_rect = egui::Rect::NOTHING;
         let mut pl_rect = egui::Rect::NOTHING;
-        {
+        if wide {
+            // 两列固定摆位：左列主窗 + EQ，右列歌词 + 列表（拖动换位在竖屏才生效）
+            eq_rect = egui::Rect::from_min_size(
+                rect.min + egui::vec2(0.0, MAIN_H * scale),
+                egui::vec2(MAIN_W * scale, eq_h * scale),
+            );
+            ly_rect = egui::Rect::from_min_size(
+                rect.min + egui::vec2(MAIN_W * scale, 0.0),
+                egui::vec2(MAIN_W * scale, ly_h * scale),
+            );
+            pl_rect = egui::Rect::from_min_size(
+                rect.min + egui::vec2(MAIN_W * scale, ly_h * scale),
+                egui::vec2(MAIN_W * scale, pl_h * scale),
+            );
+        } else {
             let mut y = MAIN_H * scale;
             for id in self.config.classic_order {
                 let h = match id {
@@ -1245,6 +1279,19 @@ impl App {
             chrome.sprite(&painter, "pledit.bmp", 153.0, 21.0, 25.0, 20.0, pp(MAIN_W - 25.0, 0.0, 25.0, 20.0), white);
             chrome.text(&painter, "PLAYLIST", pp((MAIN_W - 100.0) / 2.0 + 22.0, 7.0, 1.0, 1.0).min, scale, pr.max.x, white);
 
+            // 顶栏右侧的搜索框（先在皮肤条上盖一块底色，再把输入框放上去）
+            let search_r = pp(150.0, 2.0, 118.0, 16.0);
+            painter.rect_filled(search_r, 2.0, pled.normal_bg.gamma_multiply(0.75));
+            let mut filter = self.pl_filter.clone();
+            let edit = egui::TextEdit::singleline(&mut filter)
+                .hint_text("搜索歌名 / 艺人")
+                .font(egui::FontId::new((9.0 * scale).clamp(8.0, 13.0), egui::FontFamily::Proportional))
+                .desired_width(search_r.width());
+            let resp = ui.put(search_r, edit);
+            if resp.changed() {
+                self.pl_filter = filter;
+            }
+
             // 左右边框平铺（左 12、右 20 宽）
             let mut y = 20.0;
             while y < pl_h - 38.0 {
@@ -1290,12 +1337,18 @@ impl App {
             }
 
             // 行（用系统字体，能显示中文；颜色取 pledit.txt）
+            let query = self.pl_filter.trim().to_lowercase();
             let rows: Vec<(String, String, Option<f64>, usize)> = {
                 let pl = &self.playlist;
                 pl.entries
                     .iter()
                     .enumerate()
                     .map(|(i, e)| (e.artist.clone(), e.display_title().to_string(), e.length, i))
+                    .filter(|(artist, title, _, _)| {
+                        query.is_empty()
+                            || artist.to_lowercase().contains(&query)
+                            || title.to_lowercase().contains(&query)
+                    })
                     .collect()
             };
             let current = self.state.current;
@@ -1915,6 +1968,13 @@ impl eframe::App for App {
                         &self.state.title,
                         &self.state.artist,
                         playing,
+                    );
+                    crate::android::update_media_session(
+                        &self.state.title,
+                        &self.state.artist,
+                        matches!(self.state.status, St::Playing),
+                        self.state.position,
+                        self.state.length,
                     );
                 }
                 self.notif_key = key;
