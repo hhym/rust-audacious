@@ -157,8 +157,10 @@ pub struct App {
     plugin_delete: Option<(String, std::path::PathBuf, Option<String>)>,
     /// 删除时是否连登录数据一起清
     plugin_delete_clear: bool,
-    /// 正在检测的插件：(显示名, 结果接收端)
-    plugin_check: Option<(String, std::sync::mpsc::Receiver<Result<String, String>>)>,
+    /// 正在检测的插件：显示名 → 结果接收端（可以同时检测多个）
+    plugin_checks: std::collections::HashMap<String, std::sync::mpsc::Receiver<Result<String, String>>>,
+    /// 每个插件最近一次检测结果：(通过?, 简述)
+    plugin_check_results: std::collections::HashMap<String, (bool, String)>,
     /// 后台扫描插件用的接收端（扫描不阻塞界面）
     scan_rx: Option<std::sync::mpsc::Receiver<Vec<audplugins::OnlinePlugin>>>,
     show_search: bool,
@@ -285,7 +287,8 @@ impl App {
             media_plugins: Vec::new(),
             plugin_delete: None,
             plugin_delete_clear: false,
-            plugin_check: None,
+            plugin_checks: std::collections::HashMap::new(),
+            plugin_check_results: std::collections::HashMap::new(),
             scan_rx: None,
             show_search: false,
             search_plugin: 0,
@@ -539,7 +542,7 @@ impl eframe::App for App {
         self.refresh_cover_accent();
         self.poll_media_channels();
         self.poll_plugin_check();
-        if self.plugin_check.is_some() {
+        if !self.plugin_checks.is_empty() {
             // 检测在后台线程跑，界面要持续重绘才能刷出 spinner 并在完成时立刻弹 toast
             ctx.request_repaint();
         }
@@ -2024,27 +2027,38 @@ impl App {
         self.scan_rx = Some(audplugins::scan_async(dir));
     }
 
-    /// 插件「检测」按钮：后台线程跑完一次搜索后把结果转成 toast。
+    /// 插件「检测」按钮：后台线程跑完一次搜索后，结果同时进 toast 和行内标签。
     fn poll_plugin_check(&mut self) {
-        let Some((name, rx)) = &self.plugin_check else {
-            return;
-        };
-        let outcome = match rx.try_recv() {
-            Ok(outcome) => Some(outcome),
-            Err(std::sync::mpsc::TryRecvError::Empty) => return,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                Some(Err("检测线程意外退出".to_string()))
+        let names: Vec<String> = self.plugin_checks.keys().cloned().collect();
+        let mut finished: Vec<(String, Result<String, String>)> = Vec::new();
+        for name in names {
+            let Some(rx) = self.plugin_checks.get(&name) else {
+                continue;
+            };
+            match rx.try_recv() {
+                Ok(outcome) => finished.push((name.clone(), outcome)),
+                Err(std::sync::mpsc::TryRecvError::Empty) => continue,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    finished.push((name.clone(), Err("检测线程意外退出".to_string())))
+                }
             }
-        };
-        let name = name.clone();
-        self.plugin_check = None;
-        match outcome {
-            Some(Ok(detail)) => self.toast(format!("{} 检测通过：{}", name, detail)),
-            Some(Err(err)) => {
-                let brief: String = err.lines().next().unwrap_or("").chars().take(110).collect();
-                self.toast(format!("{} 检测失败：{}", name, brief))
+        }
+        for (name, outcome) in finished {
+            self.plugin_checks.remove(&name);
+            match outcome {
+                Ok(detail) => {
+                    self.plugin_check_results
+                        .insert(name.clone(), (true, detail.clone()));
+                    self.toast(format!("{} 检测通过：{}", name, detail));
+                }
+                Err(err) => {
+                    let brief: String =
+                        err.lines().next().unwrap_or("").chars().take(110).collect();
+                    self.plugin_check_results
+                        .insert(name.clone(), (false, brief.clone()));
+                    self.toast(format!("{} 检测失败：{}", name, brief));
+                }
             }
-            None => {}
         }
     }
 
@@ -2054,6 +2068,7 @@ impl App {
                 Ok(plugins) => {
                     let count = plugins.len();
                     self.media_plugins = plugins;
+                    self.plugin_check_results.clear();
                     if self.search_plugin >= self.media_plugins.len() {
                         self.search_plugin = 0;
                     }
@@ -2592,13 +2607,24 @@ impl App {
                             if pl.supports("getLyric") || pl.supports("lyrics") {
                                 ui.label(RichText::new("歌词").small().color(p.dim));
                             }
+                            // 上一次检测的结论直接挂在行内，几十个插件一眼扫完
+                            if let Some((ok, detail)) = self.plugin_check_results.get(&pl.name()) {
+                                let (mark, color) = if *ok {
+                                    ("✓", egui::Color32::from_rgb(90, 165, 95))
+                                } else {
+                                    ("✗", egui::Color32::from_rgb(200, 80, 80))
+                                };
+                                ui.label(
+                                    RichText::new(format!("{mark} {detail}"))
+                                        .small()
+                                        .color(color),
+                                )
+                                .on_hover_text(detail.as_str());
+                            }
                             // 删除按钮靠右，点了先弹确认，避免误删
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 ui.add_space(4.0);
-                                let checking = self
-                                    .plugin_check
-                                    .as_ref()
-                                    .is_some_and(|(n, _)| n == &pl.name());
+                                let checking = self.plugin_checks.contains_key(&pl.name());
                                 if checking {
                                     ui.spinner();
                                 } else if ui
@@ -2629,7 +2655,7 @@ impl App {
                                         };
                                         let _ = tx.send(msg);
                                     });
-                                    self.plugin_check = Some((name, rx));
+                                    self.plugin_checks.insert(name, rx);
                                     ctx.request_repaint();
                                 }
                                 if ui

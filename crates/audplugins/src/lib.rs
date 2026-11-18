@@ -427,7 +427,7 @@ pub(crate) fn invoke_exports(
     method: &str,
     args: &[Value],
 ) -> anyhow::Result<Value> {
-    invoke_exports_with(ctx, exports, method, args, std::time::Duration::from_secs(3))
+    invoke_exports_with(ctx, exports, method, args, std::time::Duration::from_secs(8))
 }
 
 /// 同 [`invoke_exports`]，但可以给更长的预算：扫码登录这类要等用户操作的方法需要。
