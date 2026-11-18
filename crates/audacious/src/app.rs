@@ -2027,6 +2027,32 @@ impl App {
         self.scan_rx = Some(audplugins::scan_async(dir));
     }
 
+    /// 起一个后台线程检测单个插件：跑一次 test 搜索，结果经 channel 回传。
+    fn start_plugin_check(&mut self, name: String, plugin: audplugins::OnlinePlugin) {
+        if self.plugin_checks.contains_key(&name) {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let result = plugin.search_tracks("test", 1);
+            let msg = match result {
+                Ok(tracks) => {
+                    let count = tracks.len();
+                    let ms = started.elapsed().as_millis();
+                    Ok(if count == 0 {
+                        format!("0 条（test 未匹配）· {ms}ms")
+                    } else {
+                        format!("{count} 条 · {ms}ms")
+                    })
+                }
+                Err(err) => Err(audplugins::friendly_error(&err.to_string())),
+            };
+            let _ = tx.send(msg);
+        });
+        self.plugin_checks.insert(name, rx);
+    }
+
     /// 插件「检测」按钮：后台线程跑完一次搜索后，结果同时进 toast 和行内标签。
     fn poll_plugin_check(&mut self) {
         let names: Vec<String> = self.plugin_checks.keys().cloned().collect();
@@ -2569,6 +2595,34 @@ impl App {
                         ui.spinner();
                         ui.label(RichText::new(self.t("正在扫描…", "Scanning…")).small().color(p.dim));
                     }
+                    if ui
+                        .add_enabled(
+                            !self.media_plugins.is_empty() && !scanning,
+                            egui::Button::new(self.t("全部检测", "Test all")).small(),
+                        )
+                        .on_hover_text(self.t(
+                            "排队把所有插件都测一遍（每个跑一次 test 搜索）",
+                            "Queue a test for every plugin",
+                        ))
+                        .clicked()
+                    {
+                        let plugins = self.media_plugins.clone();
+                        for pl in &plugins {
+                            if pl.error().is_none() {
+                                self.start_plugin_check(pl.name(), pl.clone());
+                            }
+                        }
+                        ctx.request_repaint();
+                    }
+                    if !self.plugin_checks.is_empty() {
+                        let done = self.plugin_checks.len();
+                        ui.spinner();
+                        ui.label(
+                            RichText::new(format!("{} {done}", self.t("检测中", "testing")))
+                                .small()
+                                .color(p.dim),
+                        );
+                    }
                     if ui.small_button(self.t("打开目录", "Open folder")).clicked() {
                         open_in_file_manager(&audplugins::plugins_dir());
                     }
@@ -2617,28 +2671,9 @@ impl App {
                             if pl.supports("getLyric") || pl.supports("lyrics") {
                                 ui.label(RichText::new("歌词").small().color(p.dim));
                             }
-                            // 上一次检测的结论直接挂在行内，几十个插件一眼扫完
-                            if let Some(entry) = self.plugin_check_results.get(&pl.name()) {
-                                let (mark, color) = if entry.ok {
-                                    ("✓", egui::Color32::from_rgb(90, 165, 95))
-                                } else {
-                                    ("✗", egui::Color32::from_rgb(200, 80, 80))
-                                };
-                                let age = audplugins::checks::humanize_age(entry.at);
-                                ui.label(
-                                    RichText::new(format!("{mark} {}", entry.detail))
-                                        .small()
-                                        .color(color),
-                                )
-                                .on_hover_text(format!(
-                                    "{}\n检测于 {}",
-                                    entry.detail, age
-                                ));
-                                ui.label(RichText::new(format!("· {age}")).small().color(p.dim));
-                            }
                             // 删除按钮靠右，点了先弹确认，避免误删
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.add_space(4.0);
+                                ui.add_space(10.0);
                                 let checking = self.plugin_checks.contains_key(&pl.name());
                                 if checking {
                                     ui.spinner();
@@ -2650,27 +2685,7 @@ impl App {
                                     ))
                                     .clicked()
                                 {
-                                    let name = pl.name().to_string();
-                                    let plugin = pl.clone();
-                                    let (tx, rx) = std::sync::mpsc::channel();
-                                    std::thread::spawn(move || {
-                                        let started = std::time::Instant::now();
-                                        let result = plugin.search_tracks("test", 1);
-                                        let msg = match result {
-                                            Ok(tracks) => {
-                                                let count = tracks.len();
-                                                let ms = started.elapsed().as_millis();
-                                                Ok(if count == 0 {
-                                                    format!("0 条（test 未匹配）· {ms}ms")
-                                                } else {
-                                                    format!("{count} 条 · {ms}ms")
-                                                })
-                                            }
-                                            Err(err) => Err(audplugins::friendly_error(&err.to_string())),
-                                        };
-                                        let _ = tx.send(msg);
-                                    });
-                                    self.plugin_checks.insert(name, rx);
+                                    self.start_plugin_check(pl.name(), pl.clone());
                                     ctx.request_repaint();
                                 }
                                 if ui
@@ -2690,6 +2705,38 @@ impl App {
                                     ));
                                     self.plugin_delete_clear = false;
                                 }
+                            // 上一次检测的结论直接挂在行内，几十个插件一眼扫完
+                            if let Some(entry) = self.plugin_check_results.get(&pl.name()) {
+                                let stale = audplugins::checks::now().saturating_sub(entry.at)
+                                    > 7 * 86_400;
+                                let age = audplugins::checks::humanize_age(entry.at);
+                                let (text, color) = if !entry.ok {
+                                    (self.t("失败", "failed"), egui::Color32::from_rgb(200, 80, 80))
+                                } else if stale {
+                                    (self.t("可用（旧）", "ok, old"), p.dim)
+                                } else {
+                                    (self.t("可用", "ok"), egui::Color32::from_rgb(90, 165, 95))
+                                };
+                                // 行内只给结论，条数/耗时/错误细节走 hover，避免挤掉右边按钮
+                                ui.add(
+                                    egui::Label::new(RichText::new(text).small().color(color))
+                                        .truncate(),
+                                )
+                                .on_hover_text(format!(
+                                    "{}\n检测于 {}{}",
+                                    entry.detail,
+                                    age,
+                                    if stale { "（超过 7 天，建议复检）" } else { "" }
+                                ));
+                                if !entry.ok {
+                                    let url = github_plugin_search_url(&pl.name());
+                                    ui.hyperlink_to(self.t("换源", "Find source"), url)
+                                        .on_hover_text(self.t(
+                                            "在 GitHub 搜同名插件，换个还能用的实现",
+                                            "Search GitHub for another implementation of this plugin",
+                                        ));
+                                }
+                            }
                             });
                         });
                         if let Some(err) = pl.error() {
@@ -5112,6 +5159,35 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// 把任意字符串编码进 URL 查询（中文按 UTF-8 逐字节转 %XX）。
+fn percent_encode(input: &str) -> String {
+    input
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
+}
+
+/// 失败插件旁的「换源」链接：按插件名去 GitHub 搜同标准（MyGo / MusicFree）的实现。
+fn github_plugin_search_url(name: &str) -> String {
+    let (base, standard) = match name.rsplit_once(" · ") {
+        Some((base, standard)) => (base, standard),
+        None => (name, ""),
+    };
+    let flavor = if standard.contains("MyGo") {
+        "MyGo Music"
+    } else {
+        "MusicFree"
+    };
+    let query = percent_encode(&format!("{base} {flavor} plugin"));
+    format!("https://github.com/search?q={query}&type=repositories")
+}
+
 fn open_in_file_manager(dir: &std::path::Path) {
     let _ = std::fs::create_dir_all(dir);
     #[cfg(target_os = "windows")]
@@ -5452,6 +5528,30 @@ fn mini_list_icon(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
 /// 关闭：两个交叉的短线
 fn mini_close_icon(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
     tabler(painter, rect, "x", color);
+}
+
+#[cfg(test)]
+mod plugin_search_url_tests {
+    use super::{github_plugin_search_url, percent_encode};
+
+    #[test]
+    fn musicfree_name_maps_to_query() {
+        let url = github_plugin_search_url("QQ Vip · MusicFree");
+        assert!(url.starts_with("https://github.com/search?q="));
+        assert!(url.contains("QQ%20Vip%20MusicFree%20plugin"));
+        assert!(url.ends_with("&type=repositories"));
+    }
+
+    #[test]
+    fn mygo_name_maps_to_query() {
+        let url = github_plugin_search_url("Bilibili · MyGo");
+        assert!(url.contains("Bilibili%20MyGo%20Music%20plugin"));
+    }
+
+    #[test]
+    fn chinese_is_percent_encoded() {
+        assert_eq!(percent_encode("汽水"), "%E6%B1%BD%E6%B0%B4");
+    }
 }
 
 #[cfg(test)]
