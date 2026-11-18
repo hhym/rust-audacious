@@ -159,8 +159,8 @@ pub struct App {
     plugin_delete_clear: bool,
     /// 正在检测的插件：显示名 → 结果接收端（可以同时检测多个）
     plugin_checks: std::collections::HashMap<String, std::sync::mpsc::Receiver<Result<String, String>>>,
-    /// 每个插件最近一次检测结果：(通过?, 简述)
-    plugin_check_results: std::collections::HashMap<String, (bool, String)>,
+    /// 每个插件最近一次检测结果（落盘，重启还在）
+    plugin_check_results: std::collections::HashMap<String, audplugins::checks::CheckEntry>,
     /// 后台扫描插件用的接收端（扫描不阻塞界面）
     scan_rx: Option<std::sync::mpsc::Receiver<Vec<audplugins::OnlinePlugin>>>,
     show_search: bool,
@@ -288,7 +288,7 @@ impl App {
             plugin_delete: None,
             plugin_delete_clear: false,
             plugin_checks: std::collections::HashMap::new(),
-            plugin_check_results: std::collections::HashMap::new(),
+            plugin_check_results: audplugins::checks::load(),
             scan_rx: None,
             show_search: false,
             search_plugin: 0,
@@ -2047,19 +2047,30 @@ impl App {
             self.plugin_checks.remove(&name);
             match outcome {
                 Ok(detail) => {
-                    self.plugin_check_results
-                        .insert(name.clone(), (true, detail.clone()));
+                    self.remember_check(&name, true, &detail);
                     self.toast(format!("{} 检测通过：{}", name, detail));
                 }
                 Err(err) => {
                     let brief: String =
                         err.lines().next().unwrap_or("").chars().take(110).collect();
-                    self.plugin_check_results
-                        .insert(name.clone(), (false, brief.clone()));
+                    self.remember_check(&name, false, &brief);
                     self.toast(format!("{} 检测失败：{}", name, brief));
                 }
             }
         }
+    }
+
+    /// 记一条检测结论并落盘（重启后行内标签还在）。
+    fn remember_check(&mut self, name: &str, ok: bool, detail: &str) {
+        self.plugin_check_results.insert(
+            name.to_string(),
+            audplugins::checks::CheckEntry {
+                ok,
+                detail: detail.to_string(),
+                at: audplugins::checks::now(),
+            },
+        );
+        audplugins::checks::save(&self.plugin_check_results);
     }
 
     fn poll_media_channels(&mut self) {
@@ -2068,7 +2079,6 @@ impl App {
                 Ok(plugins) => {
                     let count = plugins.len();
                     self.media_plugins = plugins;
-                    self.plugin_check_results.clear();
                     if self.search_plugin >= self.media_plugins.len() {
                         self.search_plugin = 0;
                     }
@@ -2608,18 +2618,23 @@ impl App {
                                 ui.label(RichText::new("歌词").small().color(p.dim));
                             }
                             // 上一次检测的结论直接挂在行内，几十个插件一眼扫完
-                            if let Some((ok, detail)) = self.plugin_check_results.get(&pl.name()) {
-                                let (mark, color) = if *ok {
+                            if let Some(entry) = self.plugin_check_results.get(&pl.name()) {
+                                let (mark, color) = if entry.ok {
                                     ("✓", egui::Color32::from_rgb(90, 165, 95))
                                 } else {
                                     ("✗", egui::Color32::from_rgb(200, 80, 80))
                                 };
+                                let age = audplugins::checks::humanize_age(entry.at);
                                 ui.label(
-                                    RichText::new(format!("{mark} {detail}"))
+                                    RichText::new(format!("{mark} {}", entry.detail))
                                         .small()
                                         .color(color),
                                 )
-                                .on_hover_text(detail.as_str());
+                                .on_hover_text(format!(
+                                    "{}\n检测于 {}",
+                                    entry.detail, age
+                                ));
+                                ui.label(RichText::new(format!("· {age}")).small().color(p.dim));
                             }
                             // 删除按钮靠右，点了先弹确认，避免误删
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

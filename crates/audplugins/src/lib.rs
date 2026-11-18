@@ -13,6 +13,7 @@ use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 mod cache;
+pub mod checks;
 mod mygo;
 pub use mygo::{discover_mygo, MygoManifest, MygoPlugin, SettingDef};
 use std::sync::{Mutex, OnceLock};
