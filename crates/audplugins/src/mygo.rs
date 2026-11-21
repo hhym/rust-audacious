@@ -158,8 +158,10 @@ impl MygoPlugin {
             }
         };
 
+        // 缓存键带上宿主版本：转换规则改了以后，旧缓存里的报错不能继续挂着
         let key = format!(
-            "{}|{}",
+            "v{}|{}|{}",
+            env!("CARGO_PKG_VERSION"),
             crate::cache::key(&manifest_path),
             crate::cache::key(&script_path)
         );
@@ -264,10 +266,13 @@ impl MygoPlugin {
             anyhow::bail!("插件不可用: {err}");
         }
         crate::set_process_policy(self.dir.clone(), self.process_patterns());
-        let mut ctx = mygo_context(self);
-        let exports = eval_module(&mut ctx, &self.code)
-            .map_err(|e| anyhow::anyhow!("插件代码执行失败: {e}"))?;
-        invoke_exports_with(&mut ctx, exports, method, &[params], budget)
+        // 大插件每次调用都要重新解析一遍，默认栈会溢出：临时借一大块栈
+        crate::big_stack(|| {
+            let mut ctx = mygo_context(self);
+            let exports = eval_module(&mut ctx, &self.code)
+                .map_err(|e| anyhow::anyhow!("插件代码执行失败: {e}"))?;
+            invoke_exports_with(&mut ctx, exports, method, &[params], budget)
+        })
     }
 
     /// 搜索音乐：`search({query, kind:"tracks", offset})`，返回规范化后的条目。
@@ -433,14 +438,18 @@ fn static_exports(code: &str) -> Vec<String> {
 }
 
 fn inspect(dir: &Path, manifest: &MygoManifest, code: &str) -> anyhow::Result<Vec<String>> {
-    // 语法检查要看改写后的脚本（原文件是 ES 模块，直接按 Script 解析会报 export 错）
-    let (body, _) = transform_module(code);
-    syntax_check(&body).map_err(|e| anyhow::anyhow!(e))?;
-    let names = static_exports(code);
-    if !names.is_empty() {
-        return Ok(names);
-    }
-    describe(dir, manifest, code)
+    // 大插件（几千行、内含打包好的库）会让 Boa 解析递归吃满默认 2MB 线程栈，
+    // 直接 stack overflow 崩掉；统一放到 64MB 栈的线程里跑。
+    crate::big_stack(|| {
+        // 语法检查要看改写后的脚本（原文件是 ES 模块，直接按 Script 解析会报 export 错）
+        let (body, _) = transform_module(code);
+        syntax_check(&body).map_err(|e| anyhow::anyhow!(e))?;
+        let names = static_exports(code);
+        if !names.is_empty() {
+            return Ok(names);
+        }
+        describe(dir, manifest, code)
+    })
 }
 
 fn describe(dir: &Path, manifest: &MygoManifest, code: &str) -> anyhow::Result<Vec<String>> {
@@ -1131,3 +1140,5 @@ mod pending_tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 }
+
+

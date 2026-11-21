@@ -105,6 +105,14 @@
     return this.protocol + "//" + this.host + this.pathname + (search ? "?" + search : "") + this.hash;
   };
   URL.prototype.toJSON = URL.prototype.toString;
+  // 插件普遍读 url.href（拼字符串），必须是活的 getter，改了 searchParams 也要跟着变
+  Object.defineProperty(URL.prototype, "href", {
+    get: function () {
+      return this.toString();
+    },
+    enumerable: true,
+    configurable: true,
+  });
 
   // ------------------------------------------------------------ 定时器
   // 没有事件循环，定时器交给宿主每次 pump 时执行；只支持"到点就跑一次"。

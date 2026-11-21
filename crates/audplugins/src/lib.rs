@@ -226,6 +226,11 @@ struct Meta {
 }
 
 /// 把底层报错翻译成人能看懂的一句话。
+/// 在需要更大栈时才临时扩栈：Boa 解析几千行的打包脚本会递归很深。
+pub(crate) fn big_stack<R>(f: impl FnOnce() -> R) -> R {
+    stacker::maybe_grow(64 * 1024 * 1024, 8 * 1024 * 1024, f)
+}
+
 pub fn friendly_error(raw: &str) -> String {
     if raw.contains("LoopIteration") || raw.to_ascii_lowercase().contains("loop iteration") {
         return "插件在加载阶段死循环（常见于混淆过的插件，校验循环在本引擎里跑不通），已跳过".into();
