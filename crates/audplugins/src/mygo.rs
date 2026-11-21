@@ -575,6 +575,29 @@ fn transform_module(src: &str) -> (String, Vec<(String, String)>) {
         .replace_all(&out, |c: &regex::Captures| format!("require(\"{}\");", &c[1]))
         .into_owned();
 
+    // export 和关键字之间夹注释：export /* x */ default …
+    let re_export_comment =
+        Regex::new(r"(?s)export\s*/\*[\s\S]*?\*/\s*").unwrap();
+    out = re_export_comment.replace_all(&out, "export ").into_owned();
+
+    // export * as ns from "mod"：整包挂到命名空间对象
+    let re_export_ns = Regex::new(
+        r#"(?m)export\s*\*\s*as\s+([A-Za-z_$][\w$]*)\s*from\s*['"]([^'"]+)['"]\s*;"#,
+    )
+    .unwrap();
+    out = re_export_ns
+        .replace_all(&out, |c: &regex::Captures| {
+            exported.push((c[1].to_string(), c[1].to_string()));
+            format!("const {} = require(\"{}\");", &c[1], &c[2])
+        })
+        .into_owned();
+    // export * from "mod"：只保留副作用，宿主不做全部再导出
+    let re_export_star =
+        Regex::new(r#"(?m)export\s*\*\s*from\s*['"]([^'"]+)['"]\s*;"#).unwrap();
+    out = re_export_star
+        .replace_all(&out, |c: &regex::Captures| format!("require(\"{}\");", &c[1]))
+        .into_owned();
+
     // export { a, b as c } from "mod"：再导出，先于普通 export 清单处理
     let re_reexport =
         Regex::new(r#"(?s)export\s*\{(.*?)\}\s*from\s*['"]([^'"]+)['"]\s*;"#).unwrap();

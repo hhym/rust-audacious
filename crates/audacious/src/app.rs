@@ -421,7 +421,7 @@ impl App {
                     }
                     Err(err) => {
                         self.home = None;
-                        self.home_error = Some(err);
+                        self.home_error = Some(audplugins::friendly_error(&err));
                     }
                 }
             }
@@ -2816,6 +2816,7 @@ impl App {
                             });
                         });
                         if let Some(err) = pl.error() {
+                            let err = audplugins::friendly_error(err);
                             ui.label(
                                 RichText::new(format!("  加载失败：{err}"))
                                     .small()
@@ -4681,6 +4682,7 @@ impl App {
                                     .color(p.dim),
                                 );
                                 if let Some(err) = plugin.error() {
+                                    let err = audplugins::friendly_error(err);
                                     ui.label(
                                         RichText::new(err)
                                             .small()

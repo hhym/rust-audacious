@@ -247,7 +247,8 @@ pub fn friendly_error(raw: &str) -> String {
             .and_then(|s| s.split([',', ' ']).next())
             .unwrap_or("?");
         return format!(
-            "插件第 {line} 行还残留 `export`：宿主已改写常见 ES 模块写法，这里是一种更少见的导出形式。把该行附近 5 行发给插件作者，或在「插件」页点「重新扫描」再试"
+            "插件第 {line} 行还残留 `export`：宿主已改写常见的 ES 模块写法，这一种还没覆盖。  
+处理办法：①把该插件目录里的 index.js 发我，补一条转换规则；②先在插件页「停用」它，别让它拖慢批量检测；③或点「换源」换同名 MusicFree 实现"
         );
     }
     if raw.contains("SyntaxError") {
