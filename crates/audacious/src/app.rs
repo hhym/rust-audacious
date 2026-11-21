@@ -143,6 +143,8 @@ pub struct App {
     show_plugins: bool,
     show_about: bool,
     toast: Option<(String, Instant)>,
+    /// 需要用户确认的错误弹窗：标题 + 正文（正文可选中复制）
+    error_dialog: Option<(String, String)>,
     port: u16,
     style_key: (audcore::Theme, [u8; 3]),
     mini_applied: bool,
@@ -279,6 +281,7 @@ impl App {
             show_eq: false,
             show_plugins: false,
             show_about: false,
+            error_dialog: None,
             toast: None,
             port,
             style_key: (config.theme, config.accent),
@@ -478,6 +481,14 @@ impl App {
         self.toast = Some((message.into(), Instant::now()));
     }
 
+    /// 严重错误走弹窗：一句话标题 + 完整正文，正文可选中复制，关掉才继续。
+    fn show_error(&mut self, title: impl Into<String>, body: impl Into<String>) {
+        let title: String = title.into();
+        let body: String = body.into();
+        log::error!("{title}: {body}");
+        self.error_dialog = Some((title, body));
+    }
+
     fn sync(&mut self) {
         self.state = self.shared.state();
         self.playlist = self.shared.playlist();
@@ -533,7 +544,7 @@ impl App {
         let entries = self.playlist.entries.clone();
         match plugin::save_playlist(&path, &entries) {
             Ok(()) => self.toast(format!("已保存到 {}", path.display())),
-            Err(err) => self.toast(format!("保存失败：{err}")),
+            Err(err) => self.show_error(self.t("保存失败", "Save failed"), format!("{err:#}")),
         }
     }
 
@@ -636,6 +647,7 @@ impl eframe::App for App {
         self.plugins_ui(ctx, &p);
         self.search_ui(ctx, &p);
         self.about_ui(ctx, &p);
+        self.error_dialog_ui(ctx, &p);
         if let Some(msg) = self.login.ui(ctx, &p, self.has_cjk) {
             self.toast(msg);
         }
@@ -2225,12 +2237,20 @@ impl App {
                 }
                 Ok(Err(err)) => {
                     self.resolve_rx = None;
-                    self.toast(format!("解析失败：{err}"));
+                    let brief = self.t(
+                        "播放地址解析失败：插件拿不到可播放的链接。  
+换一个音源插件，或稍后重试。",
+                        "Failed to resolve a playable URL.",
+                    );
+                    self.show_error(brief, audplugins::friendly_error(&err.to_string()));
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.resolve_rx = None;
-                    self.toast("解析线程异常结束");
+                    self.show_error(
+                        self.t("解析中断", "Resolve aborted"),
+                        self.t("解析线程意外退出，请重试；反复出现可换个音源。", "Resolver thread exited unexpectedly."),
+                    );
                 }
             }
         }
@@ -2961,6 +2981,56 @@ impl App {
             } else if cancelled {
                 self.plugin_delete = None;
             }
+        }
+    }
+
+    /// 错误弹窗：居中、带标题、正文可滚动可选中，点关闭才消失。
+    fn error_dialog_ui(&mut self, ctx: &egui::Context, p: &Palette) {
+        let Some((title, body)) = self.error_dialog.clone() else {
+            return;
+        };
+        let mut open = true;
+        egui::Window::new(title)
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_width(560.0)
+            .max_width(760.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.add_space(2.0);
+                egui::ScrollArea::vertical()
+                    .max_height(320.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::Label::new(RichText::new(body.as_str()).size(13.0).color(p.text))
+                                .wrap()
+                                .selectable(true),
+                        );
+                    });
+                ui.add_space(8.0);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(self.t("复制", "Copy"))
+                        .on_hover_text(self.t("把错误信息复制到剪贴板", "Copy the message"))
+                        .clicked()
+                    {
+                        ctx.copy_text(body.clone());
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(egui::Button::new(self.t("关闭", "Close")).fill(p.accent_soft))
+                            .clicked()
+                        {
+                            self.error_dialog = None;
+                        }
+                    });
+                });
+            });
+        if !open || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.error_dialog = None;
         }
     }
 
@@ -5203,7 +5273,7 @@ impl App {
                 return;
             }
             Err(err) => {
-                self.toast(format!("载入失败：{err}"));
+                self.show_error(self.t("载入失败", "Load failed"), format!("{err:#}"));
                 return;
             }
         };
