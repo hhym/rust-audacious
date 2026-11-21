@@ -114,6 +114,9 @@ pub struct Config {
     /// 歌词模式：false 滚动歌词 / true 卡拉OK
     #[serde(default)]
     pub lyric_karaoke: bool,
+    /// 停用（不参与批量检测/单测）的在线插件路径
+    #[serde(default)]
+    pub disabled_plugins: Vec<PathBuf>,
 }
 
 impl Default for Config {
@@ -131,6 +134,7 @@ impl Default for Config {
             last_dir: dirs::audio_dir().or_else(dirs::home_dir),
             lyric_align: 0,
             lyric_karaoke: false,
+            disabled_plugins: Vec::new(),
         }
     }
 }

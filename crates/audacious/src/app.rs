@@ -2031,6 +2031,21 @@ impl App {
     }
 
     /// 起一个后台线程检测单个插件：跑一次 test 搜索，结果经 channel 回传。
+    /// 该插件是否已被用户停用（停用后不参与批量检测，行内灰显，单测仍可手动点）
+    fn plugin_disabled(&self, plugin: &audplugins::OnlinePlugin) -> bool {
+        self.config.disabled_plugins.iter().any(|p| p == plugin.path())
+    }
+
+    fn toggle_plugin_disabled(&mut self, plugin: &audplugins::OnlinePlugin) {
+        let path = plugin.path().to_path_buf();
+        if let Some(pos) = self.config.disabled_plugins.iter().position(|p| *p == path) {
+            self.config.disabled_plugins.remove(pos);
+        } else {
+            self.config.disabled_plugins.push(path);
+        }
+        let _ = self.config.save();
+    }
+
     fn start_plugin_check(&mut self, name: String, plugin: audplugins::OnlinePlugin) {
         if self.plugin_checks.contains_key(&name) {
             return;
@@ -2625,7 +2640,7 @@ impl App {
                     {
                         let plugins = self.media_plugins.clone();
                         for pl in &plugins {
-                            if pl.error().is_none() {
+                            if pl.error().is_none() && !self.plugin_disabled(pl) {
                                 self.start_plugin_check(pl.name(), pl.clone());
                             }
                         }
@@ -2692,6 +2707,28 @@ impl App {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 ui.add_space(10.0);
                                 let checking = self.plugin_checks.contains_key(&pl.name());
+                                let disabled = self.plugin_disabled(pl);
+                                if !disabled
+                                    && ui
+                                        .small_button(self.t("停用", "Disable"))
+                                        .on_hover_text(self.t(
+                                            "停用后不参与「全部检测」，行会变灰；随时可以再点一次恢复",
+                                            "Skip this plugin in \"Test all\" runs; click again to re-enable",
+                                        ))
+                                        .clicked()
+                                {
+                                    self.toggle_plugin_disabled(pl);
+                                } else if disabled
+                                    && ui
+                                        .small_button(self.t("启用", "Enable"))
+                                        .on_hover_text(self.t(
+                                            "恢复参与「全部检测」",
+                                            "Include this plugin in \"Test all\" again",
+                                        ))
+                                        .clicked()
+                                {
+                                    self.toggle_plugin_disabled(pl);
+                                }
                                 if checking {
                                     ui.spinner();
                                 } else if ui
@@ -2723,6 +2760,7 @@ impl App {
                                     self.plugin_delete_clear = false;
                                 }
                             // 上一次检测的结论直接挂在行内，几十个插件一眼扫完
+                            if !disabled {
                             if let Some(entry) = self.plugin_check_results.get(&pl.name()) {
                                 let stale = audplugins::checks::now().saturating_sub(entry.at)
                                     > 7 * 86_400;
@@ -2753,6 +2791,7 @@ impl App {
                                             "Search GitHub for another implementation of this plugin",
                                         ));
                                 }
+                            }
                             }
                             });
                         });
