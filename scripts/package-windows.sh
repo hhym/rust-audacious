@@ -9,6 +9,12 @@ VERSION=$(grep -m1 'version = ' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
 TARGET=x86_64-pc-windows-gnu
 NAME="rust-audacious-${VERSION}-windows-x64"
 
+# 有的依赖（stacker）带 C 代码，交叉编译要用 mingw 的 clang 当 CC
+if [ -z "${CC_x86_64_pc_windows_gnu:-}" ] && command -v x86_64-w64-mingw32-clang >/dev/null 2>&1; then
+  export CC_x86_64_pc_windows_gnu=x86_64-w64-mingw32-clang
+  export AR_x86_64_pc_windows_gnu=x86_64-w64-mingw32-ar
+fi
+
 echo "==> 编译 $TARGET（release）"
 cargo build --release --target "$TARGET"
 
