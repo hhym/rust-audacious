@@ -70,7 +70,7 @@ struct AppIcon;
 impl AppIcon {
     /// 嵌入的原始 PNG 字节。
     fn bytes() -> &'static [u8] {
-        include_bytes!("../assets/icon.png")
+        include_bytes!("../assets/app-icon-256.png")
     }
 
     fn build() -> egui::IconData {
