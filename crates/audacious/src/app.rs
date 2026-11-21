@@ -206,6 +206,8 @@ pub struct App {
     /// 后台加载主页
     home_rx: Option<std::sync::mpsc::Receiver<Result<audplugins::HomePage, String>>>,
     home_error: Option<String>,
+    /// 点过「清空播单」的第二次确认时间（3 秒内再点才真删）
+    clear_playlists_at: Option<Instant>,
     /// 这次首页/子页加载是什么时候开始的（用来显示耗时、判断超时）
     home_started: Option<Instant>,
     /// 首页里点开过的页面（栈底是插件主首页）
@@ -331,6 +333,7 @@ impl App {
             home_for: None,
             home_rx: None,
             home_error: None,
+            clear_playlists_at: None,
             home_started: None,
             home_stack: Vec::new(),
             cover_textures: std::collections::HashMap::new(),
@@ -635,6 +638,32 @@ impl App {
             self.toast(format!("已添加 {added} 首"));
         } else {
             self.toast("没有可添加的音频文件");
+        }
+    }
+
+    /// 删掉保存播单目录里所有 m3u / m3u8。
+    fn clear_playlist_files(&mut self) {
+        let files = Self::playlist_files();
+        if files.is_empty() {
+            self.toast(self.t("没有可清的播单", "Nothing to clear").to_string());
+            return;
+        }
+        let mut failed = 0usize;
+        for file in &files {
+            if std::fs::remove_file(file).is_err() {
+                failed += 1;
+            }
+        }
+        if failed == 0 {
+            self.toast(format!(
+                "已清空 {} 个播单",
+                files.len()
+            ));
+        } else {
+            self.show_error(
+                self.t("清空失败", "Clear failed"),
+                format!("{} 个文件删不掉（可能被占用）", failed),
+            );
         }
     }
 
@@ -5441,13 +5470,14 @@ impl App {
     }
 
     fn playlists_tab(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        let mut clear_clicked = false;
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             ui.add_space(12.0);
             ui.label(RichText::new(self.t("播放列表", "Playlists")).strong().color(p.accent));
             ui.label(
                 RichText::new(self.t(
-                    "「保存列表」存在这个目录，点「载入」或「播放」即可恢复",
+                    "＋ 新建播单 · 清空 删掉全部；点「载入」或「播放」即可恢复",
                     "Saved lists live in this folder; load or play them here",
                 ))
                 .small()
@@ -5457,13 +5487,48 @@ impl App {
                 egui::Layout::right_to_left(egui::Align::Center),
                 |ui| {
                     ui.add_space(12.0);
-                    if ui.button(self.t("保存当前列表", "Save list")).clicked() {
+                    let armed = self
+                        .clear_playlists_at
+                        .map(|t| t.elapsed() < Duration::from_secs(3))
+                        .unwrap_or(false);
+                    let text = if armed {
+                        self.t("确认清空？", "Confirm clear?").to_string()
+                    } else {
+                        self.t("清空", "Clear").to_string()
+                    };
+                    if ui
+                        .button(text)
+                        .on_hover_text(self.t(
+                            "删除这个目录里所有保存的播单（两次点击确认）",
+                            "Delete every saved playlist here (click twice)",
+                        ))
+                        .clicked()
+                    {
+                        clear_clicked = true;
+                    }
+                    if ui
+                        .button("＋")
+                        .on_hover_text(self.t("把当前列表存成新播单", "Save current list as a playlist"))
+                        .clicked()
+                    {
                         self.save_playlist();
                     }
                 },
             );
         });
         ui.separator();
+        if clear_clicked {
+            let armed = self
+                .clear_playlists_at
+                .map(|t| t.elapsed() < Duration::from_secs(3))
+                .unwrap_or(false);
+            if armed {
+                self.clear_playlist_files();
+                self.clear_playlists_at = None;
+            } else {
+                self.clear_playlists_at = Some(Instant::now());
+            }
+        }
 
         let files = App::playlist_files();
         if files.is_empty() {
@@ -5471,7 +5536,7 @@ impl App {
             ui.vertical_centered(|ui| {
                 ui.label(
                     RichText::new(self.t(
-                        "还没有保存的播放列表 —— 点右上角「保存当前列表」",
+                        "还没有保存的播放列表 —— 点右上角 ＋ 把当前列表存下来",
                         "No saved playlists yet — use Save list",
                     ))
                     .color(p.dim),

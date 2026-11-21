@@ -275,7 +275,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "audacious-rs"
-version = "5.33.1"
+version = "5.33.2"
 dependencies = [
  "anyhow",
  "audcore",
@@ -297,7 +297,7 @@ dependencies = [
 
 [[package]]
 name = "audcore"
-version = "5.33.1"
+version = "5.33.2"
 dependencies = [
  "anyhow",
  "dirs",
@@ -309,7 +309,7 @@ dependencies = [
 
 [[package]]
 name = "audplugins"
-version = "5.33.1"
+version = "5.33.2"
 dependencies = [
  "aes",
  "anyhow",
@@ -335,7 +335,7 @@ dependencies = [
 
 [[package]]
 name = "audtool"
-version = "5.33.1"
+version = "5.33.2"
 dependencies = [
  "anyhow",
  "audcore",
