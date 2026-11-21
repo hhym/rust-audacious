@@ -206,6 +206,12 @@ pub struct App {
     /// 后台加载主页
     home_rx: Option<std::sync::mpsc::Receiver<Result<audplugins::HomePage, String>>>,
     home_error: Option<String>,
+    /// 目录扫描结果（后台线程扫完再一次性塞进列表）
+    dir_scan_rx: Option<Receiver<(Vec<PathBuf>, u128)>>,
+    /// 目录扫描已看过多少条目 / 是否要停 / 什么时候开始的
+    dir_scan_seen: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+    dir_scan_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    dir_scan_at: Option<Instant>,
     /// 点过「清空播单」的第二次确认时间（3 秒内再点才真删）
     clear_playlists_at: Option<Instant>,
     /// 这次首页/子页加载是什么时候开始的（用来显示耗时、判断超时）
@@ -333,6 +339,10 @@ impl App {
             home_for: None,
             home_rx: None,
             home_error: None,
+            dir_scan_rx: None,
+            dir_scan_seen: None,
+            dir_scan_stop: None,
+            dir_scan_at: None,
             clear_playlists_at: None,
             home_started: None,
             home_stack: Vec::new(),
@@ -627,6 +637,39 @@ impl App {
     }
 
     fn add_paths(&mut self, paths: &[PathBuf]) {
+        // 有目录就先丢到后台扫（大目录递归几千个文件，放主线程会卡死界面）
+        let dirs: Vec<PathBuf> = paths.iter().filter(|p| p.is_dir()).cloned().collect();
+        if !dirs.is_empty() {
+            let mut files: Vec<PathBuf> = paths
+                .iter()
+                .filter(|p| !p.is_dir())
+                .cloned()
+                .collect();
+            let start = Instant::now();
+            let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let seen_thread = seen.clone();
+            let stop_thread = stop.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                for dir in &dirs {
+                    ipc_server::collect_audio_files_with(
+                        dir,
+                        &mut files,
+                        0,
+                        Some(&*seen_thread),
+                        Some(&*stop_thread),
+                    );
+                }
+                let _ = tx.send((files, start.elapsed().as_millis()));
+            });
+            self.dir_scan_rx = Some(rx);
+            self.dir_scan_seen = Some(seen);
+            self.dir_scan_stop = Some(stop);
+            self.dir_scan_at = Some(start);
+            self.toast(self.t("正在扫描目录…", "Scanning folders…").to_string());
+            return;
+        }
         let added = {
             let Ok(mut pl) = self.shared.playlist.lock() else {
                 return;
@@ -638,6 +681,45 @@ impl App {
             self.toast(format!("已添加 {added} 首"));
         } else {
             self.toast("没有可添加的音频文件");
+        }
+    }
+
+    /// 收后台目录扫描结果。
+    fn poll_scan(&mut self) {
+        let mut done: Option<(Vec<PathBuf>, u128)> = None;
+        if let Some(rx) = &self.dir_scan_rx {
+            if let Ok(item) = rx.try_recv() {
+                done = Some(item);
+            }
+        }
+        let Some((files, ms)) = done else { return };
+        self.dir_scan_rx = None;
+        self.dir_scan_seen = None;
+        self.dir_scan_stop = None;
+        self.dir_scan_at = None;
+        let count = files.len();
+        let added = {
+            let Ok(mut pl) = self.shared.playlist.lock() else {
+                return;
+            };
+            let before = pl.len();
+            for f in &files {
+                pl.add_path(f);
+            }
+            pl.len().saturating_sub(before)
+        };
+        self.shared.send(Cmd::Refresh);
+        if added > 0 {
+            self.toast(format!(
+                "扫描完成：{} 个音频，用时 {:.1}s",
+                count,
+                ms as f64 / 1000.0
+            ));
+        } else {
+            self.toast(format!(
+                "这个目录没有音频文件（扫描 {:.1}s）",
+                ms as f64 / 1000.0
+            ));
         }
     }
 
@@ -699,7 +781,11 @@ impl eframe::App for App {
             // 检测在后台线程跑，界面要持续重绘才能刷出 spinner 并在完成时立刻弹 toast
             ctx.request_repaint();
         }
+        if self.dir_scan_rx.is_some() {
+            ctx.request_repaint();
+        }
         self.poll_home();
+        self.poll_scan();
         self.poll_covers(ctx);
         self.login.tick(ctx);
 
@@ -837,7 +923,28 @@ impl App {
                             .last_dir
                             .clone()
                             .unwrap_or_else(|| dirs::home_dir().unwrap_or_default());
-                        self.add_paths(&[dir]);
+                        // 打开浏览窗让用户挑目录，而不是闷头扫上一次的目录
+                        self.browser = Some(Browser::new(dir));
+                    }
+                    if let (Some(seen), Some(t0)) = (self.dir_scan_seen.clone(), self.dir_scan_at) {
+                        let n = seen.load(std::sync::atomic::Ordering::Relaxed);
+                        ui.separator();
+                        ui.spinner();
+                        ui.label(
+                            RichText::new(format!(
+                                "{} {} · {:.1}s",
+                                self.t("扫描中", "Scanning"),
+                                n,
+                                t0.elapsed().as_secs_f32()
+                            ))
+                            .small()
+                            .color(p.dim),
+                        );
+                        if ui.small_button(self.t("停止", "Stop")).clicked() {
+                            if let Some(stop) = &self.dir_scan_stop {
+                                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
                     }
                     if icon_button(ui, self.t("保存列表", "Save list"), p, icon_save_list) {
                         self.save_playlist();
@@ -4881,7 +4988,7 @@ impl App {
                             .last_dir
                             .clone()
                             .unwrap_or_else(|| dirs::home_dir().unwrap_or_default());
-                        self.add_paths(&[dir]);
+                        self.browser = Some(Browser::new(dir));
                     }
                     if ui.button(self.t("保存当前列表", "Save list")).clicked() {
                         self.save_playlist();

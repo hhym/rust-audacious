@@ -330,6 +330,62 @@ pub fn dispatch(req: &Request, shared: &Shared) -> Response {
     }
 }
 
+/// 递归收集目录里的音频文件（不跟随符号链接，避免绕圈）。
+pub fn collect_audio_files(dir: &std::path::Path, out: &mut Vec<PathBuf>, depth: usize) {
+    collect_audio_files_with(dir, out, depth, None, None);
+}
+
+/// 带进度与取消的版本：`seen` 记扫描过的条目数，`stop` 置 true 立刻收手。
+pub fn collect_audio_files_with(
+    dir: &std::path::Path,
+    out: &mut Vec<PathBuf>,
+    depth: usize,
+    seen: Option<&std::sync::atomic::AtomicUsize>,
+    stop: Option<&std::sync::atomic::AtomicBool>,
+) {
+    use std::sync::atomic::Ordering;
+    if depth > 32 {
+        return;
+    }
+    if let Some(stop) = stop {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+    }
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        let Ok(meta) = entry.metadata() else { continue };
+        if meta.is_symlink() {
+            continue;
+        }
+        if let Some(seen) = seen {
+            seen.fetch_add(1, Ordering::Relaxed);
+        }
+        if meta.is_dir() {
+            // 跳过隐藏目录和常见的工程 / 系统垃圾目录，别在 .cache、target 里翻歌
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with('.')
+                || matches!(
+                    name,
+                    "node_modules"
+                        | "target"
+                        | "System Volume Information"
+                        | "$RECYCLE.BIN"
+                        | "AppData"
+                )
+            {
+                continue;
+            }
+            collect_audio_files_with(&path, out, depth + 1, seen, stop);
+        } else if audcore::tags::is_audio_file(&path) {
+            out.push(path);
+        }
+    }
+}
+
 fn add_folder(pl: &mut audcore::Playlist, dir: &std::path::Path) -> usize {
     let mut count = 0;
     let Ok(read_dir) = std::fs::read_dir(dir) else {
