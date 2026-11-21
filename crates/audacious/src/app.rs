@@ -206,6 +206,17 @@ pub struct App {
     /// 后台加载主页
     home_rx: Option<std::sync::mpsc::Receiver<Result<audplugins::HomePage, String>>>,
     home_error: Option<String>,
+    /// 这次首页/子页加载是什么时候开始的（用来显示耗时、判断超时）
+    home_started: Option<Instant>,
+    /// 首页里点开过的页面（栈底是插件主首页）
+    home_stack: Vec<audplugins::HomeQuery>,
+    /// 首页卡片封面：URL → 纹理（None 表示加载失败/还没到）
+    cover_textures: std::collections::HashMap<String, Option<egui::TextureHandle>>,
+    /// 正在下载的封面 URL
+    cover_pending: std::collections::HashSet<String>,
+    /// 封面下载线程回传的字节
+    cover_rx: Option<std::sync::mpsc::Receiver<(String, Result<Vec<u8>, String>)>>,
+    cover_tx: std::sync::mpsc::Sender<(String, Result<Vec<u8>, String>)>,
     /// 歌曲页多选
     song_select: std::collections::BTreeSet<usize>,
     /// Shift 连选的起点
@@ -268,6 +279,8 @@ impl App {
         let has_cjk = theme::install_fonts(&cc.egui_ctx);
         theme::apply_style(&cc.egui_ctx, &config);
 
+        let (tx_covers, rx_covers) =
+            std::sync::mpsc::channel::<(String, Result<Vec<u8>, String>)>();
         let mut app = App {
             state: shared.state(),
             playlist: shared.playlist(),
@@ -318,6 +331,12 @@ impl App {
             home_for: None,
             home_rx: None,
             home_error: None,
+            home_started: None,
+            home_stack: Vec::new(),
+            cover_textures: std::collections::HashMap::new(),
+            cover_pending: std::collections::HashSet::new(),
+            cover_rx: Some(rx_covers),
+            cover_tx: tx_covers,
             song_select: std::collections::BTreeSet::new(),
             song_anchor: None,
             album_filter: String::new(),
@@ -408,12 +427,93 @@ impl App {
         }
     }
 
+    /// 打开首页里的一个子页（歌单 / 榜单 / 分类）。
+    fn open_home_query(&mut self, query: audplugins::HomeQuery) {
+        if self.home_stack.len() < 8 {
+            self.home_stack.push(query);
+        } else {
+            self.home_stack.clear();
+            self.home_stack.push(query);
+        }
+        self.home = None;
+        self.home_error = None;
+        self.home_rx = None;
+        self.load_home();
+    }
+
+    /// 回到上一层（首页栈为空时什么都不做）。
+    fn home_back(&mut self) {
+        if self.home_stack.pop().is_some() {
+            self.home = None;
+            self.home_error = None;
+            self.home_rx = None;
+            self.load_home();
+        }
+    }
+
+    /// 请求一张封面（同一个 URL 只下一次）。
+    fn ensure_cover(&mut self, ctx: &egui::Context, url: &str) {
+        if url.is_empty()
+            || self.cover_pending.contains(url)
+            || self.cover_textures.contains_key(url)
+        {
+            return;
+        }
+        self.cover_pending.insert(url.to_string());
+        let url = url.to_string();
+        let tx = self.cover_tx.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let bytes = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(8))
+                .build()
+                .ok()
+                .and_then(|client| {
+                    client
+                        .get(&url)
+                        .header("User-Agent", "Mozilla/5.0 Audacious RS")
+                        .send()
+                        .ok()
+                        .and_then(|resp| if resp.status().is_success() { resp.bytes().ok() } else { None })
+                })
+                .map(|bytes| bytes.to_vec())
+                .ok_or_else(|| "封面下载失败".to_string());
+            let _ = tx.send((url, bytes));
+            ctx.request_repaint();
+        });
+    }
+
+    /// 收封面字节并转成纹理。
+    fn poll_covers(&mut self, ctx: &egui::Context) {
+        let mut arrived: Vec<(String, Result<Vec<u8>, String>)> = Vec::new();
+        if let Some(rx) = &self.cover_rx {
+            while let Ok(item) = rx.try_recv() {
+                arrived.push(item);
+            }
+        }
+        for (url, bytes) in arrived {
+            self.cover_pending.remove(&url);
+            let tex = bytes.ok().and_then(|bytes| {
+                let img = image::load_from_memory(&bytes).ok()?.to_rgba8();
+                let size = [img.width() as usize, img.height() as usize];
+                let pixels = img.into_raw();
+                Some(ctx.load_texture(
+                    format!("cover:{url}"),
+                    egui::ColorImage::from_rgba_unmultiplied(size, &pixels),
+                    egui::TextureOptions::LINEAR,
+                ))
+            });
+            self.cover_textures.insert(url, tex);
+        }
+    }
+
     /// 后台加载当前插件的主页，加载完更新 `home`。
     fn poll_home(&mut self) {
         let Some(rx) = &self.home_rx else { return };
         match rx.try_recv() {
             Ok(result) => {
                 self.home_rx = None;
+                self.home_started = None;
                 match result {
                     Ok(page) => {
                         self.home = Some(page);
@@ -443,14 +543,24 @@ impl App {
         self.home_for = Some(name.clone());
         self.home = None;
         self.home_error = None;
-        if !plugin.supports_home() {
-            self.home_rx = None;
-            self.home_error = Some(format!("{} 没有首页接口", name));
-            return;
+        let query = self
+            .home_stack
+            .last()
+            .cloned()
+            .unwrap_or(audplugins::HomeQuery::Root);
+        if let audplugins::HomeQuery::Root = query {
+            if !plugin.supports_home() {
+                self.home_rx = None;
+                self.home_error = Some(format!("{} 没有首页接口", name));
+                return;
+            }
         }
+        self.home_started = Some(Instant::now());
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let result = plugin.home().map_err(|e| audplugins::friendly_error(&e.to_string()));
+            let result = plugin
+                .query_home(&query)
+                .map_err(|e| audplugins::friendly_error(&e.to_string()));
             let _ = tx.send(result);
         });
         self.home_rx = Some(rx);
@@ -561,6 +671,7 @@ impl eframe::App for App {
             ctx.request_repaint();
         }
         self.poll_home();
+        self.poll_covers(ctx);
         self.login.tick(ctx);
 
         if self.config.mini != self.mini_applied {
@@ -4600,6 +4711,11 @@ impl App {
             });
 
         if let Some(i) = choice {
+            if self.search_plugin != i {
+                self.home_stack.clear();
+                self.home = None;
+                self.home_error = None;
+            }
             self.search_plugin = i;
             self.plugin_picker_open = false;
         }
@@ -4776,6 +4892,8 @@ impl App {
             .filter(|mygo| mygo.supports_login() || mygo.supports_sign_in())
             .map(|mygo| (mygo.manifest.id.clone(), mygo.manifest.name.clone()));
         let mut open_login_for: Option<String> = None;
+        let mut back = false;
+        let mut cancel_home = false;
         ui.horizontal(|ui| {
             ui.add_space(16.0);
             ui.label(
@@ -4785,7 +4903,15 @@ impl App {
             );
             ui.label(RichText::new(current.clone()).small().color(p.dim));
             if ui.button(self.t("刷新", "Refresh")).clicked() {
+                self.home_stack.clear();
                 self.load_home();
+            }
+            if !self.home_stack.is_empty()
+                && ui
+                    .button(RichText::new(self.t("← 返回", "← Back")).small())
+                    .clicked()
+            {
+                back = true;
             }
             if let Some((id, name)) = &login_target {
                 if ui
@@ -4803,15 +4929,31 @@ impl App {
             }
             if self.home_rx.is_some() {
                 ui.spinner();
-                ui.label(
-                    RichText::new(self.t("正在加载…", "Loading…"))
-                        .small()
-                        .color(p.dim),
-                );
+                let secs = self
+                    .home_started
+                    .map(|t| t.elapsed().as_secs())
+                    .unwrap_or(0);
+                let text = if secs >= 3 {
+                    format!("{} {}s", self.t("正在加载…已", "Loading… "), secs)
+                } else {
+                    self.t("正在加载…", "Loading…").to_string()
+                };
+                ui.label(RichText::new(text).small().color(p.dim));
+                if secs >= 3 && ui.small_button(self.t("取消", "Cancel")).clicked() {
+                    cancel_home = true;
+                }
             }
         });
         if let Some(id) = open_login_for {
             self.open_login(&id);
+        }
+        if back {
+            self.home_back();
+        }
+        if cancel_home {
+            self.home_rx = None;
+            self.home_started = None;
+            self.home_error = Some(self.t("已取消加载", "Cancelled").to_string());
         }
         ui.add_space(4.0);
 
@@ -4837,9 +4979,12 @@ impl App {
                     ui.horizontal(|ui| {
                         ui.add_space(16.0);
                         ui.label(RichText::new(page.title).size(16.0).color(p.text));
-                        if !page.subtitle.is_empty() {
-                            ui.label(RichText::new(page.subtitle).small().color(p.dim));
-                        }
+                    });
+                }
+                if !page.subtitle.is_empty() {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.add_space(16.0);
+                        ui.label(RichText::new(&page.subtitle).small().color(p.dim));
                     });
                 }
                 if page.sections.is_empty() {
@@ -4885,21 +5030,124 @@ impl App {
                         }
                     }
                     if !section.cards.is_empty() {
+                        let mut open: Option<audplugins::HomeQuery> = None;
+                        egui::ScrollArea::horizontal()
+                            .id_salt(("home_cards", si))
+                            .max_height(168.0)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.add_space(16.0);
+                                    for card in &section.cards {
+                                        let title =
+                                            card["title"].as_str().unwrap_or("歌单").to_string();
+                                        let cover = card["cover"].as_str().unwrap_or("");
+                                        let count = card["count"].as_u64().unwrap_or(0);
+                                        let kind = card["kind"].as_str().unwrap_or("playlist");
+                                        if !cover.is_empty() {
+                                            self.ensure_cover(ui.ctx(), cover);
+                                        }
+                                        let tex = if cover.is_empty() {
+                                            None
+                                        } else {
+                                            self.cover_textures.get(cover).cloned().flatten()
+                                        };
+                                        let size = vec2(112.0, 132.0);
+                                        let (rect, resp) =
+                                            ui.allocate_exact_size(size, Sense::click());
+                                        let art_h = 100.0;
+                                        let art = egui::Rect::from_min_size(
+                                            rect.min,
+                                            vec2(100.0, art_h),
+                                        );
+                                        // 每个卡片单独裁剪，标题长了也不会糊到下一张上
+                                        let painter = ui
+                                            .painter()
+                                            .with_clip_rect(egui::Rect::from_min_size(
+                                                rect.min,
+                                                size,
+                                            ));
+                                        painter.rect_filled(
+                                            art,
+                                            CornerRadius::same(8),
+                                            p.panel,
+                                        );
+                                        match tex {
+                                            Some(tex) => {
+                                                painter.image(
+                                                    tex.id(),
+                                                    art,
+                                                    egui::Rect::from_min_max(
+                                                        egui::pos2(0.0, 0.0),
+                                                        egui::pos2(1.0, 1.0),
+                                                    ),
+                                                    Color32::WHITE,
+                                                );
+                                            }
+                                            None => {
+                                                painter.text(
+                                                    art.center(),
+                                                    Align2::CENTER_CENTER,
+                                                    title.chars().next().unwrap_or('♪').to_string(),
+                                                    FontId::proportional(30.0),
+                                                    p.dim,
+                                                );
+                                            }
+                                        }
+                                        let cap = if count > 0 {
+                                            format!("{} · {}", elide(&title, 9), count)
+                                        } else {
+                                            elide(&title, 10)
+                                        };
+                                        painter.text(
+                                            egui::pos2(rect.left(), art.bottom() + 6.0),
+                                            Align2::LEFT_TOP,
+                                            cap,
+                                            FontId::proportional(11.5),
+                                            p.text,
+                                        );
+                                        let id = card["id"]
+                                            .as_str()
+                                            .map(|s| s.to_string())
+                                            .unwrap_or_default();
+                                        let resp = resp.on_hover_text(title.clone());
+                                        if resp.clicked() && !id.is_empty() {
+                                            open = Some(audplugins::HomeQuery::Card {
+                                                kind: kind.to_string(),
+                                                id,
+                                            });
+                                        }
+                                    }
+                                });
+                            });
+                        if let Some(q) = open {
+                            self.open_home_query(q);
+                        }
+                    }
+                    if !section.links.is_empty() {
+                        let mut open: Option<audplugins::HomeQuery> = None;
                         ui.horizontal_wrapped(|ui| {
                             ui.add_space(16.0);
-                            for card in &section.cards {
-                                let title = card["title"].as_str().unwrap_or("歌单");
-                                egui::Frame::NONE
-                                    .fill(p.panel)
-                                    .inner_margin(egui::Margin::symmetric(10, 6))
-                                    .corner_radius(egui::CornerRadius::same(6))
-                                    .show(ui, |ui| {
-                                        ui.label(
-                                            RichText::new(elide(title, 22)).small().color(p.text),
-                                        );
-                                    });
+                            for link in &section.links {
+                                let title = link["title"].as_str().unwrap_or("");
+                                let page = link["page"].as_str().unwrap_or("");
+                                let subt = link["subtitle"].as_str().unwrap_or("");
+                                let btn = egui::Button::new(
+                                    RichText::new(elide(title, 18)).small().color(p.text),
+                                )
+                                .fill(p.panel);
+                                let resp = if subt.is_empty() {
+                                    ui.add(btn)
+                                } else {
+                                    ui.add(btn).on_hover_text(subt.to_string())
+                                };
+                                if resp.clicked() && !page.is_empty() {
+                                    open = Some(audplugins::HomeQuery::Browse(page.to_string()));
+                                }
                             }
                         });
+                        if let Some(q) = open {
+                            self.open_home_query(q);
+                        }
                     }
                     let _ = si;
                 }

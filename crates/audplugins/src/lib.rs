@@ -1478,8 +1478,10 @@ pub struct HomeSection {
     pub title: String,
     /// 可以直接播放的歌曲（已归一成 MusicFree 的字段）
     pub tracks: Vec<Value>,
-    /// 歌单 / 专辑 / 艺人这类卡片，暂只展示标题
+    /// 歌单 / 专辑 / 艺人这类卡片（`kind` 标明点开要调哪个方法）
     pub cards: Vec<Value>,
+    /// 榜单 / 分类这类跳转链接（`{title, subtitle, page}`）
+    pub links: Vec<Value>,
 }
 
 /// 首页头部信息（MyGo 的 Browse 带标题与简介，MusicFree 只有若干段）
@@ -1488,6 +1490,17 @@ pub struct HomePage {
     pub title: String,
     pub subtitle: String,
     pub sections: Vec<HomeSection>,
+}
+
+/// 首页里点击图标后要打开的页面。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HomeQuery {
+    /// 插件主首页
+    Root,
+    /// MyGo `browse({page})`
+    Browse(String),
+    /// MyGo `playlist({id})` / `album({id})` / `artist({id})` / `show({id})`
+    Card { kind: String, id: String },
 }
 
 /// 两种插件标准，界面上统一成一份列表。
@@ -1643,6 +1656,32 @@ impl OnlinePlugin {
         }
     }
 
+    /// 首页里点开一个卡片 / 链接后要看的页面。
+    pub fn query_home(&self, query: &HomeQuery) -> anyhow::Result<HomePage> {
+        match self {
+            OnlinePlugin::Mygo(plugin) => match query {
+                HomeQuery::Root => self.home(),
+                HomeQuery::Browse(page) => {
+                    if !plugin.info.supports("browse") {
+                        anyhow::bail!("{} 没有 browse 接口", plugin.display_name());
+                    }
+                    let value = plugin.call("browse", serde_json::json!({ "page": page }))?;
+                    Ok(mygo_result_page(&value))
+                }
+                HomeQuery::Card { kind, id } => {
+                    if !plugin.info.supports(kind) {
+                        anyhow::bail!("{} 没有 {kind} 接口", plugin.display_name());
+                    }
+                    let value = plugin.call(kind, serde_json::json!({ "id": id }))?;
+                    Ok(mygo_result_page(&value))
+                }
+            },
+            OnlinePlugin::MusicFree(_) => {
+                anyhow::bail!("MusicFree 插件没有可以点开的推荐页");
+            }
+        }
+    }
+
     pub fn path(&self) -> &Path {
         match self {
             OnlinePlugin::MusicFree(p) => &p.info.path,
@@ -1691,25 +1730,77 @@ fn mygo_home_page(value: &Value) -> HomePage {
             .map(|tracks| tracks.iter().map(mygo::track_item).collect())
             .unwrap_or_default();
         let mut cards = Vec::new();
-        if let Some(playlists) = section["playlists"].as_array() {
-            for playlist in playlists {
+        for (field, kind) in [
+            ("playlists", "playlist"),
+            ("albums", "album"),
+            ("artists", "artist"),
+            ("shows", "show"),
+        ] {
+            let Some(list) = section[field].as_array() else {
+                continue;
+            };
+            for item in list {
                 cards.push(serde_json::json!({
-                    "title": playlist["name"].as_str().or(playlist["title"].as_str()).unwrap_or("歌单"),
-                    "cover": playlist["imageUrl"].as_str().or(playlist["coverUrl"].as_str()).unwrap_or(""),
-                    "id": playlist["id"].clone(),
+                    "kind": kind,
+                    "title": item["name"].as_str().or(item["title"].as_str()).unwrap_or(kind),
+                    "cover": item["imageUrl"].as_str().or(item["coverUrl"].as_str()).or(item["cover"].as_str()).unwrap_or(""),
+                    "subtitle": item["description"].as_str().or(item["subtitle"].as_str()).unwrap_or(""),
+                    "count": item["trackCount"].as_u64().or(item["trackCount"].as_i64().map(|n| n as u64)).unwrap_or(0),
+                    "id": item["id"].as_str().map(|s| s.to_string())
+                        .unwrap_or_else(|| item["id"].to_string().trim_matches('"').to_string()),
                 }));
             }
         }
-        if let Some(albums) = section["albums"].as_array() {
-            for album in albums {
-                cards.push(serde_json::json!({
-                    "title": album["name"].as_str().unwrap_or("专辑"),
-                    "cover": album["imageUrl"].as_str().unwrap_or(""),
-                    "id": album["id"].clone(),
-                }));
-            }
-        }
-        page.sections.push(HomeSection { title, tracks, cards });
+        let links: Vec<Value> = section["links"]
+            .as_array()
+            .map(|links| {
+                links
+                    .iter()
+                    .map(|link| {
+                        serde_json::json!({
+                            "title": link["title"].as_str().or(link["name"].as_str()).unwrap_or(""),
+                            "subtitle": link["subtitle"].as_str().or(link["description"].as_str()).unwrap_or(""),
+                            "page": link["page"].as_str().unwrap_or(""),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        page.sections.push(HomeSection { title, tracks, cards, links });
+    }
+    page
+}
+
+/// MyGo 的 `browse()` / `playlist()` / `album()` / `show()` 结果：有的带 sections，有的是单个对象。
+fn mygo_result_page(value: &Value) -> HomePage {
+    if value["sections"].is_array() {
+        return mygo_home_page(value);
+    }
+    let title = value["title"]
+        .as_str()
+        .or(value["name"].as_str())
+        .unwrap_or("")
+        .to_string();
+    let subtitle = value["subtitle"]
+        .as_str()
+        .or(value["description"].as_str())
+        .unwrap_or("")
+        .to_string();
+    let tracks: Vec<Value> = value["tracks"]
+        .as_array()
+        .map(|tracks| tracks.iter().map(mygo::track_item).collect())
+        .unwrap_or_default();
+    let mut page = HomePage {
+        title: title.clone(),
+        subtitle,
+        sections: Vec::new(),
+    };
+    if !tracks.is_empty() {
+        page.sections.push(HomeSection {
+            title,
+            tracks,
+            ..Default::default()
+        });
     }
     page
 }
@@ -1742,7 +1833,7 @@ fn musicfree_home_page(value: &Value) -> HomePage {
         if cards.is_empty() {
             continue;
         }
-        page.sections.push(HomeSection { title, tracks: Vec::new(), cards });
+        page.sections.push(HomeSection { title, tracks: Vec::new(), cards, links: Vec::new() });
     }
     page
 }
