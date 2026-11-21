@@ -159,6 +159,8 @@ pub struct App {
     plugin_delete_clear: bool,
     /// 正在检测的插件：显示名 → 结果接收端（可以同时检测多个）
     plugin_checks: std::collections::HashMap<String, std::sync::mpsc::Receiver<Result<String, String>>>,
+    /// 每个检测的启动时刻，用于给可能卡死的插件兜一个超时
+    plugin_check_started: std::collections::HashMap<String, std::time::Instant>,
     /// 每个插件最近一次检测结果（落盘，重启还在）
     plugin_check_results: std::collections::HashMap<String, audplugins::checks::CheckEntry>,
     /// 后台扫描插件用的接收端（扫描不阻塞界面）
@@ -288,6 +290,7 @@ impl App {
             plugin_delete: None,
             plugin_delete_clear: false,
             plugin_checks: std::collections::HashMap::new(),
+            plugin_check_started: std::collections::HashMap::new(),
             plugin_check_results: audplugins::checks::load(),
             scan_rx: None,
             show_search: false,
@@ -2050,6 +2053,8 @@ impl App {
             };
             let _ = tx.send(msg);
         });
+        self.plugin_check_started
+            .insert(name.clone(), std::time::Instant::now());
         self.plugin_checks.insert(name, rx);
     }
 
@@ -2057,6 +2062,17 @@ impl App {
     fn poll_plugin_check(&mut self) {
         let names: Vec<String> = self.plugin_checks.keys().cloned().collect();
         let mut finished: Vec<(String, Result<String, String>)> = Vec::new();
+        // 兜底：插件内部请求卡死时线程不返回，12 秒后强行认定失败，避免「检测中」永远转圈
+        for name in &names {
+            if let Some(started) = self.plugin_check_started.get(name) {
+                if started.elapsed() > std::time::Duration::from_secs(12) {
+                    finished.push((
+                        name.clone(),
+                        Err("检测超时（12 秒内没有返回结果）".to_string()),
+                    ));
+                }
+            }
+        }
         for name in names {
             let Some(rx) = self.plugin_checks.get(&name) else {
                 continue;
@@ -2071,6 +2087,7 @@ impl App {
         }
         for (name, outcome) in finished {
             self.plugin_checks.remove(&name);
+            self.plugin_check_started.remove(&name);
             match outcome {
                 Ok(detail) => {
                     self.remember_check(&name, true, &detail);
