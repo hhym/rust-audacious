@@ -3487,12 +3487,13 @@ impl App {
                 });
 
                 ui.add_space(12.0);
-                self.sidebar_tab(ui, p, MainTab::Home, self.t("首页", "Home"), None);
-                self.sidebar_tab(ui, p, MainTab::Search, self.t("搜索", "Search"), None);
+                self.sidebar_tab(ui, p, MainTab::Home, "home", self.t("首页", "Home"), None);
+                self.sidebar_tab(ui, p, MainTab::Search, "search", self.t("搜索", "Search"), None);
                 self.sidebar_tab(
                     ui,
                     p,
                     MainTab::Liked,
+                    "heart",
                     self.t("喜欢", "Liked"),
                     Some(self.liked.len()),
                 );
@@ -3500,6 +3501,7 @@ impl App {
                     ui,
                     p,
                     MainTab::Playlists,
+                    "playlist",
                     self.t("待播清单", "Playlists"),
                     Some(Self::playlist_files().len()),
                 );
@@ -3507,10 +3509,11 @@ impl App {
                     ui,
                     p,
                     MainTab::Songs,
+                    "music",
                     self.t("歌曲", "Songs"),
                     Some(self.playlist.len()),
                 );
-                self.sidebar_tab(ui, p, MainTab::Lyrics, self.t("歌词", "Lyrics"), None);
+                self.sidebar_tab(ui, p, MainTab::Lyrics, "file-music", self.t("歌词", "Lyrics"), None);
 
                 ui.add_space(10.0);
                 ui.separator();
@@ -3644,6 +3647,7 @@ impl App {
         ui: &mut egui::Ui,
         p: &Palette,
         tab: MainTab,
+        icon: &str,
         label: &str,
         count: Option<usize>,
     ) {
@@ -3657,8 +3661,14 @@ impl App {
                 .rect_filled(rect, CornerRadius::same(6), p.panel);
         }
         let color = if selected { p.accent } else { p.text };
+        // 左侧图标：和 Tabler 24 网格对齐，18×18 居中在文字高度
+        let icon_rect = egui::Rect::from_center_size(
+            rect.left_center() + vec2(22.0, 0.0),
+            vec2(17.0, 17.0),
+        );
+        tabler(ui.painter(), icon_rect, icon, if selected { p.accent } else { p.dim });
         ui.painter().text(
-            rect.left_center() + vec2(12.0, 0.0),
+            rect.left_center() + vec2(40.0, 0.0),
             Align2::LEFT_CENTER,
             label,
             FontId::proportional(13.5),

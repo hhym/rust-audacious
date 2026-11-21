@@ -226,6 +226,21 @@ fn tabler(painter: &Painter, rect: Rect, icon: TablerIcon, color: Color32, px: f
 
 ---
 
+## 11.1 侧边栏导航（5.32.2 新增）
+
+侧边栏每一项由「图标 + 文字 + 右侧计数」组成，图标画在 `sidebar_tab()` 里，17×17 居中在行高 32 的位置，高度方向与 13.5pt 文字对齐。
+
+| 入口 | 图标名 | Tabler 路径 | 说明 |
+|---|---|---|---|
+| 首页 | `home` | `outline/home` | 房子轮廓 |
+| 搜索 | `search` | `outline/search` | 放大镜 |
+| 喜欢 | `heart` | `outline/heart` | 空心心形；选中态换强调色，不换成 `filled-heart` |
+| 待播清单 | `playlist` | `outline/playlist` | 三条横线 + 播放箭头 |
+| 歌曲 | `music` | `outline/music` | 单个音符，表示曲目 |
+| 歌词 | `file-music` | `outline/file-music` | 带音符的文档，表示歌词文件（LRC） |
+
+配色规则：选中项图标用 `accent`，未选中用 `dim`——和文字、计数保持同一套层级，避免图标比文字更抢眼。
+
 ## 12. 覆盖不到的（继续自绘）
 
 | 控件 | 原因 |
