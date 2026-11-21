@@ -3502,18 +3502,17 @@ impl App {
                     p,
                     MainTab::Playlists,
                     "playlist",
-                    self.t("待播清单", "Playlists"),
+                    self.t("播单", "Playlists"),
                     Some(Self::playlist_files().len()),
                 );
                 self.sidebar_tab(
                     ui,
                     p,
                     MainTab::Songs,
-                    "music",
-                    self.t("歌曲", "Songs"),
+                    "folder",
+                    self.t("乐库", "Library"),
                     Some(self.playlist.len()),
                 );
-                self.sidebar_tab(ui, p, MainTab::Lyrics, "file-music", self.t("歌词", "Lyrics"), None);
 
                 ui.add_space(10.0);
                 ui.separator();
@@ -3666,7 +3665,12 @@ impl App {
             rect.left_center() + vec2(22.0, 0.0),
             vec2(17.0, 17.0),
         );
-        tabler(ui.painter(), icon_rect, icon, if selected { p.accent } else { p.dim });
+        let icon_color = if selected { p.accent } else { p.dim };
+        if icon == "folder" {
+            paint_folder_icon(ui.painter(), icon_rect, icon_color);
+        } else {
+            tabler(ui.painter(), icon_rect, icon, icon_color);
+        }
         ui.painter().text(
             rect.left_center() + vec2(40.0, 0.0),
             Align2::LEFT_CENTER,
@@ -3941,11 +3945,11 @@ impl App {
                 self.t("搜索结果里的 ☆、右键「加入喜欢」都会到这里", "Stars from search land here"),
             ),
             MainTab::Playlists => (
-                self.t("待播清单", "Playlists"),
+                self.t("播单", "Playlists"),
                 self.t("本地保存的 m3u / m3u8", "Saved local playlists"),
             ),
             MainTab::Songs => (
-                self.t("歌曲", "Songs"),
+                self.t("乐库", "Library"),
                 self.t("当前播放队列", "Current queue"),
             ),
             MainTab::Lyrics => (
@@ -4634,7 +4638,7 @@ impl App {
 
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    self.stat_card(ui, p, &format!("{}", self.playlist.len()), self.t("歌曲", "Songs"));
+                    self.stat_card(ui, p, &format!("{}", self.playlist.len()), self.t("乐库", "Library"));
                     self.stat_card(ui, p, &format!("{}", self.liked.len()), self.t("喜欢", "Liked"));
                     self.stat_card(
                         ui,
@@ -5782,6 +5786,29 @@ fn tabler_texture(ctx: &egui::Context, name: &str) -> Option<egui::TextureHandle
     let tex = ctx.load_texture(format!("tabler-{name}"), color, egui::TextureOptions::LINEAR);
     ctx.data_mut(|d| d.insert_temp(id, tex.clone()));
     Some(tex)
+}
+
+/// 侧栏「乐库」用的文件夹图标：Tabler 仓库里没有 24px 的 folder PNG，
+/// 这里按同样的网格手绘——上沿一条短横（夹层）+ 主体圆角轮廓。
+fn paint_folder_icon(painter: &egui::Painter, rect: egui::Rect, color: Color32) {
+    let stroke = egui::Stroke::new(1.4, color);
+    let r = rect.shrink(1.2);
+    let w = r.width();
+    let h = r.height();
+    // 经典文件夹轮廓：左上一个凸起的夹层，右侧是完整主体
+    let tab_w = w * 0.42;
+    let tab_top = r.top() + h * 0.06;
+    let body_top = r.top() + h * 0.30;
+    let points = vec![
+        egui::pos2(r.left(), body_top),
+        egui::pos2(r.left(), tab_top + 1.0),
+        egui::pos2(r.left() + tab_w, tab_top),
+        egui::pos2(r.left() + tab_w + w * 0.10, body_top),
+        egui::pos2(r.right(), body_top),
+        egui::pos2(r.right(), r.bottom()),
+        egui::pos2(r.left(), r.bottom()),
+    ];
+    painter.add(egui::Shape::closed_line(points, stroke));
 }
 
 /// 在 rect 里画一个 Tabler 图标，按 color 上色（图标本身是白的）。

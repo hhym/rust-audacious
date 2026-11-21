@@ -235,9 +235,10 @@ fn tabler(painter: &Painter, rect: Rect, icon: TablerIcon, color: Color32, px: f
 | 首页 | `home` | `outline/home` | 房子轮廓 |
 | 搜索 | `search` | `outline/search` | 放大镜 |
 | 喜欢 | `heart` | `outline/heart` | 空心心形；选中态换强调色，不换成 `filled-heart` |
-| 待播清单 | `playlist` | `outline/playlist` | 三条横线 + 播放箭头 |
-| 歌曲 | `music` | `outline/music` | 单个音符，表示曲目 |
-| 歌词 | `file-music` | `outline/file-music` | 带音符的文档，表示歌词文件（LRC） |
+| 播单 | `playlist` | `outline/playlist` | 三条横线 + 播放箭头 |
+| 乐库 | `folder` | 无（手绘 `paint_folder_icon`） | 左上角夹层 + 主体的经典文件夹轮廓；Tabler 仓库没有 24px 的 folder PNG，按同样网格手绘 |
+
+> 歌词入口已从侧边栏移除（5.32.3），仍可通过底部播放条的「词」按钮或歌词页快捷键进入。
 
 配色规则：选中项图标用 `accent`，未选中用 `dim`——和文字、计数保持同一套层级，避免图标比文字更抢眼。
 
