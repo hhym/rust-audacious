@@ -245,6 +245,13 @@ pub fn friendly_error(raw: &str) -> String {
             "插件源码有语法错误（第 {line} 行）：同名变量在同一作用域里重复声明，该插件在原客户端也会报错"
         );
     }
+    if raw.contains("marker was not found")
+        || raw.contains("unknown JPEG marker")
+        || raw.contains("JPEG marker")
+    {
+        return "登录二维码图片解码失败：插件返回的图片是残缺 / 非常规 JPEG（缺 RST 标记），宿主读不出来。  
+处理办法：关掉窗口重试一次；还不行就把插件目录的 index.js 发我，我换成更宽容的解码再试".into();
+    }
     if raw.contains("unexpected token 'export'") || raw.contains("unexpected token \"export\"") {
         let line = raw
             .split("at line ")

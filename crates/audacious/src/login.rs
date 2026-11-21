@@ -227,11 +227,15 @@ impl LoginState {
                     self.message.clear();
                     self.status = Status::Waiting;
                     self.next_poll = Some(Instant::now() + Duration::from_secs(2));
-                    if let Some(bytes) = qr.image {
+                    if let Some(bytes) = qr.image.clone() {
                         self.image_bytes = Some(bytes.clone());
                         if let Some(tex) = decode_texture(ctx, &bytes) {
                             self.texture = Some(tex);
                         }
+                    }
+                    // 插件给的是一张残缺 JPEG 时，直接用链接自己画二维码，别让登录卡死
+                    if self.texture.is_none() && !self.link.is_empty() {
+                        self.texture = qr_texture(ctx, &self.link);
                     }
                 }
                 Ok(Event::Qr(Err(err))) => {
