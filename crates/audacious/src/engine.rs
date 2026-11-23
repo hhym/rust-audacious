@@ -1091,6 +1091,25 @@ pub fn ffmpeg_install_start() {
         .ok();
 }
 
+/// 从 BtbN 的 zip 里只抽出 `*/bin/ffmpeg.exe`。
+fn extract_ffmpeg(zip_path: &Path, out_path: &Path) -> anyhow::Result<()> {
+    let f = std::fs::File::open(zip_path)?;
+    let mut archive = zip::ZipArchive::new(f)?;
+    let mut wanted = None;
+    for i in 0..archive.len() {
+        let name = archive.by_index(i)?.name().to_string();
+        if name.ends_with("/bin/ffmpeg.exe") || name == "bin/ffmpeg.exe" {
+            wanted = Some(i);
+            break;
+        }
+    }
+    let idx = wanted.ok_or_else(|| anyhow::anyhow!("压缩包里没找到 bin/ffmpeg.exe"))?;
+    let mut entry = archive.by_index(idx)?;
+    let mut out = std::fs::File::create(out_path)?;
+    std::io::copy(&mut entry, &mut out)?;
+    Ok(())
+}
+
 fn install_ffmpeg_impl() -> anyhow::Result<String> {
     // 先摘掉「已卸载」标记：如果系统里本来就有 ffmpeg，直接重新启用，省得下一百多兆。
     if let Some(m) = ffmpeg_disabled_marker() {
@@ -1141,23 +1160,8 @@ fn install_ffmpeg_impl() -> anyhow::Result<String> {
     drop(file);
 
     set_job(|j| j.message = "正在解包…".to_string());
-    let f = std::fs::File::open(&zip_path)?;
-    let mut archive = zip::ZipArchive::new(f)?;
-    let mut wanted = None;
-    for i in 0..archive.len() {
-        let name = archive.by_index(i)?.name().to_string();
-        if name.ends_with("/bin/ffmpeg.exe") || name == "bin/ffmpeg.exe" {
-            wanted = Some(i);
-            break;
-        }
-    }
-    let idx = wanted.ok_or_else(|| anyhow::anyhow!("压缩包里没找到 bin/ffmpeg.exe"))?;
     let out_path = target_dir.join("ffmpeg.exe");
-    {
-        let mut entry = archive.by_index(idx)?;
-        let mut out = std::fs::File::create(&out_path)?;
-        std::io::copy(&mut entry, &mut out)?;
-    }
+    extract_ffmpeg(&zip_path, &out_path)?;
     let _ = std::fs::remove_file(&zip_path);
     if let Some(p) = exe_dir().map(|d| d.join("ffmpeg.disabled")) {
         let _ = std::fs::remove_file(p);
@@ -1264,6 +1268,30 @@ fn path_format(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 安装流程里「只抽出 bin/ffmpeg.exe」这一步要能正确解包。
+    #[test]
+    fn extracts_ffmpeg_from_zip() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join("audacious-rs-ziptest");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let zip_path = dir.join("a.zip");
+        {
+            let f = std::fs::File::create(&zip_path).unwrap();
+            let mut w = zip::ZipWriter::new(f);
+            let opts = zip::write::SimpleFileOptions::default();
+            w.start_file("ffmpeg-master-latest-win64-gpl/bin/ffmpeg.exe", opts).unwrap();
+            w.write_all(b"fake-ffmpeg").unwrap();
+            w.start_file("ffmpeg-master-latest-win64-gpl/bin/ffprobe.exe", opts).unwrap();
+            w.write_all(b"fake-probe").unwrap();
+            w.finish().unwrap();
+        }
+        let out = dir.join("ffmpeg.exe");
+        extract_ffmpeg(&zip_path, &out).unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), b"fake-ffmpeg");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// 造一个 2 秒的 44.1k 立体声正弦 wav 到临时目录。
     fn make_wav(dir: &Path, name: &str, seconds: u32) -> PathBuf {
