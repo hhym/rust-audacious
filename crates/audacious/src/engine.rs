@@ -151,6 +151,13 @@ impl Shared {
             tx,
         };
 
+        cleanup_transcode_cache();
+        if let Some(p) = ffmpeg_path() {
+            log::info!("FFmpeg 解码插件已就绪：{}", p.display());
+        } else {
+            log::info!("FFmpeg 解码插件未启用（未找到 ffmpeg.exe）");
+        }
+
         std::thread::Builder::new()
             .name("audacious-engine".into())
             .spawn(move || {
@@ -346,7 +353,7 @@ struct NullPlayer {
 
 impl NullPlayer {
     fn start(path: PathBuf, spectrum: Arc<Mutex<SpectrumBuffer>>) -> anyhow::Result<NullPlayer> {
-        let mut decoder = SymSource::open(&path)?;
+        let (mut decoder, _played, _ff) = open_with_fallback(&path)?;
         let rate = decoder.sample_rate().max(1);
         let channels = decoder.channels().max(1) as usize;
         let length = decoder
@@ -780,7 +787,7 @@ impl Engine {
             anyhow::bail!("没有音频输出设备");
         };
 
-        let decoder = SymSource::open(path)?;
+        let (decoder, _played, used_ffmpeg) = open_with_fallback(path)?;
         let sample_rate = decoder.sample_rate();
         let length = decoder
             .total_duration()
@@ -800,7 +807,11 @@ impl Engine {
             StreamInfo {
                 sample_rate,
                 length,
-                format: path_format(path),
+                format: if used_ffmpeg {
+                    format!("{} · FFmpeg", path_format(path))
+                } else {
+                    path_format(path)
+                },
             },
         ))
     }
@@ -880,6 +891,154 @@ fn tagged_length(entry: &audcore::Entry, decoder_len: f64) -> f64 {
         Some(v) if v > 0.5 => v,
         _ => decoder_len,
     }
+}
+
+// ---------------------------------------------------------------------------
+// FFmpeg 解码兜底：symphonia 不支持的格式（APE / WMA / DSD / AC3 …）交给 ffmpeg
+// ---------------------------------------------------------------------------
+
+/// 这些扩展名 symphonia 基本解不了，直接走 ffmpeg。
+const FFMPEG_EXTS: &[&str] = &[
+    "ape", "wma", "wmv", "asf", "dts", "ac3", "eac3", "dsf", "dff", "tak", "tta", "amr",
+    "mka", "mpc", "ofr", "xm", "mod", "s3m", "it", "au", "spx", "caf",
+];
+
+/// 找 ffmpeg：环境变量 AUDACIOUS_FFMPEG → 程序目录（含 ffmpeg\\ffmpeg.exe）→ PATH。
+pub fn ffmpeg_path() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("AUDACIOUS_FFMPEG") {
+        let pb = PathBuf::from(p);
+        if pb.is_file() {
+            return Some(pb);
+        }
+    }
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|d| d.to_path_buf()))
+    {
+        for rel in [
+            "ffmpeg.exe",
+            "ffmpeg",
+            "ffmpeg/bin/ffmpeg.exe",
+            "ffmpeg/ffmpeg.exe",
+            "ffmpeg/bin/ffmpeg",
+        ] {
+            let p = dir.join(rel);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    let name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
+    if let Ok(path) = std::env::var("PATH") {
+        for d in std::env::split_paths(&path) {
+            let p = d.join(name);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// 给设置页/插件页显示的一行状态。
+pub fn ffmpeg_status() -> (bool, String) {
+    match ffmpeg_path() {
+        Some(p) => (true, format!("FFmpeg 解码可用 · {}", p.display())),
+        None => (
+            false,
+            "FFmpeg 解码未启用：把 ffmpeg.exe 放到程序目录（或 ffmpeg\\ffmpeg.exe）即可".to_string(),
+        ),
+    }
+}
+
+fn needs_ffmpeg(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| FFMPEG_EXTS.contains(&e.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+fn transcode_cache_dir() -> PathBuf {
+    std::env::temp_dir().join("audacious-rs-ffmpeg")
+}
+
+/// 顺手清掉 7 天前的转码缓存，别把临时目录塞满。
+pub fn cleanup_transcode_cache() {
+    let dir = transcode_cache_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        let Ok(modified) = meta.modified() else { continue };
+        if matches!(now.duration_since(modified), Ok(age) if age > Duration::from_secs(7 * 24 * 3600)) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// 用 ffmpeg 把任意格式转成 PCM WAV，返回缓存文件路径（同一文件只转一次）。
+fn transcode(path: &Path) -> anyhow::Result<PathBuf> {
+    use std::hash::{Hash, Hasher};
+    let bin = ffmpeg_path().ok_or_else(|| anyhow::anyhow!("没有找到 ffmpeg"))?;
+    let meta = std::fs::metadata(path)?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    meta.len().hash(&mut hasher);
+    if let Ok(m) = meta.modified() {
+        if let Ok(d) = m.duration_since(std::time::UNIX_EPOCH) {
+            d.as_secs().hash(&mut hasher);
+        }
+    }
+    let key = format!("{:016x}", hasher.finish());
+
+    let dir = transcode_cache_dir();
+    std::fs::create_dir_all(&dir)?;
+    let out = dir.join(format!("{key}.wav"));
+    if let Ok(m) = std::fs::metadata(&out) {
+        if m.len() > 44 {
+            return Ok(out);
+        }
+    }
+
+    log::info!("FFmpeg 转码：{} → {}", path.display(), out.display());
+    let output = std::process::Command::new(&bin)
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-y")
+        .arg("-i")
+        .arg(path)
+        .arg("-vn")
+        .arg("-map")
+        .arg("0:a:0")
+        .arg("-c:a")
+        .arg("pcm_s16le")
+        .arg(&out)
+        .output()?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        let _ = std::fs::remove_file(&out);
+        anyhow::bail!("ffmpeg 转码失败：{}", err.trim().lines().last().unwrap_or("未知错误"));
+    }
+    Ok(out)
+}
+
+/// 先按原文件开，失败（或格式明显 symphonia 不支持）再用 ffmpeg 转码后开。
+/// 返回（解码源、实际播放路径、是否用了 ffmpeg）
+fn open_with_fallback(path: &Path) -> anyhow::Result<(SymSource, PathBuf, bool)> {
+    if !needs_ffmpeg(path) {
+        match SymSource::open(path) {
+            Ok(src) => return Ok((src, path.to_path_buf(), false)),
+            Err(err) => {
+                log::warn!("symphonia 打不开 {}（{err}），试试 ffmpeg", path.display());
+            }
+        }
+    }
+    let wav = transcode(path)?;
+    let src = SymSource::open(&wav)?;
+    Ok((src, wav, true))
 }
 
 fn path_format(path: &Path) -> String {

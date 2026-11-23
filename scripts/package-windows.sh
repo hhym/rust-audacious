@@ -27,6 +27,27 @@ cp LICENSE "dist/$NAME/"
 cp dist/README.txt "dist/$NAME/" 2>/dev/null || true
 cp -r docs "dist/$NAME/"
 
+# 可选：Mesa 软件 OpenGL 兜底（老显卡用）
+MESA_DIR="${MESA_DIR:-$HOME/.cache/mesa-dist-win}"
+if [ -f "$MESA_DIR/opengl32.dll" ] && [ -f "$MESA_DIR/libgallium_wgl.dll" ]; then
+  mkdir -p "dist/$NAME/mesa"
+  cp "$MESA_DIR/opengl32.dll" "$MESA_DIR/libgallium_wgl.dll" "dist/$NAME/mesa/"
+  cp packaging/mesa-README.txt "dist/$NAME/mesa/README.txt"
+  cp packaging/use-software-gl.bat packaging/restore-hardware-gl.bat "dist/$NAME/"
+else
+  echo "!! 找不到 $MESA_DIR/opengl32.dll，跳过 Mesa 软件渲染目录"
+fi
+
+# 可选：FFmpeg 解码插件（APE/WMA/DSD 等格式）
+FFMPEG_DIR="${FFMPEG_DIR:-$HOME/.cache/ffmpeg-win}"
+if [ -f "$FFMPEG_DIR/ffmpeg.exe" ]; then
+  mkdir -p "dist/$NAME/ffmpeg"
+  cp "$FFMPEG_DIR/ffmpeg.exe" "dist/$NAME/ffmpeg/"
+  cp packaging/ffmpeg-README.txt "dist/$NAME/ffmpeg/README.txt"
+else
+  echo "!! 找不到 $FFMPEG_DIR/ffmpeg.exe，跳过 FFmpeg 解码插件"
+fi
+
 echo "==> 打包"
 (cd dist && zip -q -r "$NAME.zip" "$NAME")
 sha256sum "dist/$NAME.zip" | tee "dist/$NAME.zip.sha256"

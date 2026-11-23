@@ -2187,6 +2187,25 @@ impl App {
                 }
 
                 ui.separator();
+                ui.label(RichText::new(self.t("解码插件", "Decoders")).strong().color(p.accent));
+                let (ff_ok, ff_text) = crate::engine::ffmpeg_status();
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(ff_text)
+                            .small()
+                            .color(if ff_ok { p.accent } else { p.dim }),
+                    );
+                });
+                ui.label(
+                    RichText::new(self.t(
+                        "FFmpeg 负责 APE / WMA / DSD / AC3 这类 symphonia 解不了的格式，找不到 ffmpeg 也不影响常见格式播放。",
+                        "FFmpeg handles APE / WMA / DSD / AC3 that symphonia cannot decode.",
+                    ))
+                    .small()
+                    .color(p.dim),
+                );
+
+                ui.separator();
                 ui.label(
                     RichText::new(format!(
                         "{} {}",

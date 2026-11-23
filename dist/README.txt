@@ -1,4 +1,4 @@
-rust-audacious 5.14.1 · Windows x64 免安装版
+rust-audacious 5.33.4 · Windows x64 免安装版
 =========================================
 
 Audacious 内核的 Rust 重写，单文件可执行，无需安装运行库。
@@ -40,7 +40,15 @@ Audacious 内核的 Rust 重写，单文件可执行，无需安装运行库。
   %APPDATA%\audacious-rs\plugin-storage.json  插件持久化键值
   %LOCALAPPDATA%\audacious-rs\streams\        在线音源缓存
 
-五、说明
+五、解码插件与老显卡
+--------------------
+- FFmpeg 解码插件：ffmpeg\ffmpeg.exe（已随包附带）。APE / WMA / DSD / AC3 /
+  DTS / TAK / TTA / WV / AMR / MPC 等 symphonia 解不了的格式自动走它转码播放。
+  设置窗口「解码插件」会显示是否可用。
+- Mesa 软件渲染（可选）：老显卡（如 Intel HD 2011 版驱动）缺 OpenGL 上下文扩展，
+  双击 use-software-gl.bat 启用 mesa\ 里的 CPU 软件光栅；restore-hardware-gl.bat 还原。
+
+六、说明
 --------
 - 需要 Windows 10 或更高版本（x64）。
 - 解码：symphonia（MP3 / FLAC / Ogg Vorbis / Opus / WAV / AAC-M4A / MKV 等）
@@ -49,7 +57,7 @@ Audacious 内核的 Rust 重写，单文件可执行，无需安装运行库。
 - 首次运行 Windows Defender 可能提示确认，属正常（未签名程序）。
 - 没做 Winamp 皮肤、MPRIS，详见仓库 README 与 PLUGINS.md。
 
-六、许可证
+七、许可证
 ----------
 BSD-2-Clause，与原版 Audacious 一致。界面布局参考 Audacious 的 GTK 版本。
 插件接口标准参考 MusicFreePlugins（https://github.com/hhym/MusicFreePlugins）。

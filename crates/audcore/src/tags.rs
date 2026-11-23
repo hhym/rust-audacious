@@ -94,7 +94,11 @@ fn format_from_ext(path: &Path) -> String {
 
 /// 常见可播放扩展名（与 C 版 input 插件集合对应）。
 pub const AUDIO_EXTENSIONS: &[&str] = &[
+    // symphonia 原生
     "mp3", "flac", "ogg", "oga", "opus", "wav", "m4a", "aac", "mp4", "mka", "webm", "aiff", "aif",
+    // 交给 FFmpeg 兜底解码的格式
+    "ape", "wma", "wv", "dsf", "dff", "ac3", "eac3", "dts", "tak", "tta", "amr", "mpc", "spx",
+    "au", "caf", "xm", "mod", "s3m", "it", "ofr",
 ];
 
 pub fn is_audio_file(path: &Path) -> bool {
