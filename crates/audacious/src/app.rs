@@ -4798,6 +4798,25 @@ impl App {
             return;
         }
         let mut play: Option<usize> = None;
+        ui.horizontal(|ui| {
+            ui.add_space(20.0);
+            ui.label(
+                RichText::new(format!("{} {}", rows.len(), self.t("首", "tracks")))
+                    .small()
+                    .color(p.dim),
+            );
+            if ui
+                .button(self.t("播放全部", "Play all"))
+                .on_hover_text(self.t(
+                    "从这张专辑的第一首开始播整个专辑",
+                    "Play the whole album from the first track",
+                ))
+                .clicked()
+            {
+                play = Some(rows[0].0);
+            }
+        });
+        ui.add_space(4.0);
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -5898,7 +5917,14 @@ impl App {
                 for path in &files {
                     ui.horizontal(|ui| {
                         ui.add_space(8.0);
-                        if ui.button("▶").on_hover_text(self.t("播放", "Play")).clicked() {
+                        if ui
+                            .button(self.t("播放全部", "Play all"))
+                            .on_hover_text(self.t(
+                                "把整个播单追加到当前列表，并从第一首开始播",
+                                "Append the whole playlist and start from track 1",
+                            ))
+                            .clicked()
+                        {
                             load = Some((path.clone(), true));
                         }
                         if ui.button(self.t("载入", "Load")).clicked() {
