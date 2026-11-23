@@ -159,6 +159,8 @@ pub struct App {
     plugin_delete: Option<(String, std::path::PathBuf, Option<String>)>,
     /// 删除时是否连登录数据一起清
     plugin_delete_clear: bool,
+    /// 解码插件（FFmpeg）卸载是否已点过一次、等待确认
+    ffmpeg_confirm_uninstall: bool,
     /// 正在检测的插件：显示名 → 结果接收端（可以同时检测多个）
     plugin_checks: std::collections::HashMap<String, std::sync::mpsc::Receiver<Result<String, String>>>,
     /// 每个检测的启动时刻，用于给可能卡死的插件兜一个超时
@@ -312,6 +314,7 @@ impl App {
             plugins: Vec::new(),
             media_plugins: Vec::new(),
             plugin_delete: None,
+        ffmpeg_confirm_uninstall: false,
             plugin_delete_clear: false,
             plugin_checks: std::collections::HashMap::new(),
             plugin_check_started: std::collections::HashMap::new(),
@@ -2189,17 +2192,64 @@ impl App {
                 ui.separator();
                 ui.label(RichText::new(self.t("解码插件", "Decoders")).strong().color(p.accent));
                 let (ff_ok, ff_text) = crate::engine::ffmpeg_status();
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(ff_text)
-                            .small()
-                            .color(if ff_ok { p.accent } else { p.dim }),
+                let (ff_run, ff_prog, ff_msg) = crate::engine::ffmpeg_job_state();
+                ui.label(
+                    RichText::new(ff_text)
+                        .small()
+                        .color(if ff_ok { p.accent } else { p.dim }),
+                );
+                if ff_run {
+                    ui.add(
+                        egui::ProgressBar::new(ff_prog)
+                            .desired_width(300.0)
+                            .text(RichText::new(ff_msg.clone()).small().color(p.text)),
                     );
+                    ctx.request_repaint_after(std::time::Duration::from_millis(300));
+                } else if !ff_msg.is_empty() {
+                    ui.label(RichText::new(ff_msg.clone()).small().color(p.dim));
+                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(!ff_run && !ff_ok, egui::Button::new(self.t("安装", "Install")))
+                        .on_hover_text(self.t(
+                            "从 GitHub 下载 FFmpeg 并装到程序目录的 ffmpeg\\ 里",
+                            "Download FFmpeg into the program folder",
+                        ))
+                        .clicked()
+                    {
+                        crate::engine::ffmpeg_install_start();
+                    }
+                    if ui
+                        .add_enabled(!ff_run && ff_ok, egui::Button::new(self.t("卸载", "Uninstall")))
+                        .on_hover_text(self.t(
+                            "删除程序目录里的 ffmpeg，可随时重新安装",
+                            "Remove the bundled ffmpeg; reinstall anytime",
+                        ))
+                        .clicked()
+                    {
+                        self.ffmpeg_confirm_uninstall = true;
+                    }
+                    if self.ffmpeg_confirm_uninstall {
+                        if ui
+                            .button(
+                                RichText::new(self.t("确认卸载", "Confirm"))
+                                    .color(egui::Color32::from_rgb(200, 80, 80)),
+                            )
+                            .clicked()
+                        {
+                            let msg = crate::engine::ffmpeg_uninstall();
+                            self.toast = Some((msg, std::time::Instant::now()));
+                            self.ffmpeg_confirm_uninstall = false;
+                        }
+                        if ui.button(self.t("取消", "Cancel")).clicked() {
+                            self.ffmpeg_confirm_uninstall = false;
+                        }
+                    }
                 });
                 ui.label(
                     RichText::new(self.t(
-                        "FFmpeg 负责 APE / WMA / DSD / AC3 这类 symphonia 解不了的格式，找不到 ffmpeg 也不影响常见格式播放。",
-                        "FFmpeg handles APE / WMA / DSD / AC3 that symphonia cannot decode.",
+                        "FFmpeg 负责 APE / WMA / DSD / AC3 这类 symphonia 解不了的格式，也是插件转 HE-AAC 时调用的外部程序；没装也不影响常见格式播放。",
+                        "FFmpeg handles APE / WMA / DSD / AC3 that symphonia cannot decode, and is what plugins call to transcode HE-AAC.",
                     ))
                     .small()
                     .color(p.dim),

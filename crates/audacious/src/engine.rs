@@ -911,8 +911,33 @@ const FFMPEG_EXTS: &[&str] = &[
     "mka", "mpc", "ofr", "xm", "mod", "s3m", "it", "au", "spx", "caf",
 ];
 
+/// 程序目录（exe 所在目录）：随包组件与「卸载」标记都放这里。
+fn exe_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|d| d.to_path_buf()))
+}
+
+/// 应用内置的 ffmpeg 安装位置：`<程序目录>\\ffmpeg\\ffmpeg.exe`。
+pub fn ffmpeg_managed_path() -> Option<PathBuf> {
+    exe_dir().map(|d| d.join("ffmpeg").join(if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" }))
+}
+
+/// 「已卸载」标记：设置页点了卸载后写好，避免又去 PATH 里捡到系统的 ffmpeg。
+fn ffmpeg_disabled_marker() -> Option<PathBuf> {
+    exe_dir().map(|d| d.join("ffmpeg.disabled"))
+}
+
+/// 解码插件当前是否被用户在设置页关掉（卸载）。
+pub fn ffmpeg_disabled() -> bool {
+    ffmpeg_disabled_marker().map(|p| p.is_file()).unwrap_or(false)
+}
+
 /// 找 ffmpeg：环境变量 AUDACIOUS_FFMPEG → 程序目录（含 ffmpeg\\ffmpeg.exe）→ PATH。
 pub fn ffmpeg_path() -> Option<PathBuf> {
+    if ffmpeg_disabled() {
+        return None;
+    }
     if let Ok(p) = std::env::var("AUDACIOUS_FFMPEG") {
         let pb = PathBuf::from(p);
         if pb.is_file() {
@@ -954,9 +979,190 @@ pub fn ffmpeg_status() -> (bool, String) {
         Some(p) => (true, format!("FFmpeg 解码可用 · {}", p.display())),
         None => (
             false,
-            "FFmpeg 解码未启用：把 ffmpeg.exe 放到程序目录（或 ffmpeg\\ffmpeg.exe）即可".to_string(),
+            "FFmpeg 解码插件未安装：点「安装」下载，或把 ffmpeg.exe 放到程序目录".to_string(),
         ),
     }
+}
+
+// ---------------------------------------------------------------------------
+// 解码插件（FFmpeg）的安装 / 卸载
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Default)]
+struct FfmpegJob {
+    running: bool,
+    message: String,
+    done: u64,
+    total: u64,
+}
+
+static FFMPEG_JOB: Mutex<Option<FfmpegJob>> = Mutex::new(None);
+
+fn set_job(f: impl FnOnce(&mut FfmpegJob)) {
+    let mut guard = match FFMPEG_JOB.lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    let job = guard.get_or_insert_with(FfmpegJob::default);
+    f(job);
+}
+
+/// 设置页轮询：(是否正在安装, 进度 0~1, 提示文字)
+pub fn ffmpeg_job_state() -> (bool, f32, String) {
+    let guard = match FFMPEG_JOB.lock() {
+        Ok(g) => g,
+        Err(e) => e.into_inner(),
+    };
+    match guard.as_ref() {
+        Some(j) => {
+            let p = if j.total > 0 { (j.done as f32 / j.total as f32).clamp(0.0, 1.0) } else { 0.0 };
+            (j.running, p, j.message.clone())
+        }
+        None => (false, 0.0, String::new()),
+    }
+}
+
+/// 卸载：删掉程序目录里随包的 ffmpeg，并写「已卸载」标记。
+/// 只删应用自己的目录，绝不动 PATH 里系统装的 ffmpeg。
+pub fn ffmpeg_uninstall() -> String {
+    let Some(path) = ffmpeg_path() else {
+        return "解码插件本来就没装".to_string();
+    };
+    let managed = ffmpeg_managed_path().and_then(|m| m.parent().map(|d| d.to_path_buf()));
+    let inside = managed.as_ref().map(|d| path.starts_with(d)).unwrap_or(false);
+    if inside {
+        if let Some(dir) = &managed {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        if let Some(p) = exe_dir().map(|d| d.join("ffmpeg.exe")) {
+            if p.is_file() {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+        if let Some(m) = ffmpeg_disabled_marker() {
+            let _ = std::fs::write(&m, "disabled");
+        }
+        "已卸载 FFmpeg 解码插件（文件已删除，可随时重新安装）".to_string()
+    } else {
+        if let Some(m) = ffmpeg_disabled_marker() {
+            let _ = std::fs::write(&m, "disabled");
+        }
+        format!("已停用 FFmpeg 解码插件；{} 是系统里的文件，没有删除", path.display())
+    }
+}
+
+/// 安装：从 BtbN 的 FFmpeg-Builds 下载 win64 包，抽出 bin/ffmpeg.exe 放进
+/// `<程序目录>\\ffmpeg\\ffmpeg.exe`。后台线程跑，进度写进 FFMPEG_JOB。
+pub fn ffmpeg_install_start() {
+    {
+        let guard = match FFMPEG_JOB.lock() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
+        if guard.as_ref().map(|j| j.running).unwrap_or(false) {
+            return;
+        }
+    }
+    set_job(|j| {
+        j.running = true;
+        j.done = 0;
+        j.total = 0;
+        j.message = "准备下载…".to_string();
+    });
+    std::thread::Builder::new()
+        .name("ffmpeg-install".into())
+        .spawn(|| {
+            let result = install_ffmpeg_impl();
+            set_job(|j| match result {
+                Ok(msg) => {
+                    j.running = false;
+                    j.message = msg;
+                    j.total = 0;
+                    j.done = 0;
+                }
+                Err(e) => {
+                    j.running = false;
+                    j.message = format!("安装失败：{e}");
+                    j.total = 0;
+                    j.done = 0;
+                }
+            });
+        })
+        .ok();
+}
+
+fn install_ffmpeg_impl() -> anyhow::Result<String> {
+    // 先摘掉「已卸载」标记：如果系统里本来就有 ffmpeg，直接重新启用，省得下一百多兆。
+    if let Some(m) = ffmpeg_disabled_marker() {
+        let _ = std::fs::remove_file(m);
+    }
+    if let Some(p) = ffmpeg_path() {
+        return Ok(format!("已重新启用解码插件 · {}", p.display()));
+    }
+    if !cfg!(windows) {
+        anyhow::bail!("自动安装目前只支持 Windows；Linux/macOS 请用系统包管理器装 ffmpeg");
+    }
+    let dir = exe_dir().ok_or_else(|| anyhow::anyhow!("找不到程序目录"))?;
+    let target_dir = dir.join("ffmpeg");
+    std::fs::create_dir_all(&target_dir)?;
+
+    let url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip";
+    let zip_path = std::env::temp_dir().join("audacious-rs-ffmpeg-install.zip");
+
+    set_job(|j| j.message = "正在下载 FFmpeg…（约 150 MB）".to_string());
+    let mut resp = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(600))
+        .build()?
+        .get(url)
+        .send()?;
+    if !resp.status().is_success() {
+        anyhow::bail!("下载返回 {}", resp.status());
+    }
+    let total = resp.content_length().unwrap_or(0);
+    set_job(|j| j.total = total);
+    let mut file = std::fs::File::create(&zip_path)?;
+    let mut done = 0u64;
+    let mut buf = vec![0u8; 64 * 1024];
+    {
+        use std::io::{Read, Write};
+        loop {
+            let n = resp.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            file.write_all(&buf[..n])?;
+            done += n as u64;
+            set_job(|j| {
+                j.done = done;
+                j.message = format!("正在下载 FFmpeg… {:.1} MB", done as f64 / 1_048_576.0);
+            });
+        }
+    }
+    drop(file);
+
+    set_job(|j| j.message = "正在解包…".to_string());
+    let f = std::fs::File::open(&zip_path)?;
+    let mut archive = zip::ZipArchive::new(f)?;
+    let mut wanted = None;
+    for i in 0..archive.len() {
+        let name = archive.by_index(i)?.name().to_string();
+        if name.ends_with("/bin/ffmpeg.exe") || name == "bin/ffmpeg.exe" {
+            wanted = Some(i);
+            break;
+        }
+    }
+    let idx = wanted.ok_or_else(|| anyhow::anyhow!("压缩包里没找到 bin/ffmpeg.exe"))?;
+    let out_path = target_dir.join("ffmpeg.exe");
+    {
+        let mut entry = archive.by_index(idx)?;
+        let mut out = std::fs::File::create(&out_path)?;
+        std::io::copy(&mut entry, &mut out)?;
+    }
+    let _ = std::fs::remove_file(&zip_path);
+    if let Some(p) = exe_dir().map(|d| d.join("ffmpeg.disabled")) {
+        let _ = std::fs::remove_file(p);
+    }
+    Ok(format!("安装完成 · {}", out_path.display()))
 }
 
 fn needs_ffmpeg(path: &Path) -> bool {
