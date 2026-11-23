@@ -883,6 +883,14 @@ fn local_media_path(path: &Path) -> anyhow::Result<PathBuf> {
     if text.starts_with("http://") || text.starts_with("https://") {
         return audplugins::fetch_to_cache(&text);
     }
+    // 插件调用 ffmpeg 转码后常常返回 file:///C:/... 这类本地地址
+    if let Some(rest) = text.strip_prefix("file://") {
+        let mut p = rest.replace("%20", " ").to_string();
+        if cfg!(windows) && p.starts_with('/') {
+            p.remove(0);
+        }
+        return Ok(PathBuf::from(p));
+    }
     Ok(path.to_path_buf())
 }
 

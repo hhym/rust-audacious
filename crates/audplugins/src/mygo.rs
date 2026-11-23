@@ -1006,6 +1006,12 @@ mod sign_in_tests {
               p.kill();
               return { line };
             }
+            export async function ffmpegCheck() {
+              const p = host.spawn("C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe", ["-version"]);
+              const line = await p.readLine();
+              p.kill();
+              return { line };
+            }
             "#,
         )
         .unwrap();
@@ -1034,6 +1040,18 @@ mod sign_in_tests {
         let prompt = rx.recv().expect("提示要推到宿主");
         assert_eq!(prompt["qr"], "https://example.com/qr-demo");
         assert_eq!(result["name"], "demo-user");
+        crate::set_process_policy(std::path::PathBuf::new(), Vec::new());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn plugin_can_spawn_host_ffmpeg() {
+        let dir = std::env::temp_dir().join(format!("mygo-ffmpeg-{}", std::process::id()));
+        write_demo(&dir);
+        let plugin = MygoPlugin::load(&dir);
+        let result = plugin.call("ffmpegCheck", serde_json::json!({})).expect("ffmpegCheck");
+        let line = result["line"].as_str().unwrap_or("");
+        assert!(line.contains("ffmpeg version"), "{result}");
         crate::set_process_policy(std::path::PathBuf::new(), Vec::new());
         let _ = std::fs::remove_dir_all(dir);
     }

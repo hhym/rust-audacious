@@ -750,7 +750,61 @@ fn static_counter() -> u32 {
     NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
 }
 
+/// 宿主侧的 FFmpeg：插件常写死 `C:\Program Files\ffmpeg\bin\ffmpeg.exe` 这类路径，
+/// 找不到时统一落到程序目录随包附带的 ffmpeg。只认 ffmpeg 这个名字，别的程序不放行。
+fn host_ffmpeg() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("AUDACIOUS_FFMPEG") {
+        let pb = std::path::PathBuf::from(p);
+        if pb.is_file() {
+            return Some(pb);
+        }
+    }
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|d| d.to_path_buf()))
+    {
+        for rel in [
+            "ffmpeg.exe",
+            "ffmpeg/ffmpeg.exe",
+            "ffmpeg/bin/ffmpeg.exe",
+            "ffmpeg",
+            "ffmpeg/bin/ffmpeg",
+        ] {
+            let p = dir.join(rel);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    let name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
+    if let Ok(path) = std::env::var("PATH") {
+        for d in std::env::split_paths(&path) {
+            let p = d.join(name);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
 fn resolve_program(dir: &std::path::Path, patterns: &[String], command: &str) -> Option<std::path::PathBuf> {
+    // ffmpeg 单独放行：插件用它把 HE-AAC 之类转成能播的格式
+    // 插件跑在 Windows 上也可能写成反斜杠路径，这里两种分隔符都切
+    let base = command
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(command)
+        .to_ascii_lowercase();
+    let is_ffmpeg = matches!(base.as_str(), "ffmpeg" | "ffmpeg.exe");
+    if is_ffmpeg {
+        if std::path::Path::new(command).is_file() {
+            return Some(std::path::PathBuf::from(command));
+        }
+        if let Some(p) = host_ffmpeg() {
+            return Some(p);
+        }
+    }
     let looks_like_path = command.contains('/') || command.contains('\\') || command.contains('.');
     if looks_like_path {
         let candidate = if std::path::Path::new(command).is_absolute() {
