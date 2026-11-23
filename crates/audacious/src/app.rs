@@ -195,6 +195,12 @@ pub struct App {
     resolve_rx: Option<
         Receiver<Result<(serde_json::Value, audplugins::MediaSource, bool, usize), String>>,
     >,
+    /// 首页列表勾选的条目（key 见 [`home_track_key`]）
+    home_selected: std::collections::HashSet<String>,
+    /// 批量加入播放列表的待解析队列
+    resolve_queue: std::collections::VecDeque<(serde_json::Value, bool)>,
+    /// 批量加入进度：(已处理, 总数)
+    batch_add: Option<(usize, usize)>,
     /// 主面板当前标签页
     tab: MainTab,
     /// 「喜欢」列表
@@ -335,6 +341,9 @@ impl App {
             search_status: SearchStatus::Idle,
             search_rx: None,
             resolve_rx: None,
+            home_selected: std::collections::HashSet::new(),
+            resolve_queue: std::collections::VecDeque::new(),
+            batch_add: None,
             tab: MainTab::Songs,
             liked: Liked::load(),
             login: crate::login::LoginState::default(),
@@ -550,6 +559,8 @@ impl App {
 
     /// 真正去跑插件 `home()`（可能在网络里卡住，所以放后台）。
     fn load_home(&mut self) {
+        // 换页/刷新时旧勾选已经没有意义
+        self.home_selected.clear();
         let Some(plugin) = self.media_plugins.get(self.search_plugin).cloned() else {
             self.home = None;
             self.home_for = None;
@@ -778,7 +789,7 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.sync();
         self.refresh_cover_accent();
-        self.poll_media_channels();
+        self.poll_media_channels(ctx);
         self.poll_plugin_check();
         if !self.plugin_checks.is_empty() {
             // 检测在后台线程跑，界面要持续重绘才能刷出 spinner 并在完成时立刻弹 toast
@@ -2459,7 +2470,7 @@ impl App {
         audplugins::checks::save(&self.plugin_check_results);
     }
 
-    fn poll_media_channels(&mut self) {
+    fn poll_media_channels(&mut self, ctx: &egui::Context) {
         if let Some(rx) = &self.scan_rx {
             match rx.try_recv() {
                 Ok(plugins) => {
@@ -2540,6 +2551,11 @@ impl App {
                         pl.add(entry)
                     };
                     self.shared.send(Cmd::Refresh);
+                    if !play_now {
+                        if let Some((done, total)) = self.batch_add {
+                            self.batch_add = Some((done.saturating_add(1), total));
+                        }
+                    }
                     if play_now {
                         self.current_online = Some((plugin_index, item.clone()));
                         self.lyric_key.clear();
@@ -2553,6 +2569,15 @@ impl App {
                 }
                 Ok(Err(err)) => {
                     self.resolve_rx = None;
+                    if let Some((done, total)) = self.batch_add.take() {
+                        self.resolve_queue.clear();
+                        let msg = format!(
+                            "{}{done}/{total} {}",
+                            self.t("批量加入中断：已完成 ", "Batch add stopped at "),
+                            self.t("首", "items")
+                        );
+                        self.toast(msg);
+                    }
                     let brief = self.t(
                         "播放地址解析失败：插件拿不到可播放的链接。  
 换一个音源插件，或稍后重试。",
@@ -2563,12 +2588,33 @@ impl App {
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     self.resolve_rx = None;
+                    self.resolve_queue.clear();
+                    self.batch_add = None;
                     self.show_error(
                         self.t("解析中断", "Resolve aborted"),
                         self.t("解析线程意外退出，请重试；反复出现可换个音源。", "Resolver thread exited unexpectedly."),
                     );
                 }
             }
+        }
+
+        // 批量加入队列：上一首解析完自动接下一首，全部完成给一句总结
+        if self.resolve_rx.is_none() {
+            if let Some((item, play_now)) = self.resolve_queue.pop_front() {
+                self.resolve_media(&item, play_now);
+            } else if let Some((done, total)) = self.batch_add {
+                if done >= total {
+                    self.batch_add = None;
+                    self.toast(format!(
+                        "{}{total} {}",
+                        self.t("已加入播放列表 ", "Added to playlist: "),
+                        self.t("首", "items")
+                    ));
+                }
+            }
+        }
+        if self.resolve_rx.is_some() || !self.resolve_queue.is_empty() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(150));
         }
     }
 
@@ -3699,6 +3745,18 @@ fn paint_shirt(
     collar: egui::Color32,
 ) {
     tabler(painter, rect, "palette", color);
+}
+
+/// 首页/搜索条目在勾选集合里的键：优先用插件给的 id，没有就用 标题+艺人。
+fn home_track_key(track: &serde_json::Value) -> String {
+    if let Some(id) = track["id"].as_str() {
+        if !id.is_empty() {
+            return format!("id:{id}");
+        }
+    }
+    let title = track["title"].as_str().unwrap_or("");
+    let artist = track["artist"].as_str().unwrap_or("");
+    format!("t:{title}|{artist}")
 }
 
 /// 由搜索到的歌曲 JSON 和播放地址构造播放列表条目。
@@ -5193,6 +5251,89 @@ impl App {
             return;
         };
 
+        // 首页多选工具条：全选 / 添加到播放列表
+        {
+            let keys: Vec<String> = page
+                .sections
+                .iter()
+                .flat_map(|sec| sec.tracks.iter())
+                .map(home_track_key)
+                .collect();
+            let total = keys.len();
+            let selected = keys.iter().filter(|k| self.home_selected.contains(*k)).count();
+            if total > 0 {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(16.0);
+                    let all = selected == total;
+                    if ui
+                        .small_button(if all {
+                            self.t("取消全选", "Clear all")
+                        } else {
+                            self.t("全选", "Select all")
+                        })
+                        .clicked()
+                    {
+                        if all {
+                            self.home_selected.clear();
+                        } else {
+                            self.home_selected.extend(keys.iter().cloned());
+                        }
+                    }
+                    let busy = self.batch_add.is_some() || !self.resolve_queue.is_empty();
+                    let label = if selected > 0 {
+                        format!("{} ({selected})", self.t("添加到播放列表", "Add to playlist"))
+                    } else {
+                        self.t("添加到播放列表", "Add to playlist").to_string()
+                    };
+                    if ui
+                        .add_enabled(
+                            selected > 0 && !busy,
+                            egui::Button::new(RichText::new(label).small()),
+                        )
+                        .on_hover_text(self.t(
+                            "把勾选的条目逐个取播放地址后加进当前播放列表，排在后面自动继续",
+                            "Resolve each selected item and append to the playlist",
+                        ))
+                        .clicked()
+                    {
+                        let picked: Vec<serde_json::Value> = page
+                            .sections
+                            .iter()
+                            .flat_map(|sec| sec.tracks.iter())
+                            .filter(|tr| self.home_selected.contains(&home_track_key(tr)))
+                            .cloned()
+                            .collect();
+                        let n = picked.len();
+                        self.resolve_queue.extend(picked.into_iter().map(|it| (it, false)));
+                        self.batch_add = Some((0, n));
+                        self.home_selected.clear();
+                        self.toast(format!(
+                            "{}{n} {}",
+                            self.t("已加入队列：", "Queued: "),
+                            self.t("首，正在逐个取播放地址…", "items, resolving one by one…")
+                        ));
+                    }
+                    if let Some((done, n)) = self.batch_add {
+                        ui.spinner();
+                        ui.label(
+                            RichText::new(format!(
+                                "{} {done}/{n}",
+                                self.t("正在加入…", "Adding…")
+                            ))
+                            .small()
+                            .color(p.dim),
+                        );
+                    }
+                    if selected > 0 && !self.home_selected.is_empty() {
+                        if ui.small_button(self.t("清空选择", "Clear selection")).clicked() {
+                            self.home_selected.clear();
+                        }
+                    }
+                });
+            }
+        }
+
         {
             let ui = &mut *ui;
             {
@@ -5234,8 +5375,21 @@ impl App {
                         let artist = track["artist"].as_str().unwrap_or("—").to_string();
                         let mut play = false;
                         let mut add = false;
+                        let key = home_track_key(track);
+                        let mut checked = self.home_selected.contains(&key);
                         ui.horizontal(|ui| {
                             ui.add_space(16.0);
+                            if ui
+                                .checkbox(&mut checked, "")
+                                .on_hover_text(self.t("勾选后批量加入播放列表", "Select for batch add"))
+                                .changed()
+                            {
+                                if checked {
+                                    self.home_selected.insert(key.clone());
+                                } else {
+                                    self.home_selected.remove(&key);
+                                }
+                            }
                             ui.label(
                                 RichText::new(format!("{}. {}", ti + 1, elide(&title, 40)))
                                     .color(p.text),
