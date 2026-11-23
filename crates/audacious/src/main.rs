@@ -14,8 +14,50 @@ mod theme;
 use audcore::Config;
 use engine::{Cmd, Shared};
 
-fn main() -> eframe::Result<()> {
+fn main() {
     init_logging();
+    match run() {
+        Ok(()) => {}
+        Err(err) => {
+            if !try_software_gl(&err) {
+                eprintln!("{err}");
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+/// 建 GL 上下文失败时，如果程序目录带 `mesa\`，自动拷 DLL 并用软件渲染重启一次。
+/// （老 Intel 核显驱动缺 WGL ES 扩展，会直接报 "extension to create ES context with wgl"）
+fn try_software_gl(err: &eframe::Error) -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let Some(dir) = exe.parent() else {
+        return false;
+    };
+    // 已经拷过 mesa 还是失败，就别循环了
+    if dir.join("opengl32.dll").is_file() && dir.join("libgallium_wgl.dll").is_file() {
+        return false;
+    }
+    let mesa = dir.join("mesa");
+    let (gl, gallium) = (mesa.join("opengl32.dll"), mesa.join("libgallium_wgl.dll"));
+    if !gl.is_file() || !gallium.is_file() {
+        return false;
+    }
+    if std::fs::copy(&gl, dir.join("opengl32.dll")).is_err()
+        || std::fs::copy(&gallium, dir.join("libgallium_wgl.dll")).is_err()
+    {
+        return false;
+    }
+    log::warn!("硬件 OpenGL 不可用（{err}），已启用 Mesa 软件渲染并重启");
+    let _ = std::process::Command::new(&exe)
+        .args(std::env::args().skip(1))
+        .spawn();
+    true
+}
+
+fn run() -> eframe::Result<()> {
 
     let config = Config::load();
     let shared = Shared::spawn(config.clone());

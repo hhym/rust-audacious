@@ -3029,7 +3029,23 @@ impl App {
                                     ctx.request_repaint();
                                 }
                                 if ui
-                                    .small_button(self.t("删除", "Delete"))
+                                    .small_button(self.t("安装", "Install"))
+                                    .on_hover_text(self.t(
+                                        "选一个 zip / 插件目录装进来（同一 id 会覆盖，等于更新）",
+                                        "Install a zip or plugin folder; same id is overwritten (update)",
+                                    ))
+                                    .clicked()
+                                {
+                                    let base = self
+                                        .config
+                                        .last_dir
+                                        .clone()
+                                        .or_else(dirs::home_dir)
+                                        .unwrap_or_else(|| PathBuf::from("."));
+                                    self.plugin_pick = Some(PluginPick::new(base, true));
+                                }
+                                if ui
+                                    .small_button(self.t("卸载", "Uninstall"))
                                     .on_hover_text(self.t(
                                         "从插件目录移除这个插件（会先让你确认）",
                                         "Remove this plugin from the plugins folder (asks first)",
@@ -3164,14 +3180,14 @@ impl App {
         if let Some((name, path, id)) = self.plugin_delete.clone() {
             let mut confirmed = false;
             let mut cancelled = false;
-            egui::Window::new(self.t("删除插件", "Delete plugin"))
+            egui::Window::new(self.t("卸载插件", "Uninstall plugin"))
                 .collapsible(false)
                 .resizable(false)
                 .default_width(460.0)
                 .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
                 .show(ctx, |ui| {
                     ui.label(
-                        RichText::new(self.t("要删除这个插件吗？", "Delete this plugin?"))
+                        RichText::new(self.t("要卸载这个插件吗？", "Uninstall this plugin?"))
                             .strong()
                             .color(p.text),
                     );
@@ -3208,7 +3224,7 @@ impl App {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if ui
-                            .button(RichText::new(self.t("删除", "Delete")).color(egui::Color32::from_rgb(200, 80, 80)))
+                            .button(RichText::new(self.t("卸载", "Uninstall")).color(egui::Color32::from_rgb(200, 80, 80)))
                             .clicked()
                         {
                             confirmed = true;
@@ -3234,14 +3250,14 @@ impl App {
                             }
                         }
                         self.toast(&format!(
-                            "已删除插件：{}",
+                            "已卸载插件：{}",
                             name
                         ));
                         self.plugin_delete = None;
                         self.reload_media_plugins();
                     }
                     Err(err) => {
-                        self.toast(&format!("删除失败：{err}"));
+                        self.toast(&format!("卸载失败：{err}"));
                         self.plugin_delete = None;
                     }
                 }
