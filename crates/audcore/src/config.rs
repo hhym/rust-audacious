@@ -86,6 +86,10 @@ impl Theme {
 }
 
 /// 新装环境默认值：手机端直接进经典界面，桌面端保持现代布局
+fn default_eink() -> bool {
+    cfg!(target_os = "android")
+}
+
 fn default_win_order() -> [u8; 3] {
     [0, 1, 2]
 }
@@ -134,7 +138,8 @@ pub struct Config {
     #[serde(default)]
     pub eq_custom: Vec<Vec<f32>>,
     /// 墨水屏模式：纯黑白高对比、加大字号、关动画与频谱
-    #[serde(default)]
+    /// Android 上默认开启（这类设备以墨水屏为主），可在设置里关掉
+    #[serde(default = "default_eink")]
     pub eink: bool,
     /// 经典界面记忆：均衡器 / 歌词 / 列表三扇窗是否展开
     #[serde(default = "default_win_open")]
@@ -179,7 +184,7 @@ impl Default for Config {
             lyric_align: 0,
             lyric_karaoke: false,
             eq_custom: Vec::new(),
-            eink: false,
+            eink: default_eink(),
             classic_eq: true,
             classic_lyrics: true,
             classic_list: true,
