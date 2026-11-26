@@ -25,6 +25,12 @@ import android.media.AudioManager;
  *    转给 native，由引擎暂停/恢复。
  */
 public class MainActivity extends NativeActivity {
+    static {
+        // NativeActivity 是框架直接 dlopen 的，ART 不认这个库的 JNI 符号；
+        // 再用 System.loadLibrary 注册一遍，native 方法才能解析到。
+        System.loadLibrary("audacious_rs");
+    }
+
     private AudioManager audioManager;
     private AudioFocusRequest focusRequest;
     private AudioManager.OnAudioFocusChangeListener focusListener;

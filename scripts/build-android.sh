@@ -5,16 +5,39 @@
 #   cargo build → aapt2 compile/link → 塞 native 库 → zipalign → apksigner
 #
 # 依赖：
-#   rustup target add aarch64-linux-android
+#   rustup target add aarch64-linux-android（32 位再 add armv7-linux-androideabi）
 #   ANDROID_HOME  装好 platforms/android-34、build-tools/34.0.0、ndk/26.x 的 SDK
 #   ANDROID_NDK_HOME  可选，缺省取 $ANDROID_HOME/ndk 下版本号最大的那个
 #   keytool（JDK 17 自带）
 #
 # 用法：./scripts/build-android.sh [--debug]
+#       ANDROID_ABI=armeabi-v7a ./scripts/build-android.sh   # 32 位 ARM 机器
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-TARGET="${ANDROID_TARGET:-aarch64-linux-android}"
+
+# ABI 选择：arm64-v8a（默认）或 armeabi-v7a（老的 32 位机器，比如 8.1 的国产平板/车机）
+ABI="${ANDROID_ABI:-arm64-v8a}"
+case "$ABI" in
+    arm64-v8a)
+        TARGET="${ANDROID_TARGET:-aarch64-linux-android}"
+        CLANG_PREFIX="aarch64-linux-android"
+        LIBDIR="aarch64-linux-android"
+        TRIPLE_ENV="AARCH64_LINUX_ANDROID"
+        OUT_ARCH="arm64"
+        ;;
+    armeabi-v7a)
+        TARGET="${ANDROID_TARGET:-armv7-linux-androideabi}"
+        CLANG_PREFIX="armv7a-linux-androideabi"
+        LIBDIR="arm-linux-androideabi"
+        TRIPLE_ENV="ARMV7_LINUX_ANDROIDEABI"
+        OUT_ARCH="armv7"
+        ;;
+    *)
+        echo "不支持的 ANDROID_ABI：$ABI（可选 arm64-v8a / armeabi-v7a）"
+        exit 1
+        ;;
+esac
 API_LEVEL="${ANDROID_API_LEVEL:-26}"
 PROFILE="release"
 CARGO_PROFILE_FLAG="--release"
@@ -46,28 +69,32 @@ need java "装 JDK 17，并把 bin 放进 PATH"
 
 TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
 [[ -d "$TC" ]] || { echo "NDK 工具链不在 $TC"; exit 1; }
-export CC_aarch64_linux_android="$TC/${TARGET}${API_LEVEL}-clang"
-export CXX_aarch64_linux_android="$TC/${TARGET}${API_LEVEL}-clang++"
-export AR_aarch64_linux_android="$TC/llvm-ar"
-export RANLIB_aarch64_linux_android="$TC/llvm-ranlib"
-export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$CC_aarch64_linux_android"
+CC_BIN="$TC/${CLANG_PREFIX}${API_LEVEL}-clang"
+CXX_BIN="$TC/${CLANG_PREFIX}${API_LEVEL}-clang++"
+export "CC_${TRIPLE_ENV,,}=$CC_BIN"
+export "CXX_${TRIPLE_ENV,,}=$CXX_BIN"
+export "AR_${TRIPLE_ENV,,}=$TC/llvm-ar"
+export "RANLIB_${TRIPLE_ENV,,}=$TC/llvm-ranlib"
+export "CARGO_TARGET_${TRIPLE_ENV}_LINKER=$CC_BIN"
 # Android 15 起 16KB 页设备要求 .so 的 LOAD 段按 16KB 对齐（NDK r26 默认还是 4KB）
-export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-z,max-page-size=16384"
+if [[ "$ABI" == "arm64-v8a" ]]; then
+    export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-Wl,-z,max-page-size=16384"
+fi
 
-echo "==> 构建 $TARGET（$PROFILE）"
+echo "==> 构建 $TARGET / $ABI（$PROFILE）"
 (cd "$ROOT" && cargo build $CARGO_PROFILE_FLAG --target "$TARGET" -p audacious-rs)
 
 SO="$ROOT/target/$TARGET/$PROFILE/libaudacious_rs.so"
 [[ -f "$SO" ]] || { echo "没找到 $SO"; exit 1; }
 
-WORK="$ROOT/target/android-apk"
-rm -rf "$WORK" && mkdir -p "$WORK/lib/arm64-v8a"
+WORK="$ROOT/target/android-apk-$ABI"
+rm -rf "$WORK" && mkdir -p "$WORK/lib/$ABI"
 
-echo "==> 剥离符号并放入 lib/arm64-v8a"
-"$TC/llvm-strip" --strip-unneeded -o "$WORK/lib/arm64-v8a/libaudacious_rs.so" "$SO"
+echo "==> 剥离符号并放入 lib/$ABI"
+"$TC/llvm-strip" --strip-unneeded -o "$WORK/lib/$ABI/libaudacious_rs.so" "$SO"
 # oboe（cpal 的 Android 后端）用共享 C++ 运行库
-LIBCXX="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
-[[ -f "$LIBCXX" ]] && cp "$LIBCXX" "$WORK/lib/arm64-v8a/" && "$TC/llvm-strip" --strip-unneeded "$WORK/lib/arm64-v8a/libc++_shared.so"
+LIBCXX="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/$LIBDIR/libc++_shared.so"
+[[ -f "$LIBCXX" ]] && cp "$LIBCXX" "$WORK/lib/$ABI/" && "$TC/llvm-strip" --strip-unneeded "$WORK/lib/$ABI/libc++_shared.so"
 
 echo "==> aapt2 编译资源"
 "$BUILD_TOOLS/aapt2" compile --dir "$ROOT/android/res" -o "$WORK/res.zip"
@@ -104,7 +131,7 @@ fi
 "$BUILD_TOOLS/apksigner" verify --print-certs "$WORK/audacious-rs.apk" | head -3
 
 VER="$(grep -m1 '^version = ' "$ROOT/Cargo.toml" | cut -d'"' -f2)"
-OUT="$ROOT/dist/rust-audacious-${VER}-android-arm64.apk"
+OUT="$ROOT/dist/rust-audacious-${VER}-android-${OUT_ARCH}.apk"
 cp "$WORK/audacious-rs.apk" "$OUT"
 echo "==> APK: $OUT"
 ls -lh "$OUT"

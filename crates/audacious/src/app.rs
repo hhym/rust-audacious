@@ -501,6 +501,12 @@ impl App {
     fn classic_view(&mut self, ui: &mut egui::Ui) {
         use crate::skin::{MAIN_H, MAIN_W};
 
+        // 手机是全面屏铺到底的，状态栏会压在标题条上，先让出一点高度
+        #[cfg(target_os = "android")]
+        {
+            ui.add_space(26.0);
+        }
+
         if self.classic_shade {
             self.classic_shade_view(ui);
             return;
@@ -514,6 +520,8 @@ impl App {
         };
         let chrome = crate::skin::Chrome::new(self.skin.as_ref(), self.config.accent);
         let pled = chrome.pledit();
+        // 没装 .wsz 时靠几何图形撑起界面，这里再补一层文字/图标，避免只有色块看不清
+        let plain = self.skin.is_none();
         let scale = (ui.available_width() / MAIN_W).max(0.5);
         let pos = self.state.position;
         let len = self.state.length;
@@ -527,16 +535,7 @@ impl App {
         let shared = self.shared.clone();
         let mut actions: Vec<ClassicAction> = Vec::new();
 
-        // 横屏（宽高比 > 1.15）走两列：左列主窗 + 均衡器，右列歌词 + 列表
-        let avail = ui.available_size();
-        let wide = avail.x / avail.y.max(1.0) > 1.15;
-        let scale = if wide {
-            (avail.x / (MAIN_W * 2.0)).max(0.5)
-        } else {
-            (avail.x / MAIN_W).max(0.5)
-        };
-
-        // 竖向堆叠：主窗口 → 均衡器 → 播放列表，剩下的高度给列表
+        // 先把各窗口的「设计高度」（275×116 网格下的单位）算出来，再按宽高一起定缩放
         let eq_h = if self.show_eq {
             if self.config.classic_fold[0] { 14.0 } else { 116.0 }
         } else {
@@ -547,12 +546,32 @@ impl App {
         } else {
             0.0
         };
+
+        // 横屏（宽高比 > 1.15）走两列：左列主窗 + 均衡器，右列歌词 + 列表
+        let avail = ui.available_size();
+        let wide = avail.x / avail.y.max(1.0) > 1.15;
+        // 缩放同时受宽度和高度约束：列表最少留 96px 高，否则竖屏会被裁掉底栏。
+        // 安卓的状态栏/导航栏浮在画面上，可用高度要自己扣掉，不然底栏被压住看不见。
+        let min_pl: f32 = 96.0;
+        #[cfg(target_os = "android")]
+        let budget_h: f32 = (avail.y - 56.0).max(240.0);
+        #[cfg(not(target_os = "android"))]
+        let budget_h: f32 = avail.y;
+        let scale = if wide {
+            let by_w = avail.x / (MAIN_W * 2.0);
+            let by_h = budget_h / (ly_h + min_pl).max(1.0);
+            by_w.min(by_h).max(0.35)
+        } else {
+            let by_w = avail.x / MAIN_W;
+            let by_h = budget_h / (MAIN_H + eq_h + ly_h + min_pl).max(1.0);
+            by_w.min(by_h).max(0.35)
+        };
         let pl_h = if self.show_playlist && self.config.classic_fold[2] {
             20.0
         } else if wide {
-            ((avail.y / scale) - ly_h).clamp(120.0, 520.0)
+            ((budget_h / scale) - ly_h).clamp(96.0, 520.0)
         } else {
-            ((avail.y / scale) - MAIN_H - eq_h - ly_h).clamp(120.0, 420.0)
+            ((budget_h / scale) - MAIN_H - eq_h - ly_h).clamp(96.0, 420.0)
         };
         let total_w = if wide { MAIN_W * 2.0 } else { MAIN_W };
         let total_h = if wide {
@@ -1511,6 +1530,149 @@ impl App {
         );
         if gear_resp.clicked() {
             actions.push(ClassicAction::OpenSettings);
+        }
+
+
+        // ---- 无皮肤时的可读性补丁：标题、按钮图标、EQ 刻度与列表按钮文字 ----
+        let place_eq = |x: f32, y: f32, w: f32, h: f32| {
+            egui::Rect::from_min_size(eq_rect.min + egui::vec2(x, y) * scale, egui::vec2(w, h) * scale)
+        };
+        if plain {
+            let white = egui::Color32::WHITE;
+            let accent = egui::Color32::from_rgb(
+                self.config.accent[0],
+                self.config.accent[1],
+                self.config.accent[2],
+            );
+            let gly = |r: egui::Rect, text: &str, size: f32, color: egui::Color32| {
+                painter.text(
+                    r.center(),
+                    egui::Align2::CENTER_CENTER,
+                    text,
+                    egui::FontId::proportional(size),
+                    color,
+                );
+            };
+            // 主窗：外框 + 标题
+            painter.rect_stroke(
+                main_rect,
+                egui::CornerRadius::same(2),
+                egui::Stroke::new(1.0, accent),
+                egui::StrokeKind::Inside,
+            );
+            painter.text(
+                main_rect.min + egui::vec2(6.0, 4.0) * scale,
+                egui::Align2::LEFT_TOP,
+                "AUDACIOUS-RS",
+                egui::FontId::proportional((3.2 * scale).clamp(9.0, 14.0)),
+                white,
+            );
+            // 五键图标
+            let icon_size = (7.0 * scale).clamp(12.0, 26.0);
+            gly(place(16.0, 88.0, 23.0, 18.0), "⏮", icon_size, white);
+            gly(place(39.0, 88.0, 23.0, 18.0), "▶", icon_size, white);
+            gly(place(62.0, 88.0, 23.0, 18.0), "❚❚", icon_size, white);
+            gly(place(85.0, 88.0, 23.0, 18.0), "■", icon_size, white);
+            gly(place(108.0, 88.0, 23.0, 18.0), "⏭", icon_size, white);
+            gly(place(136.0, 89.0, 22.0, 16.0), "⏏", icon_size, white);
+            // 曲名 / 格式行：位图字模那点高度塞系统字体会被裁成条纹，这里重画一遍
+            let green = egui::Color32::from_rgb(0x00, 0xFF, 0x00);
+            let marq = egui::Rect::from_min_size(
+                main_rect.min + egui::vec2(111.0, 22.0) * scale,
+                egui::vec2(154.0, 10.0) * scale,
+            );
+            painter.rect_filled(marq, 0.0, egui::Color32::from_rgb(24, 16, 6));
+            painter.with_clip_rect(marq).text(
+                marq.min + egui::vec2(1.0, 2.0),
+                egui::Align2::LEFT_TOP,
+                &title,
+                egui::FontId::proportional((3.8 * scale).clamp(10.0, 18.0)),
+                green,
+            );
+            let info = format!(
+                "{} {}kHz",
+                if self.state.format.is_empty() { "MP3" } else { &self.state.format },
+                self.state.sample_rate / 1000
+            );
+            let info_r = egui::Rect::from_min_size(
+                main_rect.min + egui::vec2(111.0, 42.0) * scale,
+                egui::vec2(150.0, 10.0) * scale,
+            );
+            painter.rect_filled(info_r, 0.0, egui::Color32::from_rgb(24, 16, 6));
+            painter.with_clip_rect(info_r).text(
+                info_r.min + egui::vec2(1.0, 2.0),
+                egui::Align2::LEFT_TOP,
+                &info,
+                egui::FontId::proportional((3.0 * scale).clamp(9.0, 14.0)),
+                green,
+            );
+
+            // EQ：外框 + 标题 + 刻度 + 频段 + 按钮文字
+            if self.show_eq {
+                painter.rect_stroke(
+                    eq_rect,
+                    egui::CornerRadius::same(2),
+                    egui::Stroke::new(1.0, accent),
+                    egui::StrokeKind::Inside,
+                );
+                painter.text(
+                    eq_rect.min + egui::vec2(6.0, 4.0) * scale,
+                    egui::Align2::LEFT_TOP,
+                    "EQUALIZER",
+                    egui::FontId::proportional((3.2 * scale).clamp(9.0, 14.0)),
+                    white,
+                );
+                let small = (2.9 * scale).clamp(8.0, 12.0);
+                for (y, label) in [(36.0, "+12"), (64.0, "0"), (95.0, "-12")] {
+                    painter.text(
+                        eq_rect.min + egui::vec2(45.0, y) * scale,
+                        egui::Align2::LEFT_BOTTOM,
+                        label,
+                        egui::FontId::proportional(small),
+                        white.gamma_multiply(0.8),
+                    );
+                }
+                for (i, label) in ["60", "170", "310", "600", "1k", "3k", "6k", "12k", "14k", "16k"]
+                    .iter()
+                    .enumerate()
+                {
+                    painter.text(
+                        eq_rect.min + egui::vec2(78.0 + 18.0 * i as f32 + 5.5, 104.0) * scale,
+                        egui::Align2::CENTER_CENTER,
+                        *label,
+                        egui::FontId::proportional(small),
+                        white.gamma_multiply(0.7),
+                    );
+                }
+                gly(place_eq(14.0, 18.0, 26.0, 12.0), "ON", small, white);
+                gly(place_eq(40.0, 18.0, 32.0, 12.0), "AUTO", small, white);
+                gly(place_eq(217.0, 18.0, 44.0, 12.0), "PRESETS", small, white);
+            }
+
+            // 播放列表：按钮文字
+            if self.show_playlist && !self.config.classic_fold[2] {
+                let bsmall = (3.0 * scale).clamp(8.0, 12.0);
+                let by = pl_rect.min.y + (pl_rect.height() / scale - 38.0) * scale;
+                for (x, label) in [
+                    (14.0, "ADD"),
+                    (43.0, "REM"),
+                    (72.0, "SEL"),
+                    (101.0, "MISC"),
+                    (MAIN_W - 44.0, "LIST"),
+                ] {
+                    let r = egui::Rect::from_min_size(
+                        egui::pos2(pl_rect.min.x + x * scale, by + 8.0 * scale),
+                        egui::vec2(22.0, 18.0) * scale,
+                    );
+                    painter.text(
+                        r.center(),
+                        egui::Align2::CENTER_CENTER,
+                        label,
+                        egui::FontId::proportional(bsmall),
+                        white,
+                    );
+                }
+            }
         }
 
         drop(painter);
