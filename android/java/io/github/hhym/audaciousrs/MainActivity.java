@@ -46,9 +46,49 @@ public class MainActivity extends NativeActivity {
     private static final int ACT_PAUSE = 5;
     private static final int ACT_STOP = 6;
 
+    /** 状态栏 / 导航栏占位（像素），由原生 UI 用来给内容让位。 */
+    private static int insetTop = 0;
+    private static int insetBottom = 0;
+
+    public static int getInsetTopPx() {
+        return insetTop;
+    }
+
+    public static int getInsetBottomPx() {
+        return insetBottom;
+    }
+
+    /** 监听系统窗口内边距变化，把状态栏/导航栏高度转给原生层。 */
+    private void watchInsets() {
+        try {
+            final android.view.View decor = getWindow().getDecorView();
+            decor.setOnApplyWindowInsetsListener(new android.view.View.OnApplyWindowInsetsListener() {
+                @Override
+                public android.view.WindowInsets onApplyWindowInsets(android.view.View v, android.view.WindowInsets insets) {
+                    int top = 0;
+                    int bottom = 0;
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                        top = insets.getSystemWindowInsetTop();
+                        bottom = insets.getSystemWindowInsetBottom();
+                    }
+                    if (top != insetTop || bottom != insetBottom) {
+                        insetTop = top;
+                        insetBottom = bottom;
+                        nativeSetInsets(top, bottom);
+                    }
+                    return insets;
+                }
+            });
+            decor.requestApplyInsets();
+        } catch (Throwable t) {
+            android.util.Log.w("AudaciousRS", "读取窗口内边距失败: " + t);
+        }
+    }
+
     @Override
     protected void onCreate(android.os.Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        watchInsets();
         try {
             notifications = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -242,4 +282,7 @@ public class MainActivity extends NativeActivity {
     private static native void nativeOnMediaAction(int action);
 
     private static native void nativeOnMediaSeek(double seconds);
+
+    /** 状态栏/导航栏内边距上报（像素）。 */
+    private static native void nativeSetInsets(int top, int bottom);
 }

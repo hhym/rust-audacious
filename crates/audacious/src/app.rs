@@ -4784,6 +4784,23 @@ fn remote_entry(item: &serde_json::Value, url: &str) -> audcore::Entry {
     }
 }
 
+/// 系统状态栏 / 导航栏占位（egui 点）。桌面版恒为 0，Android 由 Java 上报。
+fn system_insets(ctx: &egui::Context) -> (f32, f32) {
+    #[cfg(target_os = "android")]
+    {
+        let ppp = ctx.pixels_per_point();
+        (
+            crate::android::inset_top_pt(ppp),
+            crate::android::inset_bottom_pt(ppp),
+        )
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = ctx;
+        (0.0, 0.0)
+    }
+}
+
 /// 是否走手机布局：手动打开，或窗口窄到手机尺寸。
 fn mobile_mode(ctx: &egui::Context, cfg: &audcore::Config) -> bool {
     cfg.mobile_layout || ctx.screen_rect().width() < 700.0
@@ -4792,10 +4809,13 @@ fn mobile_mode(ctx: &egui::Context, cfg: &audcore::Config) -> bool {
 impl App {
     /// 手机布局的命令条：加文件 / 加目录 / 设置 / 插件，替掉桌面版菜单栏和工具栏。
     fn mobile_command_bar(&mut self, ctx: &egui::Context, p: &Palette) {
+        let top = system_insets(ctx).0;
         egui::TopBottomPanel::top("mobile_cmd")
-            .exact_height(if self.config.eink { 56.0 } else { 44.0 })
+            .exact_height(if self.config.eink { 56.0 } else { 44.0 } + top)
             .frame(egui::Frame::NONE.fill(p.panel_alt))
             .show(ctx, |ui| {
+                // 给系统状态栏让位
+                ui.add_space(top);
                 egui::ScrollArea::horizontal()
                     .id_salt("mobile-cmd-scroll")
                     .show(ui, |ui| {
@@ -4845,8 +4865,9 @@ impl App {
 
     /// 手机播放条：封面 + 歌名 + 三个按钮，进度条铺满底部。
     fn mobile_play_bar(&mut self, ctx: &egui::Context, p: &Palette) {
+        let bottom = system_insets(ctx).1;
         egui::TopBottomPanel::bottom("mobile_play")
-            .exact_height(if self.config.eink { 124.0 } else { 100.0 })
+            .exact_height(if self.config.eink { 124.0 } else { 100.0 } + bottom)
             .frame(egui::Frame::NONE.fill(p.panel_alt))
             .show(ctx, |ui| {
                 ui.add_space(4.0);

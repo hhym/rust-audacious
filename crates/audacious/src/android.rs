@@ -11,7 +11,7 @@
 
 use std::os::unix::io::FromRawFd;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -195,6 +195,43 @@ pub extern "system" fn Java_io_github_hhym_audaciousrs_MainActivity_nativeOnMedi
             shared.send(Cmd::Seek(seconds));
         }
     }
+}
+
+/// 状态栏 / 导航栏内边距（物理像素），由 Java 的 `OnApplyWindowInsetsListener` 上报。
+static INSET_TOP: AtomicU32 = AtomicU32::new(0);
+static INSET_BOTTOM: AtomicU32 = AtomicU32::new(0);
+
+/// 顶部内边距（egui 点）。桌面版恒为 0。
+pub fn inset_top_pt(pixels_per_point: f32) -> f32 {
+    let px = INSET_TOP.load(std::sync::atomic::Ordering::Relaxed) as f32;
+    if pixels_per_point > 0.0 {
+        px / pixels_per_point
+    } else {
+        px
+    }
+}
+
+/// 底部内边距（egui 点）。
+pub fn inset_bottom_pt(pixels_per_point: f32) -> f32 {
+    let px = INSET_BOTTOM.load(std::sync::atomic::Ordering::Relaxed) as f32;
+    if pixels_per_point > 0.0 {
+        px / pixels_per_point
+    } else {
+        px
+    }
+}
+
+/// Java 侧 `MainActivity.nativeSetInsets` 的实现。
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "system" fn Java_io_github_hhym_audaciousrs_MainActivity_nativeSetInsets(
+    _env: Env,
+    _class: JClass,
+    top: jint,
+    bottom: jint,
+) {
+    INSET_TOP.store(top.max(0) as u32, std::sync::atomic::Ordering::Relaxed);
+    INSET_BOTTOM.store(bottom.max(0) as u32, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// 停止播放时把通知收掉。
