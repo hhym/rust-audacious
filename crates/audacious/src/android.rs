@@ -354,6 +354,62 @@ pub fn open_audio_picker() -> bool {
     launch_picker(false)
 }
 
+/// 外部存储里用户最可能放插件的位置。内置浏览器从这里起步，
+/// 免得落在应用沙箱（空目录）里，看起来像「打不开」。
+pub fn storage_root() -> PathBuf {
+    for p in ["/storage/emulated/0/Download", "/storage/emulated/0", "/sdcard"] {
+        let path = PathBuf::from(p);
+        if path.is_dir() {
+            return path;
+        }
+    }
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// 插件选择：`zip = true` 挑 .zip 压缩包，`false` 挑插件目录。
+/// 返回 false 表示这台机器没有文档选择器，调用方改用内置浏览器。
+pub fn open_plugin_pick(zip: bool) -> bool {
+    let Some(app) = APP.get() else {
+        return false;
+    };
+    let res = with_activity(app, |env, activity| {
+        let cls = env.get_object_class(activity)?;
+        env.call_static_method(
+            cls,
+            "openPluginPick",
+            "(I)Z",
+            &[JValue::Int(if zip { 0 } else { 1 })],
+        )?
+        .z()
+    });
+    matches!(res, Ok(true))
+}
+
+/// Java 侧 `MainActivity.nativePluginReady`：系统选择器收回的路径（zip 已拷到缓存目录，
+/// 目录是 SAF tree 转出来的真实路径）。
+static PLUGIN_READY: Mutex<Option<String>> = Mutex::new(None);
+
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "system" fn Java_io_github_hhym_audaciousrs_MainActivity_nativePluginReady(
+    mut env: Env,
+    _class: JClass,
+    path: JString,
+) {
+    if let Ok(s) = env.get_string(&path) {
+        let text: String = s.into();
+        log::info!("插件选择结果：{text}");
+        if let Ok(mut slot) = PLUGIN_READY.lock() {
+            *slot = Some(text);
+        }
+    }
+}
+
+/// UI 每帧查一次，拿到就装。
+pub fn take_plugin_ready() -> Option<String> {
+    PLUGIN_READY.lock().ok().and_then(|mut g| g.take())
+}
+
 /// 打开系统文件选择器（单选 .wsz 皮肤）。
 pub fn open_skin_picker() -> bool {
     launch_picker(true)

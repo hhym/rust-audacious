@@ -93,6 +93,102 @@ public class MainActivity extends NativeActivity {
         return true;
     }
 
+    /** 插件选择：mode 0 = 选 .zip 压缩包，mode 1 = 选插件目录。 */
+    public static boolean openPluginPick(final int mode) {
+        final MainActivity self = sInstance;
+        if (self == null) {
+            return false;
+        }
+        try {
+            Intent probe;
+            if (mode == 0) {
+                probe = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                probe.addCategory(Intent.CATEGORY_OPENABLE);
+                probe.setType("application/zip");
+            } else {
+                probe = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+            }
+            if (probe.resolveActivity(self.getPackageManager()) == null) {
+                android.util.Log.w("AudaciousRS", "本机没有插件选择器，退回内置浏览器");
+                return false;
+            }
+        } catch (Throwable t) {
+            android.util.Log.w("AudaciousRS", "探测插件选择器失败: " + t);
+            return false;
+        }
+        self.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Intent i;
+                    if (mode == 0) {
+                        i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                        i.addCategory(Intent.CATEGORY_OPENABLE);
+                        i.setType("application/zip");
+                        i.putExtra(Intent.EXTRA_MIME_TYPES,
+                                new String[]{ "application/zip", "application/x-zip-compressed", "*/*" });
+                    } else {
+                        i = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+                    }
+                    i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    self.startActivityForResult(i, mode == 0 ? 7003 : 7004);
+                } catch (Throwable t) {
+                    android.util.Log.e("AudaciousRS", "插件选择器拉起失败: " + t);
+                }
+            }
+        });
+        return true;
+    }
+
+    /** SAF 的 content:// uri 读流拷成真实文件，给 native 侧当路径用。 */
+    private static String copyUriToCache(android.net.Uri uri, String name) {
+        final MainActivity self = sInstance;
+        if (self == null || uri == null) {
+            return null;
+        }
+        java.io.InputStream in = null;
+        java.io.FileOutputStream out = null;
+        try {
+            in = self.getContentResolver().openInputStream(uri);
+            if (in == null) {
+                return null;
+            }
+            java.io.File f = new java.io.File(self.getCacheDir(), name);
+            out = new java.io.FileOutputStream(f);
+            byte[] buf = new byte[65536];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                out.write(buf, 0, n);
+            }
+            out.flush();
+            return f.getAbsolutePath();
+        } catch (Throwable t) {
+            android.util.Log.e("AudaciousRS", "拷贝选择结果失败: " + t);
+            return null;
+        } finally {
+            try { if (out != null) out.close(); } catch (Throwable ignored) {}
+            try { if (in != null) in.close(); } catch (Throwable ignored) {}
+        }
+    }
+
+    /** SAF 的 tree uri（content://…/tree/primary%3ADownload%2Fxx）还原成真实路径。 */
+    private static String treeUriToPath(android.net.Uri uri) {
+        try {
+            String id = android.provider.DocumentsContract.getTreeDocumentId(uri);
+            if (id == null) {
+                return null;
+            }
+            int colon = id.indexOf(':');
+            String vol = colon > 0 ? id.substring(0, colon) : "primary";
+            String rel = colon > 0 ? id.substring(colon + 1) : id;
+            String base = "primary".equals(vol) ? "/storage/emulated/0/" : "/storage/" + vol + "/";
+            return base + rel;
+        } catch (Throwable t) {
+            android.util.Log.w("AudaciousRS", "tree uri 转路径失败: " + t);
+            return null;
+        }
+    }
+
     /** 这台机器上没有 DocumentsUI（SAF 选择器）时，改用 MediaStore 扫描本地音乐。 */
     public static String[] scanAudioPaths() {
         final MainActivity self = sInstance;
@@ -323,6 +419,31 @@ public class MainActivity extends NativeActivity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == 7003 || requestCode == 7004) {
+            if (resultCode == RESULT_OK && data != null && data.getData() != null) {
+                final android.net.Uri uri = data.getData();
+                if (requestCode == 7003) {
+                    // 压缩包可能几十 MB，放到后台线程拷
+                    new Thread(new Runnable() {
+                        @Override
+                        public void run() {
+                            String path = copyUriToCache(uri, "plugin-pick.zip");
+                            if (path != null) {
+                                nativePluginReady(path);
+                            } else {
+                                android.util.Log.e("AudaciousRS", "插件压缩包拷贝失败");
+                            }
+                        }
+                    }).start();
+                } else {
+                    String path = treeUriToPath(uri);
+                    if (path != null) {
+                        nativePluginReady(path);
+                    }
+                }
+            }
+            return;
+        }
         nativeOnActivityResult(requestCode, resultCode, data);
     }
 
@@ -379,4 +500,7 @@ public class MainActivity extends NativeActivity {
 
     /** 状态栏/导航栏内边距上报（像素）。 */
     private static native void nativeSetInsets(int top, int bottom);
+
+    /** 插件选择结果（zip 缓存路径或插件目录）回传。 */
+    private static native void nativePluginReady(String path);
 }

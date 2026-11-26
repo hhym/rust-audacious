@@ -2200,6 +2200,25 @@ impl eframe::App for App {
             }
         }
 
+        // 系统文件选择器收回的插件包 / 目录
+        #[cfg(target_os = "android")]
+        if let Some(path) = crate::android::take_plugin_ready() {
+            match audplugins::install::install_from_path(std::path::Path::new(&path)) {
+                Ok(plugin) => {
+                    self.plugin_install_msg = Some((
+                        true,
+                        format!("已安装《{}》到 {}", plugin.name, plugin.dir.display()),
+                    ));
+                    self.reload_media_plugins();
+                    self.show_plugins = true;
+                }
+                Err(err) => {
+                    self.plugin_install_msg = Some((false, format!("安装失败：{err}")));
+                    self.show_plugins = true;
+                }
+            }
+        }
+
         // 经典皮肤整屏模式：只画 Winamp 风格窗口
         if self.classic_active() {
             #[cfg(target_os = "android")]
@@ -2722,6 +2741,7 @@ impl App {
                         "Playlist is empty — drop files here or use Add files",
                     )
                 };
+                ui.set_max_width((ui.available_width() - 24.0).max(120.0));
                 ui.add(egui::Label::new(RichText::new(hint).color(p.dim)).wrap());
             });
             return;
@@ -4280,13 +4300,25 @@ impl App {
                     self.reload_media_plugins();
                 }
                 if open_zip || open_folder {
-                    let base = self
-                        .config
-                        .last_dir
-                        .clone()
-                        .or_else(dirs::home_dir)
-                        .unwrap_or_else(|| PathBuf::from("."));
-                    self.plugin_pick = Some(PluginPick::new(base, open_zip));
+                    #[cfg(target_os = "android")]
+                    {
+                        // 手机上直接用系统选择器：zip 走 ACTION_OPEN_DOCUMENT，
+                        // 目录走 ACTION_OPEN_DOCUMENT_TREE；没有 DocumentsUI 才退回内置浏览器。
+                        if !crate::android::open_plugin_pick(open_zip) {
+                            let base = crate::android::storage_root();
+                            self.plugin_pick = Some(PluginPick::new(base, open_zip));
+                        }
+                    }
+                    #[cfg(not(target_os = "android"))]
+                    {
+                        let base = self
+                            .config
+                            .last_dir
+                            .clone()
+                            .or_else(dirs::home_dir)
+                            .unwrap_or_else(|| PathBuf::from("."));
+                        self.plugin_pick = Some(PluginPick::new(base, open_zip));
+                    }
                 }
                 if do_install {
                     let url = self.plugin_url_input.trim().to_string();
@@ -4608,8 +4640,9 @@ impl App {
                 });
                 ui.label(RichText::new(hint.clone()).small().color(p.dim));
                 ui.separator();
+                let list_h = (ui.available_height() - 96.0).max(140.0);
                 egui::ScrollArea::vertical()
-                    .max_height(300.0)
+                    .max_height(list_h)
                     .show(ui, |ui| {
                         for (i, (path, is_dir)) in entries.iter().enumerate() {
                             let name = path
@@ -6482,7 +6515,7 @@ impl App {
                     .inner_margin(egui::Margin::same(12))
                     .corner_radius(egui::CornerRadius::same(6))
                     .show(ui, |ui| {
-                        ui.set_min_width(360.0);
+                        ui.set_min_width((ui.available_width() - 6.0).max(200.0));
                         ui.label(
                             RichText::new(self.t("当前在线音源", "Current online source"))
                                 .small()
@@ -6539,7 +6572,8 @@ impl App {
                 });
 
                 ui.add_space(12.0);
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.add_space(16.0);
                     if ui.button(self.t("添加文件", "Add files")).clicked() {
                         // Android 上没有可浏览的目录树，交给 SAF 系统选择器
                         #[cfg(target_os = "android")]
@@ -6571,6 +6605,7 @@ impl App {
                         self.reload_media_plugins();
                     }
                 });
+                ui.add_space(130.0);
             });
         });
 
@@ -6890,26 +6925,6 @@ impl App {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.add_space(12.0);
-                    ui.label(
-                        RichText::new(format!(
-                            "{}（{}）",
-                            self.t("喜欢", "Liked"),
-                            self.liked.len()
-                        ))
-                        .strong()
-                        .color(p.accent),
-                    );
-                    ui.label(
-                        RichText::new(self.t(
-                            "搜索结果里的 ☆、歌曲右键「加入喜欢」都会到这里",
-                            "Stars from search and the right-click menu land here",
-                        ))
-                        .small()
-                        .color(p.dim),
-                    );
-                });
                 ui.separator();
 
                 if items.is_empty() {
@@ -6953,6 +6968,7 @@ impl App {
 
                 // 喜欢页同样显示当前插件的主页
                 self.plugin_home_ui(ui, p);
+                ui.add_space(130.0);
             });
 
         if let Some(i) = play {
