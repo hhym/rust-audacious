@@ -1,7 +1,7 @@
-//! IconPark 图标的运行时纹理缓存。
+//! RemixIcon（github.com/hhym/RemixIcon）图标的运行时纹理缓存。
 //!
 //! 图标都是白色单色 PNG（assets/icons 下），绘制时用 tint 染成主题色，
-//! 这样墨水屏（纯黑）和普通主题共用一套素材。素材由 IconPark 的 SVG 渲染而来。
+//! 这样墨水屏（纯黑）和普通主题共用一套素材。素材由 RemixIcon 的 24px line/fill SVG 渲染而来。
 
 use std::collections::HashMap;
 
