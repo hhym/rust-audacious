@@ -150,6 +150,8 @@ pub struct App {
     theme_menu_open: bool,
     /// 主题按钮的位置（菜单贴着它弹出）
     theme_button_rect: Option<egui::Rect>,
+    /// IconPark 图标纹理缓存
+    icons: crate::icons::IconSet,
     plugins: Vec<audcore::plugin::PluginInfo>,
     /// 在线插件（MusicFree 标准）
     media_plugins: Vec<audplugins::OnlinePlugin>,
@@ -349,6 +351,7 @@ impl App {
             mini_applied: !config.mini,
             theme_menu_open: false,
             theme_button_rect: None,
+            icons: crate::icons::IconSet::new(),
             plugins: Vec::new(),
             media_plugins: Vec::new(),
             scan_rx: None,
@@ -2710,8 +2713,8 @@ impl App {
             ui.vertical_centered(|ui| {
                 let hint = if cfg!(target_os = "android") {
                     self.t(
-                        "列表是空的 —— 点上方「＋文件」从手机里选歌",
-                        "Playlist is empty — tap +File to pick songs",
+                        "列表是空的 —— 点左上角第一个「＋」图标，会扫描本机音乐",
+                        "Playlist is empty — tap the first icon to scan local music",
                     )
                 } else {
                     self.t(
@@ -4964,15 +4967,21 @@ impl App {
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.add_space(8.0);
-                            for (zh, en) in [
-                                ("＋文件", "+File"),
-                                ("＋目录", "+Folder"),
-                                ("保存列表", "Save list"),
-                                ("设置", "Settings"),
-                                ("插件", "Plugins"),
-                                ("主题", "Theme"),
+                            // 文字全部换成 IconPark 图标：文件 / 目录 / 保存 / 设置 / 插件 / 主题
+                            for (zh, en, icon) in [
+                                ("＋文件", "+File", "file_add"),
+                                ("＋目录", "+Folder", "folder"),
+                                ("保存列表", "Save list", "save"),
+                                ("设置", "Settings", "setting"),
+                                ("插件", "Plugins", "plugin"),
+                                ("主题", "Theme", "theme"),
                             ] {
-                                if self.mobile_chip(ui, p, self.t(zh, en), true).clicked() {
+                                let side = if self.config.eink { 44.0 } else { 36.0 };
+                                let glyph = if self.config.eink { 28.0 } else { 22.0 };
+                                let resp = self
+                                    .icon_button_chip(ui, p, icon, side, glyph, false)
+                                    .on_hover_text(self.t(zh, en));
+                                if resp.clicked() {
                                     match zh {
                                         "＋文件" => self.pick_files(),
                                         "＋目录" => {
@@ -5000,7 +5009,7 @@ impl App {
                                         _ => {}
                                     }
                                     if zh == "主题" {
-                                        self.theme_button_rect = Some(ui.min_rect());
+                                        self.theme_button_rect = Some(resp.rect);
                                     }
                                 }
                                 ui.add_space(6.0);
@@ -5119,6 +5128,33 @@ impl App {
         resp
     }
 
+    /// 图标方块按钮：只有图标，不再画文字（手机工具栏和导航都用它）。
+    fn icon_button_chip(
+        &mut self,
+        ui: &mut egui::Ui,
+        p: &Palette,
+        name: &'static str,
+        box_side: f32,
+        icon_side: f32,
+        active: bool,
+    ) -> egui::Response {
+        let (rect, resp) = ui.allocate_exact_size(vec2(box_side, box_side), Sense::click());
+        let bg = if active {
+            p.accent_soft
+        } else if resp.hovered() {
+            p.panel_alt
+        } else {
+            Color32::TRANSPARENT
+        };
+        if bg != Color32::TRANSPARENT {
+            ui.painter().rect_filled(rect, CornerRadius::same(8), bg);
+        }
+        let tint = if active { p.accent } else { p.text };
+        let icon_rect = egui::Rect::from_center_size(rect.center(), vec2(icon_side, icon_side));
+        self.icons.paint(ui.ctx(), ui.painter(), name, icon_rect, tint);
+        resp
+    }
+
     /// 手机布局的顶部导航：原来侧栏那几项摊成一条可横向滑动的标签，点按高度 40px。
     fn mobile_nav_bar(&mut self, ctx: &egui::Context, p: &Palette) {
         egui::TopBottomPanel::top("mobile_nav")
@@ -5137,44 +5173,31 @@ impl App {
                                 MainTab::Songs,
                                 MainTab::Lyrics,
                             ] {
-                                let label = match tab {
-                                    MainTab::Home => self.t("首页", "Home"),
-                                    MainTab::Search => self.t("搜索", "Search"),
-                                    MainTab::Liked => self.t("喜欢", "Liked"),
-                                    MainTab::Songs => self.t("歌曲", "Songs"),
-                                    MainTab::Lyrics => self.t("歌词", "Lyrics"),
-                                    MainTab::Playlists => self.t("待播", "Queue"),
-                                    MainTab::Album => self.t("专辑", "Album"),
+                                // 导航也换成图标：房子 / 放大镜 / 收藏盘 / 播单 / 文字
+                                let (icon, label) = match tab {
+                                    MainTab::Home => ("home", self.t("首页", "Home")),
+                                    MainTab::Search => ("search", self.t("搜索", "Search")),
+                                    MainTab::Liked => ("liked", self.t("喜欢", "Liked")),
+                                    MainTab::Songs => ("songs", self.t("歌曲", "Songs")),
+                                    MainTab::Lyrics => ("lyrics", self.t("歌词", "Lyrics")),
+                                    MainTab::Playlists => ("list", self.t("待播", "Queue")),
+                                    MainTab::Album => ("songs", self.t("专辑", "Album")),
                                 };
                                 let selected = self.tab == tab;
-                                let text_w = ui.fonts(|f| {
-                                    f.layout_no_wrap(
-                                        label.to_string(),
-                                        FontId::proportional(14.0),
-                                        p.text,
-                                    )
-                                    .size()
-                                    .x
-                                });
-                                let (rect, resp) = ui.allocate_exact_size(
-                                    vec2(text_w + 26.0, 40.0),
-                                    Sense::click(),
-                                );
-                                let bg = if selected {
-                                    p.accent_soft
-                                } else if resp.hovered() {
-                                    p.panel_alt
-                                } else {
-                                    Color32::TRANSPARENT
-                                };
-                                ui.painter().rect_filled(rect, CornerRadius::same(10), bg);
-                                ui.painter().text(
-                                    rect.center(),
-                                    Align2::CENTER_CENTER,
-                                    label,
-                                    FontId::proportional(14.0),
-                                    if selected { p.accent } else { p.text },
-                                );
+                                let side = if self.config.eink { 52.0 } else { 42.0 };
+                                let glyph = if self.config.eink { 30.0 } else { 24.0 };
+                                let mut resp =
+                                    self.icon_button_chip(ui, p, icon, side, glyph, selected);
+                                // 图标下方留不出文字了，选中态靠描边加强
+                                if selected {
+                                    ui.painter().rect_stroke(
+                                        resp.rect,
+                                        CornerRadius::same(10),
+                                        Stroke::new(if self.config.eink { 1.5_f32 } else { 1.0_f32 }, p.accent),
+                                        egui::StrokeKind::Inside,
+                                    );
+                                }
+                                resp = resp.on_hover_text(label);
                                 if resp.clicked() {
                                     self.tab = tab;
                                 }
@@ -5734,11 +5757,10 @@ impl App {
                     );
                     let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     let busy = matches!(self.search_status, SearchStatus::Busy);
-                    if ui
-                        .add_enabled(!busy, egui::Button::new(self.t("搜索", "Search")))
-                        .clicked()
-                        || enter
-                    {
+                    let go = self
+                        .icon_button_chip(ui, p, "search", 34.0, 20.0, false)
+                        .on_hover_text(self.t("搜索", "Search"));
+                    if (go.clicked() && !busy) || enter {
                         self.tab = MainTab::Search;
                         self.start_search();
                     }
@@ -5746,7 +5768,8 @@ impl App {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(10.0);
                         let mut shuffle = self.playlist.shuffle;
-                        if top_icon_button(ui, p, "随", shuffle)
+                        if self
+                            .icon_button_chip(ui, p, "shuffle", 32.0, 19.0, shuffle)
                             .on_hover_text(self.t("随机播放", "Shuffle"))
                             .clicked()
                         {
@@ -5757,19 +5780,24 @@ impl App {
                             self.config.shuffle = shuffle;
                             let _ = self.config.save();
                         }
-                        if top_icon_button(ui, p, "≡", self.tab == MainTab::Playlists)
+                        if self
+                            .icon_button_chip(ui, p, "list", 32.0, 19.0, self.tab == MainTab::Playlists)
                             .on_hover_text(self.t("待播清单", "Playlists"))
                             .clicked()
                         {
                             self.tab = MainTab::Playlists;
                         }
-                        let src_btn = top_icon_button(
-                            ui,
-                            p,
-                            "音",
-                            self.plugin_picker_open && self.plugin_picker_source == "topsearch",
-                        )
-                        .on_hover_text(self.t("切换音源", "Switch source"));
+                        let src_btn = self
+                            .icon_button_chip(
+                                ui,
+                                p,
+                                "sound",
+                                32.0,
+                                19.0,
+                                self.plugin_picker_open
+                                    && self.plugin_picker_source == "topsearch",
+                            )
+                            .on_hover_text(self.t("切换音源", "Switch source"));
                         top_picker_pos = Some(src_btn.rect.left_bottom() + vec2(0.0, 4.0));
                         if src_btn.clicked() {
                             self.plugin_picker_open = !self.plugin_picker_open;

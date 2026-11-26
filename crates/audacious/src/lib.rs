@@ -12,6 +12,7 @@ pub mod engine;
 pub mod ipc_server;
 pub mod liked;
 pub mod login;
+pub mod icons;
 pub mod theme;
 
 use audcore::Config;
