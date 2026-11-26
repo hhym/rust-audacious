@@ -22,6 +22,10 @@ pub(crate) fn cache_path() -> PathBuf {
     audcore::config::data_dir().join("plugin-cache.json")
 }
 
+/// 加载器（JS 运行时封装）版本。改了插件代码的解释方式就必须 +1，
+/// 否则旧缓存会一直返回上一次的加载错误。
+pub(crate) const LOADER_REV: u32 = 2;
+
 /// 用文件/目录的修改时间和大小做键，文件一改缓存自然失效。
 pub(crate) fn key(path: &Path) -> String {
     let meta = std::fs::metadata(path).ok();
@@ -32,7 +36,7 @@ pub(crate) fn key(path: &Path) -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let size = meta.map(|m| m.len()).unwrap_or(0);
-    format!("{}|{}|{}", path.display(), mtime, size)
+    format!("{}|{}|{}|rev{}", path.display(), mtime, size, LOADER_REV)
 }
 
 pub(crate) fn load_all() -> HashMap<String, Entry> {

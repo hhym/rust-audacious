@@ -78,6 +78,22 @@ impl PluginPick {
     }
 }
 
+/// 目录里有多少个 .zip（批量安装用）。
+fn count_zips(dir: &std::path::Path) -> usize {
+    std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| {
+                    e.path()
+                        .extension()
+                        .map(|x| x.eq_ignore_ascii_case("zip"))
+                        .unwrap_or(false)
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
 impl Browser {
     fn new(dir: PathBuf) -> Self {
         let mut b = Browser {
@@ -4608,6 +4624,7 @@ impl App {
             )
             .to_string()
         };
+        let bulk_label = self.t("安装全部 zip", "Install all zips").to_string();
         let Some(pick) = self.plugin_pick.as_mut() else {
             return;
         };
@@ -4615,6 +4632,7 @@ impl App {
         let mut open = true;
         let mut enter: Option<usize> = None;
         let mut chosen: Option<PathBuf> = None;
+        let mut bulk: Option<PathBuf> = None;
         let mut close = false;
         let dir_text = pick.dir.to_string_lossy().to_string();
         let entries = pick.entries.clone();
@@ -4668,24 +4686,28 @@ impl App {
                         }
                     });
                 ui.separator();
-                ui.horizontal(|ui| {
-                    let can_install = pick
-                        .selected
-                        .and_then(|i| pick.entries.get(i))
-                        .map(|(path, is_dir)| {
-                            if *is_dir {
-                                path.join("plugin.json").is_file()
-                            } else {
-                                true
-                            }
-                        })
+                ui.horizontal_wrapped(|ui| {
+                    let selected_entry = pick.selected.and_then(|i| pick.entries.get(i)).cloned();
+                    let can_install = selected_entry
+                        .as_ref()
+                        .map(|(path, is_dir)| !*is_dir || path.join("plugin.json").is_file())
                         .unwrap_or(false);
                     if ui
                         .add_enabled(can_install, egui::Button::new(install_label.clone()).fill(p.accent))
                         .clicked()
                     {
-                        if let Some((path, _)) = pick.selected.and_then(|i| pick.entries.get(i)) {
-                            chosen = Some(path.clone());
+                        if let Some((path, _)) = selected_entry.clone() {
+                            chosen = Some(path);
+                        }
+                    }
+                    // 当前目录里堆了一堆 .zip 时，一次全装（不用去选目录本身）
+                    let zip_count = count_zips(&pick.dir);
+                    if zip_count > 0 {
+                        if ui
+                            .button(format!("{} ({})", bulk_label, zip_count))
+                            .clicked()
+                        {
+                            bulk = Some(pick.dir.clone());
                         }
                     }
                     if ui.button(close_label.clone()).clicked() {
@@ -4699,6 +4721,38 @@ impl App {
                 pick.dir = path;
                 pick.refresh();
             }
+        }
+
+        if let Some(dir) = bulk {
+            let mut ok = 0usize;
+            let mut fail: Vec<String> = Vec::new();
+            if let Ok(rd) = std::fs::read_dir(&dir) {
+                for entry in rd.flatten() {
+                    let path = entry.path();
+                    if !path.extension().map(|e| e.eq_ignore_ascii_case("zip")).unwrap_or(false) {
+                        continue;
+                    }
+                    match audplugins::install::install_from_path(&path) {
+                        Ok(_) => ok += 1,
+                        Err(err) => fail.push(format!(
+                            "{}: {err}",
+                            path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+                        )),
+                    }
+                }
+            }
+            let text = if fail.is_empty() {
+                format!("已批量安装 {ok} 个插件")
+            } else {
+                format!(
+                    "已安装 {ok} 个，{} 个失败：{}",
+                    fail.len(),
+                    fail.join("；")
+                )
+            };
+            self.plugin_install_msg = Some((fail.is_empty(), text));
+            self.reload_media_plugins();
+            close = true;
         }
 
         if let Some(path) = chosen {

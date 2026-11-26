@@ -652,7 +652,10 @@ fn transform_module(src: &str) -> (String, Vec<(String, String)>) {
 fn eval_module(ctx: &mut Context, code: &str) -> anyhow::Result<JsValue> {
     let (body, exported) = transform_module(code);
     let mut script = String::new();
-    script.push_str("var exports = {};\n");
+    // 两种风格的插件都要能跑：手写 ESM（上面已经 transform 过）和 esbuild 打出来的
+    // CJS（开头 `module.exports = __toCommonJS(...)` 那种），CJS 需要 module / exports。
+    script.push_str("var module = { exports: {} };\n");
+    script.push_str("var exports = module.exports;\n");
     script.push_str(&body);
     script.push_str("\n;(function () { var e = {};\n");
     for (key, name) in exported {
@@ -661,6 +664,22 @@ fn eval_module(ctx: &mut Context, code: &str) -> anyhow::Result<JsValue> {
             serde_json::to_string(&key).unwrap_or_else(|_| "\"\"".to_string())
         ));
     }
+    script.push_str(
+        "if (module.exports && typeof module.exports === 'object') {\n",
+    );
+    script.push_str(
+        "  var __cjsKeys = Object.getOwnPropertyNames(module.exports);\n",
+    );
+    script.push_str(
+        "  for (var __i = 0; __i < __cjsKeys.length; __i++) { var k = __cjsKeys[__i];\n",
+    );
+    script.push_str(
+        "    if (k !== 'default' && module.exports[k] !== undefined) e[k] = module.exports[k]; }\n",
+    );
+    script.push_str(
+        "  if (typeof module.exports.default !== 'undefined') e.default = module.exports.default;\n",
+    );
+    script.push_str("}\n");
     script.push_str("exports = e; return e; })()");
 
     ctx.eval(Source::from_bytes(&script))
@@ -675,6 +694,47 @@ mod tests {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join("plugin.json"), manifest).unwrap();
         std::fs::write(dir.join("index.js"), js).unwrap();
+    }
+
+    #[test]
+    #[ignore]
+    fn scan_tmp_search() {
+        for name in ["05-5nd-music-1.6.2", "03-36dj-music-1.0.0", "16-fanqie-music-1.0.0", "24-i275-0.1.1"] {
+            let dir = std::path::Path::new("/tmp/ghhym_x").join(name);
+            let p = MygoPlugin::load(&dir);
+            match p.search_tracks("周杰伦", 0) {
+                Ok(list) => println!("SEARCH {name} -> {} 条, 首条 {:?}", list.len(), list.first().map(|v| v["title"].clone())),
+                Err(e) => println!("SEARCH {name} -> 失败 {e}"),
+            }
+        }
+    }
+
+    #[test]
+    fn cjs_module_exports_loads() {
+        // esbuild 打出来的 CommonJS 包：结尾 `module.exports = __toCommonJS(...)`
+        let dir = std::env::temp_dir().join("audacious-rs-cjs-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        write_plugin(
+            &dir,
+            r#"{"id":"cjs-demo","name":"CJS 示例","version":"1.0.0","main":"index.js"}"#,
+            r#"
+var index_exports = {};
+var __defProp = Object.defineProperty;
+function search(params) { return { tracks: [{ id: "1", title: params.query }] }; }
+function stream(item) { return { url: "https://example.com/a.mp3" }; }
+__defProp(index_exports, "search", { get: function () { return search; } });
+__defProp(index_exports, "stream", { get: function () { return stream; } });
+module.exports = index_exports;
+"#,
+        );
+        let plugin = super::MygoPlugin::load(&dir);
+        assert!(
+            plugin.info.error.is_none(),
+            "CJS 插件不应加载失败：{:?}",
+            plugin.info.error
+        );
+        assert!(plugin.info.supports("search"));
+        assert!(plugin.info.supports("stream"));
     }
 
     #[test]
