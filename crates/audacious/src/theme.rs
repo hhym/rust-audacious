@@ -114,6 +114,21 @@ pub fn palette_for(theme: audcore::Theme, accent: [u8; 3]) -> Palette {
 pub fn palette(cfg: &audcore::Config) -> Palette {
     let raw = Color32::from_rgb(cfg.accent[0], cfg.accent[1], cfg.accent[2]);
 
+    // 墨水屏：只保留纯黑/白/浅灰，避免彩色反光率低、灰阶糊成一团
+    if cfg.eink {
+        return Palette {
+            bg: Color32::from_rgb(255, 255, 255),
+            panel: Color32::from_rgb(255, 255, 255),
+            panel_alt: Color32::from_rgb(232, 232, 232),
+            field: Color32::from_rgb(255, 255, 255),
+            accent: Color32::from_rgb(0, 0, 0),
+            accent_soft: Color32::from_rgb(214, 214, 214),
+            text: Color32::from_rgb(0, 0, 0),
+            dim: Color32::from_rgb(90, 90, 90),
+            dark: false,
+        };
+    }
+
     match cfg.theme {
         audcore::Theme::Dark => Palette {
             bg: Color32::from_rgb(23, 24, 27),
@@ -320,8 +335,35 @@ pub fn apply_style(ctx: &egui::Context, cfg: &audcore::Config) {
     visuals.widgets.inactive.weak_bg_fill = p.panel_alt;
     visuals.widgets.hovered.bg_fill = shade(p.accent, 0.55);
     visuals.widgets.active.bg_fill = p.accent;
-    style.visuals = visuals;
+    if cfg.eink {
+        // 墨水屏：直角、无悬停变色（避免局部刷新闪一下）、字号整体放大
+        let r = egui::CornerRadius::ZERO;
+        visuals.widgets.noninteractive.corner_radius = r;
+        visuals.widgets.inactive.corner_radius = r;
+        visuals.widgets.hovered.corner_radius = r;
+        visuals.widgets.active.corner_radius = r;
+        visuals.widgets.open.corner_radius = r;
+        visuals.window_corner_radius = r;
+        visuals.menu_corner_radius = r;
+        visuals.widgets.hovered.bg_fill = p.panel_alt;
+        visuals.widgets.hovered.weak_bg_fill = p.panel_alt;
+        visuals.widgets.hovered.bg_stroke = Stroke::new(1.5_f32, Color32::from_rgb(0, 0, 0));
+        visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(120, 120, 120));
+        visuals.widgets.active.bg_stroke = Stroke::new(2.0_f32, Color32::from_rgb(0, 0, 0));
+        style.visuals = visuals;
+        style.spacing.item_spacing = egui::vec2(10.0, 9.0);
+        style.spacing.button_padding = egui::vec2(12.0, 8.0);
+        style.spacing.interact_size.y = 30.0;
+        style.text_styles.insert(TextStyle::Body, FontId::new(16.0, FontFamily::Proportional));
+        style.text_styles.insert(TextStyle::Button, FontId::new(16.5, FontFamily::Proportional));
+        style.text_styles.insert(TextStyle::Small, FontId::new(14.0, FontFamily::Proportional));
+        style.text_styles.insert(TextStyle::Heading, FontId::new(19.0, FontFamily::Proportional));
+        fonts_monospace_hack(&mut style);
+        ctx.set_style(style);
+        return;
+    }
 
+    style.visuals = visuals;
     style.spacing.item_spacing = egui::vec2(8.0, 6.0);
     style.spacing.button_padding = egui::vec2(10.0, 4.0);
     style.text_styles.insert(

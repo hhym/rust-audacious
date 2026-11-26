@@ -133,6 +133,9 @@ pub struct Config {
     /// 用户保存的 EQ 自定义预设（每条 10 段增益）
     #[serde(default)]
     pub eq_custom: Vec<Vec<f32>>,
+    /// 墨水屏模式：纯黑白高对比、加大字号、关动画与频谱
+    #[serde(default)]
+    pub eink: bool,
     /// 经典界面记忆：均衡器 / 歌词 / 列表三扇窗是否展开
     #[serde(default = "default_win_open")]
     pub classic_eq: bool,
@@ -176,6 +179,7 @@ impl Default for Config {
             lyric_align: 0,
             lyric_karaoke: false,
             eq_custom: Vec::new(),
+            eink: false,
             classic_eq: true,
             classic_lyrics: true,
             classic_list: true,

@@ -311,11 +311,13 @@ fn parse_hex_color(s: &str) -> Option<Color32> {
 pub struct Chrome<'a> {
     pub skin: Option<&'a Skin>,
     pub accent: [u8; 3],
+    /// 墨水屏：内建绘制走纯黑白，不用彩色与半透明
+    pub eink: bool,
 }
 
 impl<'a> Chrome<'a> {
-    pub fn new(skin: Option<&'a Skin>, accent: [u8; 3]) -> Self {
-        Chrome { skin, accent }
+    pub fn new(skin: Option<&'a Skin>, accent: [u8; 3], eink: bool) -> Self {
+        Chrome { skin, accent, eink }
     }
 
     pub fn has(&self, sheet: &str) -> bool {
@@ -328,6 +330,16 @@ impl<'a> Chrome<'a> {
 
     /// 内建配色的播放列表色板（没皮肤时用橙色系）
     pub fn pledit(&self) -> Pledit {
+        if self.skin.is_none() && self.eink {
+            // 墨水屏：白字黑底，选中行用中灰，尽量拉开灰阶
+            return Pledit {
+                normal: Color32::WHITE,
+                current: Color32::WHITE,
+                normal_bg: Color32::BLACK,
+                selected_bg: Color32::from_rgb(70, 70, 70),
+                text: Color32::WHITE,
+            };
+        }
         match self.skin {
             Some(s) => s.pledit.clone(),
             None => Pledit {

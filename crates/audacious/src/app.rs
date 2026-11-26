@@ -144,7 +144,7 @@ pub struct App {
     show_about: bool,
     toast: Option<(String, Instant)>,
     port: u16,
-    style_key: (audcore::Theme, [u8; 3]),
+    style_key: (audcore::Theme, [u8; 3], bool),
     mini_applied: bool,
     /// 主题切换菜单是否展开
     theme_menu_open: bool,
@@ -345,7 +345,7 @@ impl App {
             show_about: false,
             toast: None,
             port,
-            style_key: (config.theme, config.accent),
+            style_key: (config.theme, config.accent, config.eink),
             mini_applied: !config.mini,
             theme_menu_open: false,
             theme_button_rect: None,
@@ -465,7 +465,13 @@ impl App {
     /// 折叠态：只剩 14px 标题条（Winamp 的 windowshade）
     fn classic_shade_view(&mut self, ui: &mut egui::Ui) {
         use crate::skin::MAIN_W;
-        let chrome = crate::skin::Chrome::new(self.skin.as_ref(), self.config.accent);
+        let eink = self.config.eink;
+        let accent = if eink {
+            [255u8, 255, 255]
+        } else {
+            self.config.accent
+        };
+        let chrome = crate::skin::Chrome::new(self.skin.as_ref(), accent, eink);
         let scale = (ui.available_width() / MAIN_W).max(0.5);
         let (rect, _) = ui.allocate_exact_size(egui::vec2(MAIN_W * scale, 14.0 * scale), egui::Sense::hover());
         let painter = ui.painter_at(rect);
@@ -518,10 +524,22 @@ impl App {
         } else {
             None
         };
-        let chrome = crate::skin::Chrome::new(self.skin.as_ref(), self.config.accent);
+        let eink = self.config.eink;
+        let accent = if eink {
+            [255u8, 255, 255]
+        } else {
+            self.config.accent
+        };
+        let chrome = crate::skin::Chrome::new(self.skin.as_ref(), accent, eink);
         let pled = chrome.pledit();
         // 没装 .wsz 时靠几何图形撑起界面，这里再补一层文字/图标，避免只有色块看不清
-        let plain = self.skin.is_none();
+        let plain = self.skin.is_none() || eink;
+        // 墨水屏上 0x00FF00 会压成中灰，直接给纯白
+        let green = if eink {
+            egui::Color32::WHITE
+        } else {
+            egui::Color32::from_rgb(0x00, 0xFF, 0x00)
+        };
         let scale = (ui.available_width() / MAIN_W).max(0.5);
         let pos = self.state.position;
         let len = self.state.length;
@@ -670,7 +688,7 @@ impl App {
         }
 
         // 频谱条（main.bmp 的分析器区：24,43 起 76×36），可在设置里关掉
-        if self.config.classic_spectrum {
+        if self.config.classic_spectrum && !eink {
             use egui::Color32;
             let area = place(24.0, 43.0, 76.0, 36.0);
             let bars = 16usize;
@@ -736,18 +754,18 @@ impl App {
         // 时间 88:88（numbers.bmp 每字 9×13）
         let cur = pos.max(0.0) as u64;
         let time = format!("{:02}:{:02}", cur / 60, cur % 60);
-        chrome.digits(&painter, &time, main_rect.min + egui::vec2(48.0, 26.0) * scale, scale, egui::Color32::from_rgb(0x00, 0xFF, 0x00));
+        chrome.digits(&painter, &time, main_rect.min + egui::vec2(48.0, 26.0) * scale, scale, green);
 
         // 曲名跑马灯（text.bmp 5×6 字模，超出裁掉）
         let marq = egui::Rect::from_min_size(main_rect.min + egui::vec2(111.0, 24.0) * scale, egui::vec2(154.0, 6.0) * scale);
         let clipped = painter.with_clip_rect(marq);
-        chrome.text(&clipped, &title, marq.min, scale, marq.max.x, egui::Color32::from_rgb(0x00, 0xFF, 0x00));
+        chrome.text(&clipped, &title, marq.min, scale, marq.max.x, green);
 
         // 格式 / 采样率
         let info = format!("{} {}kHz", if self.state.format.is_empty() { "MP3" } else { &self.state.format }, self.state.sample_rate / 1000);
         chrome.text(&clipped, "", marq.min, scale, marq.max.x, egui::Color32::WHITE);
         let kbps = egui::Rect::from_min_size(main_rect.min + egui::vec2(111.0, 43.0) * scale, egui::vec2(100.0, 6.0) * scale);
-        chrome.text(&painter.with_clip_rect(kbps), &info, kbps.min, scale, kbps.max.x, egui::Color32::from_rgb(0x00, 0xFF, 0x00));
+        chrome.text(&painter.with_clip_rect(kbps), &info, kbps.min, scale, kbps.max.x, green);
 
         // 进度条（posbar.bmp：248×10 背景 + 29×10 滑块）
         let bar = place(16.0, 72.0, 248.0, 10.0);
@@ -1142,7 +1160,7 @@ impl App {
             // 封面缩略图（可选），有封面时歌词区右侧让出 46px
             let mut body_x = 1.0;
             let mut body_w = MAIN_W - 2.0;
-            if self.config.classic_cover {
+            if self.config.classic_cover && !eink {
                 if let Some(tex) = cover_tex.clone() {
                     let side = (ly_h - 18.0).min(46.0);
                     let crect = lp(2.0, 15.0, side, side);
@@ -1576,7 +1594,7 @@ impl App {
             gly(place(108.0, 88.0, 23.0, 18.0), "⏭", icon_size, white);
             gly(place(136.0, 89.0, 22.0, 16.0), "⏏", icon_size, white);
             // 曲名 / 格式行：位图字模那点高度塞系统字体会被裁成条纹，这里重画一遍
-            let green = egui::Color32::from_rgb(0x00, 0xFF, 0x00);
+            let green = green;
             let marq = egui::Rect::from_min_size(
                 main_rect.min + egui::vec2(111.0, 22.0) * scale,
                 egui::vec2(154.0, 10.0) * scale,
@@ -2093,9 +2111,14 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
         }
 
+        // 墨水屏刷新慢，没必要每帧重绘：把重绘间隔拉长
+        if self.config.eink {
+            ctx.request_repaint_after(std::time::Duration::from_millis(900));
+        }
+
         let p = self.pal();
-        if self.style_key != (self.config.theme, self.config.accent) {
-            self.style_key = (self.config.theme, self.config.accent);
+        if self.style_key != (self.config.theme, self.config.accent, self.config.eink) {
+            self.style_key = (self.config.theme, self.config.accent, self.config.eink);
             theme::apply_style(ctx, &self.config);
         }
 
@@ -3454,6 +3477,29 @@ impl App {
                         }
                     }
                 });
+                ui.separator();
+                ui.label(
+                    RichText::new(self.t("显示 · 墨水屏", "E-ink display"))
+                        .strong()
+                        .color(p.accent),
+                );
+                let mut eink = self.config.eink;
+                if ui
+                    .checkbox(&mut eink, self.t("墨水屏模式（纯黑白大字）", "E-ink mode"))
+                    .changed()
+                {
+                    self.config.eink = eink;
+                    changed = true;
+                }
+                ui.label(
+                    RichText::new(self.t(
+                        "纯黑/白高对比、字号加大、直角控件，关闭频谱与封面动效以减少拖影。",
+                        "High contrast black & white, larger text, no animations.",
+                    ))
+                    .small()
+                    .color(p.dim),
+                );
+
                 ui.separator();
                 ui.label(
                     RichText::new(self.t("外观 · 经典皮肤", "Classic skin"))
