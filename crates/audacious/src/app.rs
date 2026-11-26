@@ -2708,13 +2708,18 @@ impl App {
         if entries.is_empty() {
             ui.add_space(40.0);
             ui.vertical_centered(|ui| {
-                ui.label(
-                    RichText::new(self.t(
+                let hint = if cfg!(target_os = "android") {
+                    self.t(
+                        "列表是空的 —— 点上方「＋文件」从手机里选歌",
+                        "Playlist is empty — tap +File to pick songs",
+                    )
+                } else {
+                    self.t(
                         "列表是空的 —— 拖文件进窗口，或点左上角「添加文件」",
                         "Playlist is empty — drop files here or use Add files",
-                    ))
-                    .color(p.dim),
-                );
+                    )
+                };
+                ui.add(egui::Label::new(RichText::new(hint).color(p.dim)).wrap());
             });
             return;
         }
