@@ -392,7 +392,8 @@ impl App {
             skin: None,
             show_playlist: config.classic_list,
             show_lyrics: config.classic_lyrics,
-            show_eq: config.classic_eq,
+            // 手机上不自动弹均衡器窗口，免得挡住主界面
+            show_eq: config.classic_eq && !cfg!(target_os = "android"),
             classic_shade: config.classic_shade,
             pl_select: std::collections::BTreeSet::new(),
             eq_auto: false,
@@ -459,7 +460,9 @@ impl App {
 
     /// 经典皮肤模式是否生效（开关打开且确实装上了皮肤）
     fn classic_active(&self) -> bool {
-        self.config.classic_skin
+        // 墨水屏下不用经典皮肤：像素字模和精灵图在电子纸上又小又糊，
+        // 改用原生控件白底黑字大字版。
+        self.config.classic_skin && !self.config.eink
     }
 
     /// 折叠态：只剩 14px 标题条（Winamp 的 windowshade）
@@ -3506,11 +3509,24 @@ impl App {
                         .strong()
                         .color(p.accent),
                 );
+                if self.config.eink {
+                    ui.label(
+                        RichText::new(self.t(
+                            "墨水屏模式下经典皮肤自动关闭，改用原生白底黑字大字界面。",
+                            "Classic skin is disabled in e-ink mode.",
+                        ))
+                        .small()
+                        .color(p.dim),
+                    );
+                }
                 let mut classic = self.config.classic_skin;
                 if ui
-                    .checkbox(
-                        &mut classic,
-                        self.t("使用 Winamp 经典皮肤界面", "Classic Winamp UI"),
+                    .add_enabled(
+                        !self.config.eink,
+                        egui::Checkbox::new(
+                            &mut classic,
+                            self.t("使用 Winamp 经典皮肤界面", "Classic Winamp UI"),
+                        ),
                     )
                     .changed()
                 {
@@ -3708,9 +3724,11 @@ impl App {
     fn eq_ui(&mut self, ctx: &egui::Context, p: &Palette) {
         let mut open = self.show_eq;
         let mut changed = false;
+        let max_w = (ctx.screen_rect().width() - 24.0).clamp(240.0, 560.0);
         egui::Window::new(self.t("十段均衡器", "Equalizer"))
             .open(&mut open)
-            .default_width(560.0)
+            .default_width(max_w)
+            .min_width(max_w.min(320.0))
             .resizable(false)
             .show(ctx, |ui| {
                 let mut enabled = self.config.eq_enabled;
@@ -3723,36 +3741,45 @@ impl App {
                     changed = true;
                 }
                 ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    for band in 0..audcore::EQ_BANDS.len() {
-                        ui.vertical(|ui| {
-                            ui.label(
-                                RichText::new(format!("{}", audcore::EQ_BANDS[band]))
-                                    .small()
-                                    .color(p.dim),
-                            );
-                            let mut gain = self.config.eq_gains[band];
-                            ui.spacing_mut().slider_width = 110.0;
-                            if ui
-                                .add(
-                                    egui::Slider::new(&mut gain, -24.0..=24.0)
-                                        .vertical()
-                                        .show_value(false),
-                                )
-                                .changed()
-                            {
-                                self.config.eq_gains[band] = gain;
-                                changed = true;
-                            }
-                            ui.label(
-                                RichText::new(format!("{:.0}", self.config.eq_gains[band]))
-                                    .small()
-                                    .monospace()
-                                    .color(p.text),
-                            );
-                        });
-                    }
-                });
+                // 窄屏（手机 / 墨水屏大字）下十段一行放不下，按可用宽度自动折成多行
+                let avail = ui.available_width();
+                let bands = audcore::EQ_BANDS.len();
+                let per_row = ((avail / 52.0).floor() as usize).clamp(2, bands);
+                let col_w = (avail / per_row as f32).max(30.0);
+                let slider_w = (col_w - 12.0).clamp(24.0, 110.0);
+                for chunk_start in (0..bands).step_by(per_row) {
+                    let chunk_end = (chunk_start + per_row).min(bands);
+                    ui.horizontal(|ui| {
+                        for band in chunk_start..chunk_end {
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().slider_width = slider_w;
+                                ui.label(
+                                    RichText::new(format!("{}", audcore::EQ_BANDS[band]))
+                                        .small()
+                                        .color(p.dim),
+                                );
+                                let mut gain = self.config.eq_gains[band];
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut gain, -24.0..=24.0)
+                                            .vertical()
+                                            .show_value(false),
+                                    )
+                                    .changed()
+                                {
+                                    self.config.eq_gains[band] = gain;
+                                    changed = true;
+                                }
+                                ui.label(
+                                    RichText::new(format!("{:.0}", self.config.eq_gains[band]))
+                                        .small()
+                                        .monospace()
+                                        .color(p.text),
+                                );
+                            });
+                        }
+                    });
+                }
                 ui.separator();
                 if ui.button(self.t("全部归零", "Reset flat")).clicked() {
                     self.config.eq_gains = vec![0.0; audcore::EQ_BANDS.len()];
@@ -4761,7 +4788,7 @@ impl App {
     /// 手机布局的命令条：加文件 / 加目录 / 设置 / 插件，替掉桌面版菜单栏和工具栏。
     fn mobile_command_bar(&mut self, ctx: &egui::Context, p: &Palette) {
         egui::TopBottomPanel::top("mobile_cmd")
-            .exact_height(44.0)
+            .exact_height(if self.config.eink { 56.0 } else { 44.0 })
             .frame(egui::Frame::NONE.fill(p.panel_alt))
             .show(ctx, |ui| {
                 egui::ScrollArea::horizontal()
@@ -4814,7 +4841,7 @@ impl App {
     /// 手机播放条：封面 + 歌名 + 三个按钮，进度条铺满底部。
     fn mobile_play_bar(&mut self, ctx: &egui::Context, p: &Palette) {
         egui::TopBottomPanel::bottom("mobile_play")
-            .exact_height(100.0)
+            .exact_height(if self.config.eink { 124.0 } else { 100.0 })
             .frame(egui::Frame::NONE.fill(p.panel_alt))
             .show(ctx, |ui| {
                 ui.add_space(4.0);
@@ -4913,7 +4940,7 @@ impl App {
     /// 手机布局的顶部导航：原来侧栏那几项摊成一条可横向滑动的标签，点按高度 40px。
     fn mobile_nav_bar(&mut self, ctx: &egui::Context, p: &Palette) {
         egui::TopBottomPanel::top("mobile_nav")
-            .exact_height(56.0)
+            .exact_height(if self.config.eink { 72.0 } else { 56.0 })
             .frame(egui::Frame::NONE.fill(p.panel))
             .show(ctx, |ui| {
                 egui::ScrollArea::horizontal()
@@ -6220,13 +6247,16 @@ impl App {
                                 .strong()
                                 .color(p.accent),
                         );
-                        ui.label(
-                            RichText::new(self.t(
-                                "本地播放 + 插件音源，一套界面搜歌、喜欢、攒歌单",
-                                "Local playback with plugin sources: search, like and build playlists in one place",
-                            ))
-                            .small()
-                            .color(p.dim),
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(self.t(
+                                    "本地播放 + 插件音源，一套界面搜歌、喜欢、攒歌单",
+                                    "Local playback with plugin sources: search, like and build playlists in one place",
+                                ))
+                                .small()
+                                .color(p.dim),
+                            )
+                            .wrap(),
                         );
                     });
                 });
