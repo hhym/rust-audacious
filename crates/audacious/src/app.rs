@@ -4689,8 +4689,18 @@ impl App {
     fn pick_files(&mut self) {
         #[cfg(target_os = "android")]
         {
-            if !crate::android::open_audio_picker() {
-                self.import_msg = Some(("打不开系统选择器".to_string(), Instant::now()));
+            // 手机上没有可浏览的目录树，很多精简 ROM 连 DocumentsUI 都没装，
+            // 所以「＋文件」直接扫媒体库，一次把本机音乐全加进来。
+            let paths = crate::android::scan_audio_paths();
+            if paths.is_empty() {
+                self.import_msg = Some((
+                    "没扫到音频：请允许「存储」权限后再点一次".to_string(),
+                    Instant::now(),
+                ));
+            } else {
+                let n = paths.len();
+                self.add_paths(&paths);
+                self.import_msg = Some((format!("已扫描并加入 {n} 首"), Instant::now()));
             }
         }
         #[cfg(not(target_os = "android"))]

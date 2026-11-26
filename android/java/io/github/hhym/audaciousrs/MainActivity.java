@@ -46,6 +46,98 @@ public class MainActivity extends NativeActivity {
     private static final int ACT_PAUSE = 5;
     private static final int ACT_STOP = 6;
 
+    /** 当前 Activity 实例，给 native 线程（egui 渲染线程）回主线程用。 */
+    private static MainActivity sInstance;
+
+    /**
+     * 从任意线程拉起系统文件选择器：切到 UI 线程再 startActivityForResult，
+     * 并补上 ACTION_OPEN_DOCUMENT 必需的 CATEGORY_OPENABLE 与读权限 flag。
+     */
+    public static boolean openPicker(final int requestCode, final String mime, final boolean multiple) {
+        final MainActivity self = sInstance;
+        if (self == null) {
+            android.util.Log.w("AudaciousRS", "openPicker: 没有 Activity 实例");
+            return false;
+        }
+        // 精简 ROM 上可能压根没有 DocumentsUI，先探测一下，好让 native 侧退回扫描。
+        try {
+            Intent probe = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            probe.addCategory(Intent.CATEGORY_OPENABLE);
+            probe.setType(mime);
+            if (probe.resolveActivity(self.getPackageManager()) == null) {
+                android.util.Log.w("AudaciousRS", "本机没有文档选择器，改用媒体库扫描");
+                return false;
+            }
+        } catch (Throwable t) {
+            android.util.Log.w("AudaciousRS", "探测选择器失败: " + t);
+            return false;
+        }
+        self.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                    i.addCategory(Intent.CATEGORY_OPENABLE);
+                    i.setType(mime);
+                    i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                            | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+                    if (multiple) {
+                        i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+                    }
+                    self.startActivityForResult(i, requestCode);
+                } catch (Throwable t) {
+                    android.util.Log.e("AudaciousRS", "openPicker 失败: " + t);
+                }
+            }
+        });
+        return true;
+    }
+
+    /** 这台机器上没有 DocumentsUI（SAF 选择器）时，改用 MediaStore 扫描本地音乐。 */
+    public static String[] scanAudioPaths() {
+        final MainActivity self = sInstance;
+        if (self == null) {
+            return new String[0];
+        }
+        java.util.ArrayList<String> out = new java.util.ArrayList<String>();
+        try {
+            android.database.Cursor c = self.getContentResolver().query(
+                    android.provider.MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+                    new String[]{ android.provider.MediaStore.Audio.Media.DATA },
+                    android.provider.MediaStore.Audio.Media.IS_MUSIC + "!=0",
+                    null, null);
+            if (c != null) {
+                while (c.moveToNext()) {
+                    String p = c.getString(0);
+                    if (p != null && p.length() > 0) {
+                        out.add(p);
+                    }
+                }
+                c.close();
+            }
+        } catch (Throwable t) {
+            android.util.Log.e("AudaciousRS", "扫描媒体库失败: " + t);
+        }
+        return out.toArray(new String[0]);
+    }
+
+    /** 8.x / 9.x 需要读外部存储的运行时权限，没有它 MediaStore 查不到东西。 */
+    public static void ensureStoragePermission() {
+        final MainActivity self = sInstance;
+        if (self == null || Build.VERSION.SDK_INT >= 33) {
+            return;
+        }
+        try {
+            if (self.checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE)
+                    != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                self.requestPermissions(
+                        new String[]{ android.Manifest.permission.READ_EXTERNAL_STORAGE }, 7001);
+            }
+        } catch (Throwable t) {
+            android.util.Log.w("AudaciousRS", "申请存储权限失败: " + t);
+        }
+    }
+
     /** 状态栏 / 导航栏占位（像素），由原生 UI 用来给内容让位。 */
     private static int insetTop = 0;
     private static int insetBottom = 0;
@@ -88,7 +180,9 @@ public class MainActivity extends NativeActivity {
     @Override
     protected void onCreate(android.os.Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        sInstance = this;
         watchInsets();
+        ensureStoragePermission();
         try {
             notifications = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

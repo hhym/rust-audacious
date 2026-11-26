@@ -313,6 +313,42 @@ fn import_dir() -> PathBuf {
     dir
 }
 
+/// 用 MediaStore 扫一遍本地音乐（设备上没有 DocumentsUI 时的主路径）。
+pub fn scan_audio_paths() -> Vec<PathBuf> {
+    let Some(app) = APP.get() else {
+        return Vec::new();
+    };
+    let res = with_activity(app, |env, activity| {
+        let cls = env.get_object_class(activity)?;
+        let arr = env
+            .call_static_method(cls, "scanAudioPaths", "()[Ljava/lang/String;", &[])?
+            .l()?;
+        let arr = unsafe { jni::objects::JObjectArray::from_raw(arr.into_raw()) };
+        let len = env.get_array_length(&arr)? as usize;
+        let mut out = Vec::with_capacity(len);
+        for i in 0..len {
+            let obj = env.get_object_array_element(&arr, i as jint)?;
+            let s: String = env.get_string(&JString::from(obj))?.into();
+            if !s.is_empty() {
+                out.push(PathBuf::from(s));
+            }
+        }
+        Ok(out)
+    });
+    match res {
+        Ok(mut v) => {
+            v.sort();
+            v.dedup();
+            log::info!("MediaStore 扫到 {} 个音频文件", v.len());
+            v
+        }
+        Err(err) => {
+            log::error!("扫描媒体库失败：{err:?}");
+            Vec::new()
+        }
+    }
+}
+
 /// 打开系统文件选择器（多选音频）。没有 Activity 上下文时返回 false。
 pub fn open_audio_picker() -> bool {
     launch_picker(false)
@@ -330,9 +366,21 @@ fn launch_picker(skin: bool) -> bool {
     };
 
     match start_picker(app, skin) {
-        Ok(()) => true,
+        Ok(true) => true,
+        Ok(false) => {
+            log::warn!("这台机器没有文档选择器（DocumentsUI）");
+            false
+        }
         Err(err) => {
-            log::error!("打开 SAF 选择器失败：{err}");
+            log::error!("打开 SAF 选择器失败：{err:?}");
+            if let Ok(vm) = unsafe { JavaVM::from_raw(app.vm_as_ptr() as *mut _) } {
+                if let Ok(mut env) = vm.attach_current_thread() {
+                    if env.exception_check().unwrap_or(false) {
+                        let _ = env.exception_describe();
+                        let _ = env.exception_clear();
+                    }
+                }
+            }
             false
         }
     }
@@ -348,46 +396,34 @@ fn with_activity<T>(
     f: impl FnOnce(&mut Env, &JObject) -> jni::errors::Result<T>,
 ) -> jni::errors::Result<T> {
     let vm = unsafe { JavaVM::from_raw(app.vm_as_ptr() as *mut _) }?;
-    let mut env = vm.get_env()?;
+    // egui 渲染线程不在 VM 里 attach 过，get_env 会返回 JNI_EDETACHED，
+    // 之后每次调用都只会得到「Java exception was thrown」。显式 attach 一次。
+    let mut guard = vm.attach_current_thread()?;
     let activity = unsafe { JObject::from_raw(app.activity_as_ptr() as jni::sys::jobject) };
-    f(&mut env, &activity)
+    f(&mut guard, &activity)
 }
 
-fn start_picker(app: &android_activity::AndroidApp, skin: bool) -> jni::errors::Result<()> {
+fn start_picker(app: &android_activity::AndroidApp, skin: bool) -> jni::errors::Result<bool> {
     with_activity(app, |env, activity| {
-        let intent = env.new_object("android/content/Intent", "()V", &[])?;
-        let action = env.new_string("android.intent.action.OPEN_DOCUMENT")?;
-        env.call_method(
-            &intent,
-            "setAction",
-            "(Ljava/lang/String;)Landroid/content/Intent;",
-            &[JValue::Object(&JObject::from(action))],
-        )?;
-        // 皮肤是 zip 换扩展名，只能按 */* 让它出现在选择器里
+        // 原生线程直接 startActivityForResult 会抛异常（不是 UI 线程），
+        // 统一交给 Java 侧切到主线程再拉起选择器。
         let mime = env.new_string(if skin { "*/*" } else { "audio/*" })?;
-        env.call_method(
-            &intent,
-            "setType",
-            "(Ljava/lang/String;)Landroid/content/Intent;",
-            &[JValue::Object(&JObject::from(mime))],
-        )?;
-        if !skin {
-            // 音频允许多选；皮肤一次一个
-            let extra_multi = env.new_string("android.intent.extra.ALLOW_MULTIPLE")?;
-            env.call_method(
-                &intent,
-                "putExtra",
-                "(Ljava/lang/String;Z)Landroid/content/Intent;",
-                &[JValue::Object(&JObject::from(extra_multi)), JValue::Bool(1)],
-            )?;
-        }
-        env.call_method(
-            activity,
-            "startActivityForResult",
-            "(Landroid/content/Intent;I)V",
-            &[JValue::Object(&intent), JValue::Int(if skin { REQ_PICK_SKIN } else { REQ_PICK_AUDIO })],
-        )?;
-        Ok(())
+        // 用 Activity 实例取类对象，避免 native 线程里 FindClass 落到系统
+        // class loader 上找不到本应用的类。
+        let cls = env.get_object_class(activity)?;
+        let launched = env
+            .call_static_method(
+            cls,
+            "openPicker",
+            "(ILjava/lang/String;Z)Z",
+            &[
+                JValue::Int(if skin { REQ_PICK_SKIN } else { REQ_PICK_AUDIO }),
+                JValue::Object(&JObject::from(mime)),
+                JValue::Bool(if skin { 0 } else { 1 }),
+            ],
+        )?
+        .z()?;
+        Ok(launched)
     })
 }
 
