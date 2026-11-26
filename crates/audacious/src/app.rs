@@ -4684,6 +4684,26 @@ impl App {
         }
     }
 
+    /// 「＋文件」：Android 上没有可浏览的目录树（沙箱 + 存储权限），
+    /// 直接拉起系统 SAF 选择器；桌面仍然用内置浏览器。
+    fn pick_files(&mut self) {
+        #[cfg(target_os = "android")]
+        {
+            if !crate::android::open_audio_picker() {
+                self.import_msg = Some(("打不开系统选择器".to_string(), Instant::now()));
+            }
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            self.browser = Some(Browser::new(
+                self.config
+                    .last_dir
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from(".")),
+            ));
+        }
+    }
+
     fn browser_ui(&mut self, ctx: &egui::Context, p: &Palette) -> Vec<PathBuf> {
         let title = self.t("添加文件", "Add files");
         let label_up = self.t("上级", "Up");
@@ -4944,20 +4964,24 @@ impl App {
                             ] {
                                 if self.mobile_chip(ui, p, self.t(zh, en), true).clicked() {
                                     match zh {
-                                        "＋文件" => {
-                                            self.browser = Some(Browser::new(
-                                                self.config.last_dir.clone().unwrap_or_else(|| {
-                                                    PathBuf::from(".")
-                                                }),
-                                            ))
-                                        }
+                                        "＋文件" => self.pick_files(),
                                         "＋目录" => {
-                                            let dir = self
-                                                .config
-                                                .last_dir
-                                                .clone()
-                                                .unwrap_or_else(|| dirs::home_dir().unwrap_or_default());
-                                            self.add_paths(&[dir]);
+                                            #[cfg(target_os = "android")]
+                                            {
+                                                // 目录树在 Android 沙箱里也读不到，同样走 SAF 多选
+                                                self.pick_files();
+                                            }
+                                            #[cfg(not(target_os = "android"))]
+                                            {
+                                                let dir = self
+                                                    .config
+                                                    .last_dir
+                                                    .clone()
+                                                    .unwrap_or_else(|| {
+                                                        dirs::home_dir().unwrap_or_default()
+                                                    });
+                                                self.add_paths(&[dir]);
+                                            }
                                         }
                                         "保存列表" => self.save_playlist(),
                                         "设置" => self.show_settings = true,
@@ -5321,12 +5345,7 @@ impl App {
                         if resp.hovered() { p.accent } else { p.dim },
                     );
                     if resp.clicked() {
-                        self.browser = Some(Browser::new(
-                            self.config
-                                .last_dir
-                                .clone()
-                                .unwrap_or_else(|| PathBuf::from(".")),
-                        ));
+                        self.pick_files();
                     }
                 });
 
