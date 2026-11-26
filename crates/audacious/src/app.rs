@@ -3436,12 +3436,30 @@ impl App {
 
     fn settings_ui(&mut self, ctx: &egui::Context, p: &Palette) {
         let mut open = self.show_settings;
+        let mut back = false;
         let mut changed = false;
-        egui::Window::new(self.t("设置", "Settings"))
-            .open(&mut open)
-            .default_width(380.0)
-            .resizable(false)
+        let win = placed_window(
+            ctx,
+            &self.config,
+            egui::Window::new(self.t("设置", "Settings"))
+                .open(&mut open)
+                .default_width(380.0)
+                .resizable(false),
+        );
+        win
             .show(ctx, |ui| {
+                if mobile_mode(ctx, &self.config) {
+                    let size = if self.config.eink { 18.0 } else { 15.0 };
+                    if ui
+                        .add(egui::Button::new(
+                            RichText::new(self.t("← 返回", "← Back")).size(size),
+                        ))
+                        .clicked()
+                    {
+                        back = true;
+                    }
+                    ui.add_space(6.0);
+                }
                 ui.add_space(4.0);
                 ui.label(RichText::new(self.t("播放", "Playback")).strong().color(p.accent));
                 ui.horizontal(|ui| {
@@ -3718,6 +3736,9 @@ impl App {
                     changed = true;
                 }
             });
+        if back {
+            open = false;
+        }
         self.show_settings = open;
         if changed {
             self.config.clamp();
@@ -3976,12 +3997,29 @@ impl App {
 
     fn search_ui(&mut self, ctx: &egui::Context, p: &Palette) {
         let mut open = self.show_search;
-        egui::Window::new(self.t("在线搜索", "Online Search"))
-            .open(&mut open)
-            .default_width(700.0)
-            .max_width(700.0)
-            .default_height(420.0)
-            .show(ctx, |ui| {
+        let mut back = false;
+        placed_window(
+            ctx,
+            &self.config,
+            egui::Window::new(self.t("在线搜索", "Online Search"))
+                .open(&mut open)
+                .default_width(700.0)
+                .max_width(700.0)
+                .default_height(420.0),
+        )
+        .show(ctx, |ui| {
+                if mobile_mode(ctx, &self.config) {
+                    let size = if self.config.eink { 18.0 } else { 15.0 };
+                    if ui
+                        .add(egui::Button::new(
+                            RichText::new(self.t("← 返回", "← Back")).size(size),
+                        ))
+                        .clicked()
+                    {
+                        back = true;
+                    }
+                    ui.add_space(6.0);
+                }
                 if self.media_plugins.is_empty() {
                     ui.label(
                         RichText::new(self.t(
@@ -4099,15 +4137,36 @@ impl App {
                             });
                     });
             });
+        if back {
+            open = false;
+        }
         self.show_search = open;
     }
 
     fn plugins_ui(&mut self, ctx: &egui::Context, p: &Palette) {
         let mut open = self.show_plugins;
-        egui::Window::new(self.t("插件", "Plugins"))
-            .open(&mut open)
-            .default_width(520.0)
+        let mut back = false;
+        let win = placed_window(
+            ctx,
+            &self.config,
+            egui::Window::new(self.t("插件", "Plugins"))
+                .open(&mut open)
+                .default_width(520.0),
+        );
+        win
             .show(ctx, |ui| {
+                if mobile_mode(ctx, &self.config) {
+                    let size = if self.config.eink { 18.0 } else { 15.0 };
+                    if ui
+                        .add(egui::Button::new(
+                            RichText::new(self.t("← 返回", "← Back")).size(size),
+                        ))
+                        .clicked()
+                    {
+                        back = true;
+                    }
+                    ui.add_space(6.0);
+                }
                 // 后台下载安装的结果
                 let installed = self.install_rx.as_ref().and_then(|rx| rx.try_recv().ok());
                 if let Some(result) = installed {
@@ -4152,8 +4211,8 @@ impl App {
                     ui.label(RichText::new(title.clone()).strong().color(p.accent));
                     ui.label(RichText::new(desc.clone()).small().color(p.dim));
                     ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        let button_width = 210.0;
+                    ui.horizontal_wrapped(|ui| {
+                        let button_width = if ui.available_width() < 420.0 { 0.0 } else { 210.0 };
                         let width = (ui.available_width() - button_width).max(140.0);
                         ui.add_sized(
                             vec2(width, 26.0),
@@ -4188,7 +4247,7 @@ impl App {
                         );
                     }
                     ui.add_space(2.0);
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         if ui
                             .small_button(self.t("打开插件目录", "Open plugins folder"))
                             .clicked()
@@ -4413,16 +4472,37 @@ impl App {
                     }
                 }
             });
+        if back {
+            open = false;
+        }
         self.show_plugins = open;
     }
 
     fn about_ui(&mut self, ctx: &egui::Context, p: &Palette) {
         let mut open = self.show_about;
-        egui::Window::new(self.t("关于", "About"))
-            .open(&mut open)
-            .default_width(400.0)
-            .resizable(false)
+        let mut back = false;
+        let win = placed_window(
+            ctx,
+            &self.config,
+            egui::Window::new(self.t("关于", "About"))
+                .open(&mut open)
+                .default_width(400.0)
+                .resizable(false),
+        );
+        win
             .show(ctx, |ui| {
+                if mobile_mode(ctx, &self.config) {
+                    let size = if self.config.eink { 18.0 } else { 15.0 };
+                    if ui
+                        .add(egui::Button::new(
+                            RichText::new(self.t("← 返回", "← Back")).size(size),
+                        ))
+                        .clicked()
+                    {
+                        back = true;
+                    }
+                    ui.add_space(6.0);
+                }
                 ui.label(
                     RichText::new("AUDACIOUS · RUST")
                         .size(20.0)
@@ -4461,6 +4541,9 @@ impl App {
                     .color(p.dim),
                 );
             });
+        if back {
+            open = false;
+        }
         self.show_about = open;
     }
 
@@ -4502,11 +4585,15 @@ impl App {
         let entries = pick.entries.clone();
         let selected = pick.selected;
 
-        egui::Window::new(title)
-            .open(&mut open)
-            .default_width(560.0)
-            .default_height(430.0)
-            .show(ctx, |ui| {
+        placed_window(
+            ctx,
+            &self.config,
+            egui::Window::new(title)
+                .open(&mut open)
+                .default_width(560.0)
+                .default_height(430.0),
+        )
+        .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     if ui.button(up_label.clone()).clicked() {
                         if let Some(parent) = pick.dir.parent() {
@@ -4611,11 +4698,15 @@ impl App {
         let mut enter_index: Option<usize> = None;
         let mut add_selected: Option<PathBuf> = None;
 
-        egui::Window::new(title)
-            .open(&mut open)
-            .default_width(560.0)
-            .default_height(420.0)
-            .show(ctx, |ui| {
+        placed_window(
+            ctx,
+            &self.config,
+            egui::Window::new(title)
+                .open(&mut open)
+                .default_width(560.0)
+                .default_height(420.0),
+        )
+        .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     if ui.button(label_up).clicked() {
                         browser.go_up();
@@ -4781,6 +4872,28 @@ fn remote_entry(item: &serde_json::Value, url: &str) -> audcore::Entry {
         album: item["album"].as_str().unwrap_or("在线".into()).to_string(),
         length: item["duration"].as_f64(),
         format: "在线".into(),
+    }
+}
+
+/// 弹出窗口在手机上贴住顶部（让出状态栏）并限制高度，标题条的关闭按钮不会跑到屏幕外。
+fn placed_window<'a>(
+    ctx: &egui::Context,
+    cfg: &audcore::Config,
+    win: egui::Window<'a>,
+) -> egui::Window<'a> {
+    if mobile_mode(ctx, cfg) {
+        let (top, bottom) = system_insets(ctx);
+        let scr = ctx.screen_rect();
+        // 让出状态栏 + 命令条 + 导航条，弹窗从内容区顶部开始
+        let bars = if cfg.eink { 56.0 + 72.0 } else { 44.0 + 56.0 };
+        let y = top + bars + 4.0;
+        let max_h = (scr.height() - y - bottom - 8.0).max(160.0);
+        win.default_pos(egui::pos2(6.0, y))
+            .max_width((scr.width() - 12.0).max(200.0))
+            .max_height(max_h)
+            .vscroll(true)
+    } else {
+        win
     }
 }
 
