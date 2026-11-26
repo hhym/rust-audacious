@@ -4874,10 +4874,15 @@ impl App {
                         } else {
                             self.state.title.clone()
                         };
-                        ui.label(RichText::new(elide(&title, 20)).size(13.5).color(p.text));
+                        let big = if self.config.eink { 1.3 } else { 1.0 };
+                        ui.label(
+                            RichText::new(elide(&title, 20))
+                                .size(13.5 * big)
+                                .color(p.text),
+                        );
                         ui.label(
                             RichText::new(elide(&self.state.artist, 18))
-                                .size(11.0)
+                                .size(11.0 * big)
                                 .color(p.dim),
                         );
                     });
@@ -4888,7 +4893,11 @@ impl App {
                         }
                         let label = if self.state.status == Status::Playing { "⏸" } else { "▶" };
                         if ui
-                            .add(egui::Button::new(RichText::new(label).size(16.0)).min_size(vec2(44.0, 36.0)))
+                            .add(egui::Button::new(
+                                RichText::new(label)
+                                    .size(if self.config.eink { 20.0 } else { 16.0 }),
+                            )
+                            .min_size(vec2(44.0, if self.config.eink { 44.0 } else { 36.0 })))
                             .clicked()
                         {
                             self.shared.send(Cmd::Toggle);
