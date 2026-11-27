@@ -7182,30 +7182,34 @@ impl App {
                             .as_f64()
                             .map(audcore::config::format_time)
                             .unwrap_or_else(|| "--:--".into());
-                        let text = format!(
-                            "{}. {}\n{}  {}",
-                            i + 1,
-                            elide(title, 24),
-                            elide(artist, 16),
-                            length
-                        );
                         let w = ui.available_width();
                         let bg = if i % 2 == 0 { p.panel_alt } else { p.bg };
-                        let clicked = egui::Frame::none()
-                            .fill(bg)
-                            .inner_margin(egui::Margin::symmetric(10, 6))
-                            .show(ui, |ui| {
-                                ui.set_width((w - 24.0).max(80.0));
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(&text).size(14.0).color(p.text),
-                                    )
-                                    .sense(egui::Sense::click()),
-                                )
-                                .clicked()
-                            })
-                            .inner;
-                        if clicked {
+                        // 命中区用 allocate + interact 显式占满整行（原来 Frame+Label 的
+                        // 命中区只有文字，右侧空白点了没反应），文字用 painter 左对齐绘制
+                        let (_, rect) = ui.allocate_space(egui::vec2(w, 56.0));
+                        let resp = ui.interact(
+                            rect,
+                            ui.id().with(("search-row", i)),
+                            egui::Sense::click(),
+                        );
+                        let row_bg = if resp.hovered() { p.accent_soft } else { bg };
+                        ui.painter().rect_filled(rect, 0.0, row_bg);
+                        let pad = rect.left_top() + egui::vec2(10.0, 7.0);
+                        ui.painter().text(
+                            pad,
+                            egui::Align2::LEFT_TOP,
+                            format!("{}. {}", i + 1, elide(title, 24)),
+                            egui::FontId::proportional(14.0),
+                            p.text,
+                        );
+                        ui.painter().text(
+                            pad + egui::vec2(0.0, 23.0),
+                            egui::Align2::LEFT_TOP,
+                            format!("{}  {}", elide(artist, 16), length),
+                            egui::FontId::proportional(12.0),
+                            p.dim,
+                        );
+                        if resp.clicked() {
                             self.resolve_media(item, true);
                         }
                     }
