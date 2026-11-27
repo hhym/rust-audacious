@@ -165,6 +165,9 @@ pub struct Config {
     /// 经典皮肤界面（Winamp 2.x .wsz 风格），Android 上默认开启
     #[serde(default = "default_classic_skin")]
     pub classic_skin: bool,
+    /// 上次选中的在线音源（插件序号），下次启动沿用
+    #[serde(default)]
+    pub plugin_index: usize,
 }
 
 impl Default for Config {
@@ -194,6 +197,7 @@ impl Default for Config {
             classic_spectrum: true,
             classic_cover: true,
             classic_skin: cfg!(target_os = "android"),
+            plugin_index: 0,
         }
     }
 }

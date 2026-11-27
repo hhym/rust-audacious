@@ -275,10 +275,44 @@ public class MainActivity extends NativeActivity {
         }
     }
 
+    /**
+     * 沉浸式全屏：状态栏/导航栏收起，整个屏幕都归应用。
+     * 不这么做的话，横屏时状态栏会盖在最上面 27pt 上，那一条的点击会被 SystemUI 吃掉，
+     * 看起来就是「菜单栏点了没反应」，下半屏也会因为 insets 计算错位点不动。
+     */
+    private void goImmersive() {
+        try {
+            // 窗口级全屏标记：隐藏状态栏，避免它盖在菜单栏上吃掉那一条的点击
+            getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_FULLSCREEN);
+            android.view.View decor = getWindow().getDecorView();
+            decor.setSystemUiVisibility(
+                    android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                            | android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                            | android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                            | android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                            | android.view.View.SYSTEM_UI_FLAG_FULLSCREEN
+                            | android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+        } catch (Throwable t) {
+            android.util.Log.w("AudaciousRS", "设置沉浸式全屏失败: " + t);
+        }
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) {
+            goImmersive();
+        }
+    }
+
     @Override
     protected void onCreate(android.os.Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         sInstance = this;
+        goImmersive();
+        // eframe/winit 在初始化时可能覆写 systemUiVisibility，隔一会儿再补一次
+        new android.os.Handler(android.os.Looper.getMainLooper())
+                .postDelayed(new Runnable() { public void run() { goImmersive(); } }, 800);
         watchInsets();
         ensureStoragePermission();
         try {

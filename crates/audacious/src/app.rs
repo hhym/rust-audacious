@@ -3892,12 +3892,26 @@ impl App {
         self.scan_rx = Some(audplugins::scan_async(dir));
     }
 
+    /// 切换当前在线音源，并记住到配置里。
+    fn set_search_plugin(&mut self, i: usize) {
+        if i >= self.media_plugins.len() {
+            return;
+        }
+        self.search_plugin = i;
+        self.config.plugin_index = i;
+        let _ = self.config.save();
+        let name = self.media_plugins[i].name().to_string();
+        self.toast(format!("音源已切到 {name}"));
+    }
+
     fn poll_media_channels(&mut self) {
         if let Some(rx) = &self.scan_rx {
             match rx.try_recv() {
                 Ok(plugins) => {
                     let count = plugins.len();
                     self.media_plugins = plugins;
+                    // 沿用上次选的音源；插件集合变了就夹到范围内
+                    self.search_plugin = self.config.plugin_index;
                     if self.search_plugin >= self.media_plugins.len() {
                         self.search_plugin = 0;
                     }
@@ -4492,7 +4506,7 @@ impl App {
                     );
                 } else {
                     let plugins = self.media_plugins.clone();
-                    for pl in &plugins {
+                    for (idx, pl) in plugins.iter().enumerate() {
                         ui.horizontal(|ui| {
                             ui.label("●");
                             ui.label(
@@ -4511,6 +4525,18 @@ impl App {
                             }
                             if pl.supports("getLyric") || pl.supports("lyrics") {
                                 ui.label(RichText::new("歌词").small().color(p.dim));
+                            }
+                            // 每行一个切换按钮：点一下就把这个音源设为当前音源
+                            if self.search_plugin == idx {
+                                ui.label(RichText::new(self.t("使用中", "Active")).small().color(p.accent));
+                            } else if ui
+                                .add(egui::Button::new(
+                                    RichText::new(self.t("切换", "Use")).small().color(p.accent),
+                                ))
+                                .on_hover_text(self.t("设为当前音源", "Use this source"))
+                                .clicked()
+                            {
+                                self.set_search_plugin(idx);
                             }
                         });
                         if let Some(err) = pl.error() {
@@ -6604,7 +6630,7 @@ impl App {
             });
 
         if let Some(i) = choice {
-            self.search_plugin = i;
+            self.set_search_plugin(i);
             self.plugin_picker_open = false;
         }
         if page_delta != 0 {
@@ -6626,6 +6652,8 @@ impl App {
 
 
     fn home_tab(&mut self, ui: &mut egui::Ui, p: &Palette) {
+        let mut home_picker_pos: Option<egui::Pos2> = None;
+        let mut home_picker_just_opened = false;
         egui::ScrollArea::vertical()
             .id_salt("home-scroll")
             .auto_shrink([false, false])
@@ -6708,6 +6736,24 @@ impl App {
                             if ui.button(self.t("在线搜索", "Search")).clicked() {
                                 self.tab = MainTab::Search;
                             }
+                            let sw = ui
+                                .add_enabled(
+                                    self.media_plugins.len() > 1,
+                                    egui::Button::new(self.t("切换音源", "Switch source")),
+                                )
+                                .on_hover_text(self.t(
+                                    "换一个在线音源搜歌（也会记住下次启动）",
+                                    "Pick another online source (remembered next launch)",
+                                ));
+                            home_picker_pos = Some(sw.rect.left_bottom() + vec2(0.0, 4.0));
+                            if sw.clicked() {
+                                self.plugin_picker_open = !self.plugin_picker_open;
+                                self.plugin_picker_source = "home";
+                                home_picker_just_opened = self.plugin_picker_open;
+                                if self.plugin_picker_open {
+                                    self.plugin_page = self.search_plugin / Self::PLUGIN_PAGE_SIZE;
+                                }
+                            }
                             if ui.button(self.t("管理插件", "Plugins")).clicked() {
                                 self.show_plugins = true;
                             }
@@ -6765,6 +6811,14 @@ impl App {
         });
 
         });
+        // 音源选择弹层要画在滚动区外面，否则会被裁掉
+        if self.plugin_picker_open && self.plugin_picker_source == "home" {
+            let ctx = ui.ctx().clone();
+            let names: Vec<String> = self.media_plugins.iter().map(|pl| pl.name()).collect();
+            let pos = home_picker_pos.unwrap_or_else(|| egui::pos2(24.0, 220.0));
+            let area_id = egui::Id::new(("main-plugin-picker", "home"));
+            self.plugin_picker_ui(&ctx, pos, &names, p, !home_picker_just_opened, area_id);
+        }
     }
 
     /// 首页下半部分：当前插件的 `home()`（MyGo）或 `getTopLists()`（MusicFree）。

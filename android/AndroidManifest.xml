@@ -28,7 +28,7 @@
             android:exported="true"
             android:launchMode="singleTop"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
-            android:theme="@android:style/Theme.Material.NoActionBar">
+            android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen">
             <meta-data android:name="android.app.lib_name" android:value="audacious_rs" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
