@@ -951,10 +951,16 @@ fn header_registry() -> &'static std::sync::Mutex<HashMap<String, Vec<(String, S
 pub fn fetch_to_cache_with(url: &str, headers: &[(String, String)]) -> anyhow::Result<PathBuf> {
     use std::io::Write;
 
-    let dir = dirs::cache_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join(audcore::APP_NAME)
-        .join("streams");
+    // Android 上 dirs::cache_dir() 拿不到可写目录，退回临时目录会 Permission denied，
+    // 统一改放 App 私有数据目录下的 cache/streams。
+    let dir = if cfg!(target_os = "android") {
+        audcore::config::data_dir().join("cache").join("streams")
+    } else {
+        dirs::cache_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join(audcore::APP_NAME)
+            .join("streams")
+    };
     std::fs::create_dir_all(&dir)?;
 
     let hash = format!("{:x}", {

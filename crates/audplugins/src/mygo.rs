@@ -250,7 +250,8 @@ impl MygoPlugin {
 
     /// 调用任意导出方法，参数是一个对象（和 mygo 的签名一致）。
     pub fn call(&self, method: &str, params: Value) -> anyhow::Result<Value> {
-        self.call_with_budget(method, params, std::time::Duration::from_secs(8))
+        // 真机上 JS 执行 + 多跳网络都慢，8 秒经常不够（搜索实测要 20 秒上下），给 30 秒
+        self.call_with_budget(method, params, std::time::Duration::from_secs(30))
     }
 
     /// 可以指定等待预算的调用：`signIn` 要等用户扫码，给的预算长一些。
@@ -287,7 +288,12 @@ impl MygoPlugin {
             .cloned()
             .unwrap_or_else(|| item.clone());
         let id = track["id"].clone();
-        self.call("stream", json!({ "id": id, "quality": quality, "track": track }))
+        // 取流要走好几跳网络（有时还要跳中转页），8 秒常常不够用，给 30 秒
+        self.call_with_budget(
+            "stream",
+            json!({ "id": id, "quality": quality, "track": track }),
+            std::time::Duration::from_secs(30),
+        )
     }
 
     /// 插件是否支持扫码登录（导出 `loginQr` 与 `loginPoll`）。

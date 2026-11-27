@@ -4215,6 +4215,40 @@ impl App {
                 }
 
                 let items = self.search_results.clone();
+                if ui.available_width() < 560.0 {
+                    // 窄屏（手机/墨水屏）放不下五列网格，「▶」按钮被挤到屏幕外点不到，
+                    // 所以改成整行可点：点一行就直接播放。
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .max_height(320.0)
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing.y = 4.0;
+                            for (i, item) in items.iter().enumerate() {
+                                let title = item["title"].as_str().unwrap_or("未命名");
+                                let artist = item["artist"].as_str().unwrap_or("—");
+                                let length = item["duration"]
+                                    .as_f64()
+                                    .map(audcore::config::format_time)
+                                    .unwrap_or_else(|| "--:--".into());
+                                let text = format!(
+                                    "{}. {}\n{}  {}",
+                                    i + 1,
+                                    elide(title, 24),
+                                    elide(artist, 16),
+                                    length
+                                );
+                                let w = ui.available_width();
+                                let resp = ui.add_sized(
+                                    [w, 52.0],
+                                    egui::Button::new(RichText::new(text).size(14.0)).wrap(),
+                                );
+                                if resp.clicked() {
+                                    self.resolve_media(item, true);
+                                }
+                            }
+                        });
+                    return;
+                }
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .max_height(300.0)
@@ -7086,6 +7120,50 @@ impl App {
     fn search_results_grid(&mut self, ui: &mut egui::Ui, p: &Palette) {
         let items = self.search_results.clone();
         let mut like_request: Option<usize> = None;
+        if ui.available_width() < 560.0 {
+            // 窄屏（手机 / 墨水屏）撑不下六列，「▶」会被挤到屏幕外点不到。
+            // 这里改成整行按钮：点一行就直接播放。
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    for (i, item) in items.iter().enumerate() {
+                        let title = item["title"].as_str().unwrap_or("未命名");
+                        let artist = item["artist"].as_str().unwrap_or("—");
+                        let length = item["duration"]
+                            .as_f64()
+                            .map(audcore::config::format_time)
+                            .unwrap_or_else(|| "--:--".into());
+                        let text = format!(
+                            "{}. {}\n{}  {}",
+                            i + 1,
+                            elide(title, 24),
+                            elide(artist, 16),
+                            length
+                        );
+                        let w = ui.available_width();
+                        let bg = if i % 2 == 0 { p.panel_alt } else { p.bg };
+                        let clicked = egui::Frame::none()
+                            .fill(bg)
+                            .inner_margin(egui::Margin::symmetric(10, 6))
+                            .show(ui, |ui| {
+                                ui.set_width((w - 24.0).max(80.0));
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&text).size(14.0).color(p.text),
+                                    )
+                                    .sense(egui::Sense::click()),
+                                )
+                                .clicked()
+                            })
+                            .inner;
+                        if clicked {
+                            self.resolve_media(item, true);
+                        }
+                    }
+                });
+            return;
+        }
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
