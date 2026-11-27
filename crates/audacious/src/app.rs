@@ -3509,6 +3509,9 @@ impl App {
         );
         win
             .show(ctx, |ui| {
+                // 手机窗口宽度只有 360pt，长说明 / 输入行必须自动折行，
+                // 否则内容横向顶出窗口，右侧按钮和设置项会被裁掉。
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                 if mobile_mode(ctx, &self.config) {
                     let size = if self.config.eink { 18.0 } else { 15.0 };
                     if ui
@@ -4230,6 +4233,9 @@ impl App {
         );
         win
             .show(ctx, |ui| {
+                // 手机窗口宽度只有 360pt，长说明 / 输入行必须自动折行，
+                // 否则内容横向顶出窗口，右侧按钮和设置项会被裁掉。
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                 if mobile_mode(ctx, &self.config) {
                     let size = if self.config.eink { 18.0 } else { 15.0 };
                     if ui
@@ -4632,6 +4638,9 @@ impl App {
         );
         win
             .show(ctx, |ui| {
+                // 手机窗口宽度只有 360pt，长说明 / 输入行必须自动折行，
+                // 否则内容横向顶出窗口，右侧按钮和设置项会被裁掉。
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                 if mobile_mode(ctx, &self.config) {
                     let size = if self.config.eink { 18.0 } else { 15.0 };
                     if ui

@@ -234,6 +234,40 @@ pub extern "system" fn Java_io_github_hhym_audaciousrs_MainActivity_nativeSetIns
     INSET_BOTTOM.store(bottom.max(0) as u32, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// 机型串（厂商 / 品牌 / 型号 / 设备代号，小写合并），用来判断默认界面。
+pub fn device_model() -> String {
+    let Some(app) = APP.get() else { return String::new() };
+    with_activity(app, |env, _activity| {
+        let mut parts: Vec<String> = Vec::new();
+        if let Ok(cls) = env.find_class("android/os/Build") {
+            for field in ["MANUFACTURER", "BRAND", "MODEL", "DEVICE", "PRODUCT"] {
+                if let Ok(v) = env.get_static_field(&cls, field, "Ljava/lang/String;") {
+                    if let Ok(obj) = v.l() {
+                        let jstr = JString::from(obj);
+                        let text = env.get_string(&jstr).map(String::from).ok();
+                        if let Some(text) = text {
+                            parts.push(text);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(parts.join(" ").to_lowercase())
+    })
+    .unwrap_or_default()
+}
+
+/// 是不是墨水屏机器。没有可靠的系统 API，用厂商/型号关键词兜底：
+/// 认不出来就当彩屏，走图标版界面（这才是绝大多数设备）。
+pub fn is_eink_device(model: &str) -> bool {
+    const KEYS: [&str; 12] = [
+        "boox", "onyx", "ireader", "kindle", "kobo", "remarkable", "mudita", "yotaphone",
+        "eink", "e-ink", "hlte", "sc801a",
+    ];
+    let m = model.to_ascii_lowercase();
+    KEYS.iter().any(|k| m.contains(k))
+}
+
 /// 停止播放时把通知收掉。
 pub fn clear_notification() {
     let Some(app) = APP.get() else { return };

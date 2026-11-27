@@ -87,7 +87,9 @@ impl Theme {
 
 /// 新装环境默认值：手机端直接进经典界面，桌面端保持现代布局
 fn default_eink() -> bool {
-    cfg!(target_os = "android")
+    // 不再按「是 Android 就开」来猜：彩屏手机上也开墨水屏黑白主题会很难看。
+    // 首次启动由 android_main 按机型判断后写进配置（见 device_profile_set）。
+    false
 }
 
 fn default_win_order() -> [u8; 3] {
@@ -99,7 +101,8 @@ fn default_win_open() -> bool {
 }
 
 fn default_classic_skin() -> bool {
-    cfg!(target_os = "android")
+    // 同上：经典 Winamp 皮肤改成「识别到墨水屏设备才默认开」
+    false
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -168,6 +171,9 @@ pub struct Config {
     /// 上次选中的在线音源（插件序号），下次启动沿用
     #[serde(default)]
     pub plugin_index: usize,
+    /// 是否已经按机型定过默认界面（墨水屏→经典+eink，彩屏→图标版）
+    #[serde(default)]
+    pub device_profile_set: bool,
 }
 
 impl Default for Config {
@@ -198,6 +204,7 @@ impl Default for Config {
             classic_cover: true,
             classic_skin: cfg!(target_os = "android"),
             plugin_index: 0,
+            device_profile_set: false,
         }
     }
 }

@@ -101,7 +101,20 @@ pub extern "C" fn android_main(app: android_activity::AndroidApp) {
     android::install(&app);
     android::start_importer();
 
-    let config = Config::load();
+    let mut config = Config::load();
+    // 首次启动按机型定默认界面：墨水屏走经典 Winamp + eink 黑白，彩屏走图标版。
+    // 之后用户自己在设置里改，不再覆盖。
+    if !config.device_profile_set {
+        let model = android::device_model();
+        let eink = android::is_eink_device(&model);
+        config.eink = eink;
+        // 界面统一走图标版（经典 Winamp 皮肤保留为可选项），
+        // 墨水屏只把主题切成黑白高对比。
+        config.classic_skin = false;
+        config.device_profile_set = true;
+        let _ = config.save();
+        log::info!("按机型 [{model}] 设定默认界面：eink={eink}");
+    }
     let shared = Shared::spawn(config.clone());
     // 音频焦点回调要往引擎发命令
     android::install_shared(shared.clone());
