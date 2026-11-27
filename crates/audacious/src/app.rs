@@ -211,6 +211,9 @@ pub struct App {
     /// Android SAF 导入的临时提示（进度 / 结果），几秒后自动消失
     #[cfg(target_os = "android")]
     import_msg: Option<(String, Instant)>,
+    /// 软键盘当前是否抬起（跟随文本框焦点变化，避免每帧都调 Java）
+    #[cfg(target_os = "android")]
+    ime_on: bool,
     /// 后台下载安装
     install_rx: Option<Receiver<Result<audplugins::install::InstalledPlugin, String>>>,
     /// MyGo 插件设置项的编辑缓冲：`插件id/key` → 当前文本
@@ -402,6 +405,8 @@ impl App {
             plugin_install_msg: None,
             #[cfg(target_os = "android")]
             import_msg: None,
+            #[cfg(target_os = "android")]
+            ime_on: false,
             install_rx: None,
             mygo_setting_inputs: std::collections::HashMap::new(),
             search_query: String::new(),
@@ -2140,6 +2145,42 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         dbg_viewport(ctx);
         self.sync();
+        // 软键盘：把 Java 隐形 EditText 收到的字塞进 egui 事件队列，
+        // 并按「有没有文本框拿到焦点」抬起 / 收起键盘。
+        #[cfg(target_os = "android")]
+        {
+            let events = crate::android::take_ime_events();
+            if !events.is_empty() {
+                ctx.input_mut(|i| {
+                    for ev in events {
+                        use crate::android::ImeEvent;
+                        match ev {
+                            ImeEvent::Text(s) => i.events.push(egui::Event::Text(s)),
+                            ImeEvent::Backspace => i.events.push(egui::Event::Key {
+                                key: egui::Key::Backspace,
+                                physical_key: None,
+                                pressed: true,
+                                repeat: false,
+                                modifiers: egui::Modifiers::NONE,
+                            }),
+                            ImeEvent::Enter => i.events.push(egui::Event::Key {
+                                key: egui::Key::Enter,
+                                physical_key: None,
+                                pressed: true,
+                                repeat: false,
+                                modifiers: egui::Modifiers::NONE,
+                            }),
+                        }
+                    }
+                });
+                ctx.request_repaint();
+            }
+            let wants_text = ctx.wants_keyboard_input();
+            if wants_text != self.ime_on {
+                self.ime_on = wants_text;
+                crate::android::ime_show(wants_text);
+            }
+        }
         self.refresh_cover_accent();
         self.poll_media_channels();
         self.poll_home();

@@ -309,6 +309,7 @@ public class MainActivity extends NativeActivity {
     protected void onCreate(android.os.Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         sInstance = this;
+        setupImeBridge();
         goImmersive();
         // eframe/winit 在初始化时可能覆写 systemUiVisibility，隔一会儿再补一次
         new android.os.Handler(android.os.Looper.getMainLooper())
@@ -524,6 +525,185 @@ public class MainActivity extends NativeActivity {
         }
     }
 
+    // ------------------------------------------------------------------ 软键盘
+    // NativeActivity 的 SurfaceView 没有 InputConnection：系统软键盘能弹出来，
+    // 但敲的字没有接收方，表现就是「搜索框输入不了」。这里挂一个 1px 隐形
+    // EditText 接住输入，再把内容差异转成 nativeImeText / nativeImeKey 交给 Rust。
+    private android.widget.EditText imeBox;
+    private String imeLast = "";
+
+    private void setupImeBridge() {
+        try {
+            imeBox = new android.widget.EditText(this);
+            imeBox.setBackgroundColor(0x00000000);
+            imeBox.setTextColor(0x00000000);
+            imeBox.setAlpha(0f);
+            imeBox.setCursorVisible(false);
+            imeBox.setSingleLine(true);
+            // 可见密码变体：输入法不走拼音组合态，英文/数字按下即提交，
+            // 搜索框逐字回显；中文仍可切到中文输入法后选字提交
+            imeBox.setInputType(android.text.InputType.TYPE_CLASS_TEXT
+                    | android.text.InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+                    | android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+            imeBox.setImeOptions(android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI
+                    | android.view.inputmethod.EditorInfo.IME_FLAG_NO_FULLSCREEN);
+            getWindow().addContentView(imeBox, new android.view.ViewGroup.LayoutParams(1, 1));
+            imeBox.setVisibility(android.view.View.INVISIBLE);
+            android.util.Log.i("AudaciousRS", "软键盘桥接已挂上");
+            imeBox.addTextChangedListener(new android.text.TextWatcher() {
+                @Override
+                public void beforeTextChanged(CharSequence s, int start, int count, int after) {
+                }
+
+                @Override
+                public void onTextChanged(CharSequence s, int start, int before, int count) {
+                }
+
+                @Override
+                public void afterTextChanged(android.text.Editable s) {
+                    forwardIme(s);
+                }
+            });
+            imeBox.setOnEditorActionListener(new android.widget.TextView.OnEditorActionListener() {
+                @Override
+                public boolean onEditorAction(android.widget.TextView v, int actionId, android.view.KeyEvent event) {
+                    if (event == null) {
+                        nativeImeKey(13);
+                        return true;
+                    }
+                    return false;
+                }
+            });
+        } catch (Throwable t) {
+            android.util.Log.w("AudaciousRS", "初始化软键盘桥接失败: " + t);
+        }
+    }
+
+    /** 由原生层调用：egui 的文本框拿到/失去焦点时抬起或收起软键盘。 */
+    public void imeShow(final boolean show) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (imeBox == null) {
+                    return;
+                }
+                try {
+                    android.view.inputmethod.InputMethodManager imm =
+                            (android.view.inputmethod.InputMethodManager)
+                                    getSystemService(INPUT_METHOD_SERVICE);
+                    if (show) {
+                        imeBox.setVisibility(android.view.View.VISIBLE);
+                        imeBox.setFocusable(true);
+                        imeBox.setFocusableInTouchMode(true);
+                        imeBox.requestFocus();
+                        // 表面视图有时把焦点抢回去，隔一会儿确认一次并重试
+                        imeBox.postDelayed(new Runnable() {
+                            @Override
+                            public void run() {
+                                if (imeBox == null || imeBox.isFocused()) {
+                                    return;
+                                }
+                                imeBox.requestFocus();
+                                android.view.inputmethod.InputMethodManager m2 =
+                                        (android.view.inputmethod.InputMethodManager)
+                                                getSystemService(INPUT_METHOD_SERVICE);
+                                if (m2 != null) {
+                                    m2.showSoftInput(imeBox,
+                                            android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT);
+                                }
+                            }
+                        }, 400);
+                        if (imm != null) {
+                            imm.showSoftInput(imeBox,
+                                    android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT);
+                        }
+                    } else {
+                        imeLast = "";
+                        imeBox.setText("");
+                        imeBox.clearFocus();
+                        if (imm != null) {
+                            imm.hideSoftInputFromWindow(imeBox.getWindowToken(), 0);
+                        }
+                        imeBox.setVisibility(android.view.View.INVISIBLE);
+                    }
+                } catch (Throwable t) {
+                    android.util.Log.w("AudaciousRS", "切换软键盘失败: " + t);
+                }
+            }
+        });
+    }
+
+    /** 只把「和上一次已提交内容相比多/少了哪些」转给原生层。 */
+    private void forwardIme(android.text.Editable s) {
+        if (imeBox == null) {
+            return;
+        }
+        String now = s.toString();
+        if (now.equals(imeLast)) {
+            return;
+        }
+        String prev = imeLast;
+        int head = 0;
+        int maxHead = Math.min(prev.length(), now.length());
+        while (head < maxHead && prev.charAt(head) == now.charAt(head)) {
+            head++;
+        }
+        int tail = 0;
+        int maxTail = Math.min(prev.length() - head, now.length() - head);
+        while (tail < maxTail
+                && prev.charAt(prev.length() - 1 - tail) == now.charAt(now.length() - 1 - tail)) {
+            tail++;
+        }
+        int dels = prev.length() - head - tail;
+        imeLast = now;
+        for (int i = 0; i < dels; i++) {
+            nativeImeKey(8);
+        }
+        String inserted = now.substring(head, now.length() - tail);
+        if (!inserted.isEmpty()) {
+            nativeImeText(inserted);
+        }
+    }
+
+    /**
+     * 软键盘的退格/回车走的是按键事件，按键被派发到窗口最外层（NativeView）落不到
+     * 隐形 EditText 上，所以在这里统一拦一下，转成和输入法提交同样的增量。
+     */
+    @Override
+    public boolean dispatchKeyEvent(android.view.KeyEvent event) {
+        try {
+            boolean imeUp = imeBox != null
+                    && imeBox.getVisibility() == android.view.View.VISIBLE
+                    && imeBox.isFocused();
+            if (imeUp && event != null) {
+                int code = event.getKeyCode();
+                boolean isDel = code == android.view.KeyEvent.KEYCODE_DEL;
+                boolean isEnter = code == android.view.KeyEvent.KEYCODE_ENTER
+                        || code == android.view.KeyEvent.KEYCODE_NUMPAD_ENTER;
+                if (event.getAction() == android.view.KeyEvent.ACTION_DOWN) {
+                    if (isDel) {
+                        android.text.Editable e = imeBox.getText();
+                        if (e != null && e.length() > 0) {
+                            e.delete(e.length() - 1, e.length());
+                        }
+                        return true;
+                    }
+                    if (isEnter) {
+                        nativeImeKey(13);
+                        return true;
+                    }
+                } else if (event.getAction() == android.view.KeyEvent.ACTION_UP) {
+                    if (isDel || isEnter) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            android.util.Log.w("AudaciousRS", "拦截按键失败: " + t);
+        }
+        return super.dispatchKeyEvent(event);
+    }
+
     private static native void nativeOnActivityResult(int requestCode, int resultCode, Intent data);
 
     private static native void nativeOnAudioFocusChange(int focusChange);
@@ -537,6 +717,11 @@ public class MainActivity extends NativeActivity {
     /** 状态栏/导航栏内边距上报（像素）。 */
     private static native void nativeSetInsets(int top, int bottom);
 
+    /** 软键盘敲进来的文字。 */
+    private static native void nativeImeText(String text);
+
+    /** 软键盘的特殊键：8 退格 / 13 回车。 */
+    private static native void nativeImeKey(int code);
     /** 插件选择结果（zip 缓存路径或插件目录）回传。 */
     private static native void nativePluginReady(String path);
 }

@@ -234,6 +234,77 @@ pub extern "system" fn Java_io_github_hhym_audaciousrs_MainActivity_nativeSetIns
     INSET_BOTTOM.store(bottom.max(0) as u32, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// 软键盘事件：Java 用隐形 EditText 接住 IME 输入，再经由这里交给 egui。
+pub enum ImeEvent {
+    Text(String),
+    Backspace,
+    Enter,
+}
+
+static IME_EVENTS: OnceLock<Mutex<Vec<ImeEvent>>> = OnceLock::new();
+
+fn ime_queue() -> &'static Mutex<Vec<ImeEvent>> {
+    IME_EVENTS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// 取走这一帧攒下的软键盘事件。
+pub fn take_ime_events() -> Vec<ImeEvent> {
+    ime_queue()
+        .lock()
+        .map(|mut q| std::mem::take(&mut *q))
+        .unwrap_or_default()
+}
+
+/// 抬起 / 收起软键盘（egui 的文本框拿到焦点时抬）。
+pub fn ime_show(show: bool) {
+    let Some(app) = APP.get() else { return };
+    let _ = with_activity(app, |env, activity| {
+        env.call_method(
+            activity,
+            "imeShow",
+            "(Z)V",
+            &[JValue::Bool(if show { 1 } else { 0 })],
+        )?;
+        Ok(())
+    });
+}
+
+/// Java 侧 `nativeImeText`：一段（可能含多字的）文本。
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "system" fn Java_io_github_hhym_audaciousrs_MainActivity_nativeImeText(
+    mut env: Env,
+    _class: JClass,
+    text: JString,
+) {
+    let Ok(raw) = env.get_string(&text) else { return };
+    let s = String::from(raw);
+    if s.is_empty() {
+        return;
+    }
+    if let Ok(mut q) = ime_queue().lock() {
+        q.push(ImeEvent::Text(s));
+    }
+}
+
+/// Java 侧 `nativeImeKey`：8 退格，13 回车。
+#[no_mangle]
+#[allow(non_snake_case)]
+pub extern "system" fn Java_io_github_hhym_audaciousrs_MainActivity_nativeImeKey(
+    _env: Env,
+    _class: JClass,
+    code: jint,
+) {
+    let ev = if code == 13 {
+        ImeEvent::Enter
+    } else {
+        ImeEvent::Backspace
+    };
+    if let Ok(mut q) = ime_queue().lock() {
+        q.push(ev);
+    }
+}
+
 /// 机型串（厂商 / 品牌 / 型号 / 设备代号，小写合并），用来判断默认界面。
 pub fn device_model() -> String {
     let Some(app) = APP.get() else { return String::new() };
