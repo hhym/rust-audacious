@@ -269,6 +269,21 @@ pub fn ime_show(show: bool) {
     });
 }
 
+/// 切换软键盘输入模式：true = 英文直输（可见密码型，逐字回显），
+/// false = 普通型（输入法可走拼音中文选字）。
+pub fn ime_set_english(english: bool) {
+    let Some(app) = APP.get() else { return };
+    let _ = with_activity(app, |env, activity| {
+        env.call_method(
+            activity,
+            "imeSetEnglish",
+            "(Z)V",
+            &[JValue::Bool(if english { 1 } else { 0 })],
+        )?;
+        Ok(())
+    });
+}
+
 /// Java 侧 `nativeImeText`：一段（可能含多字的）文本。
 #[no_mangle]
 #[allow(non_snake_case)]

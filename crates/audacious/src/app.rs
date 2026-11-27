@@ -214,6 +214,12 @@ pub struct App {
     /// 软键盘当前是否抬起（跟随文本框焦点变化，避免每帧都调 Java）
     #[cfg(target_os = "android")]
     ime_on: bool,
+    /// 软键盘模式：true 英文直输（逐字回显）/ false 普通型（可拼音中文）
+    #[cfg(target_os = "android")]
+    ime_english: bool,
+    /// 切换输入模式后，下一帧把焦点抢回顶部搜索框
+    #[cfg(target_os = "android")]
+    ime_refocus: bool,
     /// 后台下载安装
     install_rx: Option<Receiver<Result<audplugins::install::InstalledPlugin, String>>>,
     /// MyGo 插件设置项的编辑缓冲：`插件id/key` → 当前文本
@@ -407,6 +413,10 @@ impl App {
             import_msg: None,
             #[cfg(target_os = "android")]
             ime_on: false,
+            #[cfg(target_os = "android")]
+            ime_english: true,
+            #[cfg(target_os = "android")]
+            ime_refocus: false,
             install_rx: None,
             mygo_setting_inputs: std::collections::HashMap::new(),
             search_query: String::new(),
@@ -6049,14 +6059,26 @@ impl App {
                 ui.horizontal_centered(|ui| {
                     ui.add_space(12.0);
                     let hint = self.t("歌名 / 歌手", "Song / artist");
+                    let edit_id = egui::Id::new("top_search_edit");
+                    #[cfg(target_os = "android")]
+                    if self.ime_refocus {
+                        self.ime_refocus = false;
+                        ui.memory_mut(|m| m.request_focus(edit_id));
+                    }
+                    #[cfg(target_os = "android")]
+                    let reserved = 350.0;
+                    #[cfg(not(target_os = "android"))]
+                    let reserved = 220.0;
                     let edit = ui.add_sized(
-                        vec2((ui.available_width() - 220.0).max(180.0), 30.0),
-                        egui::TextEdit::singleline(&mut self.search_query).hint_text(hint),
+                        vec2((ui.available_width() - reserved).max(150.0), 30.0),
+                        egui::TextEdit::singleline(&mut self.search_query)
+                            .hint_text(hint)
+                            .id(edit_id),
                     );
                     let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     let busy = matches!(self.search_status, SearchStatus::Busy);
                     let go = self
-                        .icon_button_chip(ui, p, "search", 34.0, 20.0, false)
+                        .icon_button_chip(ui, p, "search", 30.0, 18.0, false)
                         .on_hover_text(self.t("搜索", "Search"));
                     if (go.clicked() && !busy) || enter {
                         self.tab = MainTab::Search;
@@ -6065,9 +6087,35 @@ impl App {
                     // 右侧三个小方按钮：音源 / 待播清单 / 随机
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(10.0);
+                        // 安卓软键盘中/英切换：英文直输逐字回显，中文走拼音选字
+                        // 放在最右，避免挤掉搜索图标
+                        #[cfg(target_os = "android")]
+                        {
+                            let label = if self.ime_english { "EN" } else { "中" };
+                            // 用精确尺寸手绘，避免 Button 内边距把这一行挤爆
+                            let (rect, mut resp) =
+                                ui.allocate_exact_size(vec2(34.0, 28.0), egui::Sense::click());
+                            ui.painter().rect_filled(rect, CornerRadius::same(8), p.panel_alt);
+                            ui.painter().text(
+                                rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                label,
+                                egui::FontId::proportional(13.0),
+                                p.text,
+                            );
+                            resp = resp.on_hover_text(
+                                self.t("切换中文 / 英文输入", "Toggle CJK / ASCII input"),
+                            );
+                            let btn = resp;
+                            if btn.clicked() {
+                                self.ime_english = !self.ime_english;
+                                crate::android::ime_set_english(self.ime_english);
+                                self.ime_refocus = true;
+                            }
+                        }
                         let mut shuffle = self.playlist.shuffle;
                         if self
-                            .icon_button_chip(ui, p, "shuffle", 32.0, 19.0, shuffle)
+                            .icon_button_chip(ui, p, "shuffle", 28.0, 17.0, shuffle)
                             .on_hover_text(self.t("随机播放", "Shuffle"))
                             .clicked()
                         {
@@ -6079,7 +6127,7 @@ impl App {
                             let _ = self.config.save();
                         }
                         if self
-                            .icon_button_chip(ui, p, "list", 32.0, 19.0, self.tab == MainTab::Playlists)
+                            .icon_button_chip(ui, p, "list", 28.0, 17.0, self.tab == MainTab::Playlists)
                             .on_hover_text(self.t("待播清单", "Playlists"))
                             .clicked()
                         {
@@ -6090,8 +6138,8 @@ impl App {
                                 ui,
                                 p,
                                 "sound",
-                                32.0,
-                                19.0,
+                                28.0,
+                                17.0,
                                 self.plugin_picker_open
                                     && self.plugin_picker_source == "topsearch",
                             )

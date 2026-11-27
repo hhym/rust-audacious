@@ -531,6 +531,13 @@ public class MainActivity extends NativeActivity {
     // EditText 接住输入，再把内容差异转成 nativeImeText / nativeImeKey 交给 Rust。
     private android.widget.EditText imeBox;
     private String imeLast = "";
+    private boolean imeEnglish = true;
+
+    private int imeInputType(boolean english) {
+        return android.text.InputType.TYPE_CLASS_TEXT
+                | android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                | (english ? android.text.InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD : 0);
+    }
 
     private void setupImeBridge() {
         try {
@@ -542,9 +549,7 @@ public class MainActivity extends NativeActivity {
             imeBox.setSingleLine(true);
             // 可见密码变体：输入法不走拼音组合态，英文/数字按下即提交，
             // 搜索框逐字回显；中文仍可切到中文输入法后选字提交
-            imeBox.setInputType(android.text.InputType.TYPE_CLASS_TEXT
-                    | android.text.InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
-                    | android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+            imeBox.setInputType(imeInputType(imeEnglish));
             imeBox.setImeOptions(android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI
                     | android.view.inputmethod.EditorInfo.IME_FLAG_NO_FULLSCREEN);
             getWindow().addContentView(imeBox, new android.view.ViewGroup.LayoutParams(1, 1));
@@ -628,6 +633,56 @@ public class MainActivity extends NativeActivity {
                     }
                 } catch (Throwable t) {
                     android.util.Log.w("AudaciousRS", "切换软键盘失败: " + t);
+                }
+            }
+        });
+    }
+
+    /** 由原生层调用：切换英文直输 / 中文（拼音选用）两种软键盘模式。 */
+    public void imeSetEnglish(final boolean english) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (imeBox == null) {
+                    return;
+                }
+                try {
+                    boolean up = imeBox.getVisibility() == android.view.View.VISIBLE
+                            && imeBox.isFocused();
+                    imeEnglish = english;
+                    imeLast = "";
+                    imeBox.setInputType(imeInputType(english));
+                    imeBox.setText("");
+                    if (up) {
+                        final android.view.inputmethod.InputMethodManager imm =
+                                (android.view.inputmethod.InputMethodManager)
+                                        getSystemService(INPUT_METHOD_SERVICE);
+                        if (imm != null) {
+                            // 让输入法按新的 inputType 重建连接
+                            imm.restartInput(imeBox);
+                        }
+                        // 有的输入法 restartInput 后会把键盘收回去，补一次重新抬起
+                        imeBox.postDelayed(new Runnable() {
+                            @Override
+                            public void run() {
+                                if (imeBox == null) {
+                                    return;
+                                }
+                                if (!imeBox.isFocused()) {
+                                    imeBox.requestFocus();
+                                }
+                                android.view.inputmethod.InputMethodManager m2 =
+                                        (android.view.inputmethod.InputMethodManager)
+                                                getSystemService(INPUT_METHOD_SERVICE);
+                                if (m2 != null) {
+                                    m2.showSoftInput(imeBox,
+                                            android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT);
+                                }
+                            }
+                        }, 300);
+                    }
+                } catch (Throwable t) {
+                    android.util.Log.w("AudaciousRS", "切换输入模式失败: " + t);
                 }
             }
         });
