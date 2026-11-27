@@ -2138,6 +2138,7 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        dbg_viewport(ctx);
         self.sync();
         self.refresh_cover_accent();
         self.poll_media_channels();
@@ -5058,6 +5059,35 @@ fn remote_entry(item: &serde_json::Value, url: &str) -> audcore::Entry {
     }
 }
 
+/// 只在「视口尺寸 / 缩放 / 指针位置」变化时打一条日志，用来核对手机上的输入坐标。
+fn dbg_viewport(ctx: &egui::Context) {
+    use std::sync::{Mutex, OnceLock};
+    static LAST: OnceLock<Mutex<(u32, u32, u32, u32, u32)>> = OnceLock::new();
+    let scr = ctx.screen_rect();
+    let ppp = ctx.pixels_per_point();
+    let pos = ctx.input(|i| i.pointer.latest_pos()).unwrap_or(egui::pos2(-1.0, -1.0));
+    let now = (
+        scr.width() as u32,
+        scr.height() as u32,
+        (ppp * 100.0) as u32,
+        (pos.x * 10.0) as i32 as u32,
+        (pos.y * 10.0) as i32 as u32,
+    );
+    if std::env::var_os("AUD_DEBUG").is_none() {
+        return;
+    }
+    let m = LAST.get_or_init(|| Mutex::new((0, 0, 0, 0, 0)));
+    if let Ok(mut last) = m.lock() {
+        if *last != now {
+            *last = now;
+            log::info!(
+                "视口 {}x{} ppp={:.2} 指针=({:.1},{:.1})",
+                scr.width(), scr.height(), ppp, pos.x, pos.y
+            );
+        }
+    }
+}
+
 /// 弹出窗口在手机上贴住顶部（让出状态栏）并限制高度，标题条的关闭按钮不会跑到屏幕外。
 fn placed_window<'a>(
     ctx: &egui::Context,
@@ -5071,6 +5101,9 @@ fn placed_window<'a>(
         let bars = if cfg.eink { 56.0 + 72.0 } else { 44.0 + 56.0 };
         let y = top + bars + 4.0;
         let max_h = (scr.height() - y - bottom - 8.0).max(160.0);
+        if std::env::var_os("AUD_DEBUG").is_some() {
+            log::info!("插件窗布局 scr={:?} top={top} bottom={bottom} y={y} max_h={max_h}", scr.size());
+        }
         win.default_pos(egui::pos2(6.0, y))
             .max_width((scr.width() - 12.0).max(200.0))
             .max_height(max_h)
