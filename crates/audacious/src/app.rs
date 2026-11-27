@@ -79,6 +79,27 @@ impl PluginPick {
 }
 
 /// 目录里有多少个 .zip（批量安装用）。
+/// 递归（最多 depth 层子目录）收集目录下的 zip，手机上用来一把装满整个下载目录。
+fn collect_zips(dir: &std::path::Path, depth: usize, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if depth > 0 {
+                collect_zips(&path, depth - 1, out);
+            }
+            continue;
+        }
+        if path
+            .extension()
+            .map(|x| x.eq_ignore_ascii_case("zip"))
+            .unwrap_or(false)
+        {
+            out.push(path);
+        }
+    }
+}
+
 fn count_zips(dir: &std::path::Path) -> usize {
     std::fs::read_dir(dir)
         .map(|rd| {
@@ -4243,6 +4264,16 @@ impl App {
                 let mut open_folder = false;
                 let mut open_dir = false;
                 let mut rescan = false;
+                let mut bulk_dl = false;
+                // 手机上一把装完：扫 Download（含一层子目录）里的所有插件 zip
+                #[cfg(target_os = "android")]
+                let (dl_dir, dl_zips, dl_label) = {
+                    let dl = crate::android::storage_root();
+                    let mut zips = Vec::new();
+                    collect_zips(&dl, 1, &mut zips);
+                    let label = format!("装下载目录全部 zip ({})", zips.len());
+                    (dl, zips, label)
+                };
                 let message = self.plugin_install_msg.clone();
 
                 egui::Frame::group(ui.style()).show(ui, |ui| {
@@ -4296,6 +4327,14 @@ impl App {
                         if ui.small_button(self.t("重新扫描", "Rescan")).clicked() {
                             rescan = true;
                         }
+                        #[cfg(target_os = "android")]
+                        {
+                            if !dl_zips.is_empty()
+                                && ui.small_button(dl_label.clone()).clicked()
+                            {
+                                bulk_dl = true;
+                            }
+                        }
                         if self.install_rx.is_some() {
                             ui.spinner();
                             ui.label(
@@ -4314,6 +4353,30 @@ impl App {
                 }
                 if rescan {
                     self.reload_media_plugins();
+                }
+                #[cfg(target_os = "android")]
+                if bulk_dl {
+                    let mut ok = 0usize;
+                    let mut fail: Vec<String> = Vec::new();
+                    for path in dl_zips.iter() {
+                        match audplugins::install::install_from_path(path) {
+                            Ok(_) => ok += 1,
+                            Err(err) => fail.push(format!(
+                                "{}: {err}",
+                                path.file_name()
+                                    .map(|n| n.to_string_lossy().to_string())
+                                    .unwrap_or_default()
+                            )),
+                        }
+                    }
+                    let text = if fail.is_empty() {
+                        format!("已从下载目录安装 {ok} 个插件")
+                    } else {
+                        format!("已安装 {ok} 个，{} 个失败：{}", fail.len(), fail.join("；"))
+                    };
+                    self.plugin_install_msg = Some((fail.is_empty(), text));
+                    self.reload_media_plugins();
+                    let _ = &dl_dir;
                 }
                 if open_zip || open_folder {
                     #[cfg(target_os = "android")]
@@ -5022,10 +5085,15 @@ fn system_insets(ctx: &egui::Context) -> (f32, f32) {
     #[cfg(target_os = "android")]
     {
         let ppp = ctx.pixels_per_point();
-        (
-            crate::android::inset_top_pt(ppp),
-            crate::android::inset_bottom_pt(ppp),
-        )
+        let h = ctx.screen_rect().height();
+        // 有些 ROM（手势导航隐藏导航栏时）会把 bottom inset 报成接近整块屏幕，
+        // 弹窗会被挤成一条缝，这里按比例夹一下。
+        let top = crate::android::inset_top_pt(ppp).clamp(0.0, h * 0.12);
+        let bottom = crate::android::inset_bottom_pt(ppp).clamp(0.0, h * 0.25);
+        if std::env::var("AUD_DEBUG_INSETS").is_ok() {
+            log::info!("insets top={top} bottom={bottom} screen_h={h}");
+        }
+        (top, bottom)
     }
     #[cfg(not(target_os = "android"))]
     {

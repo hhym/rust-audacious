@@ -126,7 +126,7 @@ public class MainActivity extends NativeActivity {
                         i.addCategory(Intent.CATEGORY_OPENABLE);
                         i.setType("application/zip");
                         i.putExtra(Intent.EXTRA_MIME_TYPES,
-                                new String[]{ "application/zip", "application/x-zip-compressed", "*/*" });
+                                new String[]{ "application/zip", "application/x-zip-compressed" });
                     } else {
                         i = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
                     }
@@ -262,6 +262,8 @@ public class MainActivity extends NativeActivity {
                     if (top != insetTop || bottom != insetBottom) {
                         insetTop = top;
                         insetBottom = bottom;
+                        android.util.Log.i("AudaciousRS", "insets top=" + top + " bottom=" + bottom
+                                + " h=" + v.getHeight() + " w=" + v.getWidth());
                         nativeSetInsets(top, bottom);
                     }
                     return insets;
